@@ -1,0 +1,2 @@
+--js-runtimes deno
+--remote-components ejs:github
