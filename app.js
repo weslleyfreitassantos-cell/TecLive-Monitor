@@ -4,20 +4,18 @@ const cors = require('cors');
 const liveRoute = require('./routes/live');
 const monitorRoute = require('./routes/monitor');
 const autoRoute = require('./routes/auto');
-const neonewsRoute = require('./routes/neonews'); // <-- Importar
+const neonewsRoute = require('./routes/neonews');
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// Rotas
 app.use('/live', liveRoute);
 app.use('/monitor', monitorRoute);
 app.use('/auto', autoRoute);
-app.use('/neonews', neonewsRoute); // <-- Usar a rota
+app.use('/neonews', neonewsRoute);
 
-// Iniciar servidor
 app.listen(3001, () => {
     console.log('API ONLINE NA PORTA 3001');
     console.log('📡 Sistema de monitoramento de lives ativo');
