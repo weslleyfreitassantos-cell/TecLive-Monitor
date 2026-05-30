@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>YouTube Live</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: black; }
+        video { width: 100%; height: 100vh; object-fit: contain; }
+    </style>
+</head>
+<body>
+    <video id="player" controls autoplay muted playsinline></video>
+
+    <script>
+        (function() {
+            const params = new URLSearchParams(window.location.search);
+            const liveId = params.get('live') || 'dGiMBVU3j8s';
+            const apiUrl = `http://${window.location.hostname}:3001/neonews/play?url=https://www.youtube.com/watch?v=${liveId}`;
+            
+            const player = document.getElementById('player');
+            player.src = apiUrl;
+            player.load();
+            
+            // Força o play múltiplas vezes
+            const tryPlay = () => {
+                player.play().catch(e => console.log('Autoplay bloqueado:', e));
+            };
+            
+            player.addEventListener('loadedmetadata', tryPlay);
+            setTimeout(tryPlay, 1000);
+            setTimeout(tryPlay, 3000);
+            
+            // Tenta ativar o som após interação
+            player.addEventListener('click', () => {
+                player.muted = false;
+                player.play();
+            });
+        })();
+    </script>
+</body>
+</html>
