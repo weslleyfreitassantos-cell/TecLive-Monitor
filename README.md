@@ -1,25 +1,27 @@
 # YouTube Live Monitor API
 
-API para extrair e monitorar links M3U8 de lives do YouTube em tempo real.
+API para monitorar e extrair links M3U8 de lives do YouTube em tempo real. Ideal para integração com NEOnews Player e outros sistemas de Digital Signage.
 
-## Requisitos
+ Funcionalidades
 
-- Node.js 18+
-- Firefox (para autenticação)
+-  **Extrai link M3U8** de qualquer live do YouTube
+-  **Monitora mudanças** em tempo real (links expiram a cada 5-10 segundos)
+-  **Endpoint fixo** para NEOnews (nunca precisa reconfigurar)
+-  **Cache inteligente** de 30 minutos
+-  **Múltiplas lives** simultâneas
+-  **Rate limiting** e validação de URL
+-  **Logs estruturados** com Winston
+-  **Autenticação OAuth2** (não precisa de cookies manuais)
 
-## Instalação
+##  Pré-requisitos
 
+- Node.js 18+ (https://nodejs.org)
+- npm ou yarn
+- Conta Google (para autenticação)
+
+## 📦 Instalação
+
+```bash
 git clone https://github.com/weslleyfreitassantos-cell/youtube-live-monitor.git
 cd youtube-live-monitor
 npm install
-
-## Como usar
-
-node app.js
-
-## Endpoints
-
-- GET /live?url=... - Extrai link M3U8
-- POST /monitor/start - Inicia monitoramento
-- GET /neonews/play?url=... - Link para NEOnews
-- GET /health - Status da API
