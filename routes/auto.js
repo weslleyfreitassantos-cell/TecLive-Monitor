@@ -20,9 +20,10 @@ router.get('/start', async (req, res) => {
         console.log('📡 Extraindo link M3U8...');
         const initialM3U8 = await getM3U8(youtubeUrl);
         
-        // 2. Iniciar monitoramento automático
-        console.log('🔍 Iniciando monitoramento...');
-        liveMonitor.startMonitoring(youtubeUrl, 5000);
+        // 2. Iniciar monitoramento automático com intervalo de 15 segundos (padrão)
+        const CHECK_INTERVAL = 15000; // 15 segundos (em vez de 5)
+        console.log(`🔍 Iniciando monitoramento com intervalo de ${CHECK_INTERVAL/1000} segundos...`);
+        liveMonitor.startMonitoring(youtubeUrl, CHECK_INTERVAL);
         
         // 3. Configurar para enviar atualizações em tempo real
         res.setHeader('Content-Type', 'text/plain');
@@ -32,7 +33,7 @@ router.get('/start', async (req, res) => {
         res.write(`✅ SISTEMA INICIADO COM SUCESSO!\n`);
         res.write(`📺 Live: ${youtubeUrl}\n`);
         res.write(`🎬 Link M3U8 inicial:\n${initialM3U8}\n\n`);
-        res.write(`🔄 Monitorando mudanças... (verificando a cada 5 segundos)\n`);
+        res.write(`🔄 Monitorando mudanças... (verificando a cada ${CHECK_INTERVAL/1000} segundos)\n`);
         res.write(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`);
         
         // 4. Função para enviar atualizações
@@ -51,7 +52,7 @@ router.get('/start', async (req, res) => {
             }
         };
         
-        // Verificar a cada 3 segundos e enviar atualizações
+        // Verificar a cada 3 segundos e enviar atualizações (só notifica)
         const intervalId = setInterval(checkAndNotify, 3000);
         
         // Quando o cliente fechar a conexão, para o monitoramento

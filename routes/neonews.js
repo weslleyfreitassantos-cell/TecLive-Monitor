@@ -10,7 +10,8 @@ async function getCurrentM3U8(url) {
     
     if (!status.monitoring) {
         console.log(`🚀 Iniciando monitoramento automático para: ${url}`);
-        liveMonitor.startMonitoring(url, 5000);
+        // 🔥 MUDANÇA AQUI: 5000 → 15000 (15 segundos)
+        liveMonitor.startMonitoring(url, 15000);
         
         let tentativas = 0;
         while (!liveMonitor.getLiveStatus(url).currentM3U8 && tentativas < 10) {

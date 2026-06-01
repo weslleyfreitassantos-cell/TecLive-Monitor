@@ -18,6 +18,13 @@ app.use('/monitor', monitorRoute);
 app.use('/auto', autoRoute);
 app.use('/neonews', neonewsRoute);
 
+// Iniciar monitoramento automático
+try {
+    require('./auto-start');
+} catch (error) {
+    console.error('Erro ao iniciar auto-start:', error.message);
+}
+
 app.listen(3001, () => {
     console.log('API ONLINE NA PORTA 3001');
     console.log('📡 Sistema de monitoramento de lives ativo');
