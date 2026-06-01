@@ -10,8 +10,8 @@ async function getCurrentM3U8(url) {
     
     if (!status.monitoring) {
         console.log(`🚀 Iniciando monitoramento automático para: ${url}`);
-        // 🔥 MUDANÇA AQUI: 5000 → 15000 (15 segundos)
-        liveMonitor.startMonitoring(url, 15000);
+        // 🔥 ALTERADO PARA 30 SEGUNDOS
+        liveMonitor.startMonitoring(url, 30000);
         
         let tentativas = 0;
         while (!liveMonitor.getLiveStatus(url).currentM3U8 && tentativas < 10) {
@@ -60,13 +60,15 @@ router.get('/live.m3u8', async (req, res) => {
         return res.status(400).send('URL da live é obrigatória');
     }
     
+    // 🔥 ATUALIZA O LAST ACCESS (timeout)
+    liveMonitor.updateLastAccess(url);
+    
     const m3u8Url = await getCurrentM3U8(url);
     
     if (!m3u8Url) {
         return res.status(503).send('Link M3U8 ainda não disponível');
     }
     
-    // Redireciona (funciona no VLC e navegador)
     res.redirect(m3u8Url);
 });
 
@@ -78,6 +80,9 @@ router.get('/neonews.m3u8', async (req, res) => {
         return res.status(400).send('URL da live é obrigatória');
     }
     
+    // 🔥 ATUALIZA O LAST ACCESS (timeout)
+    liveMonitor.updateLastAccess(url);
+    
     const m3u8Url = await getCurrentM3U8(url);
     
     if (!m3u8Url) {
@@ -85,10 +90,7 @@ router.get('/neonews.m3u8', async (req, res) => {
     }
     
     try {
-        // Baixa o conteúdo do arquivo M3U8
         const m3u8Content = await downloadM3U8(m3u8Url);
-        
-        // Retorna o conteúdo diretamente
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.send(m3u8Content);
     } catch (error) {
@@ -104,6 +106,9 @@ router.get('/play', async (req, res) => {
     if (!url) {
         return res.status(400).send('URL da live é obrigatória');
     }
+    
+    // 🔥 ATUALIZA O LAST ACCESS (timeout)
+    liveMonitor.updateLastAccess(url);
     
     const m3u8Url = await getCurrentM3U8(url);
     
