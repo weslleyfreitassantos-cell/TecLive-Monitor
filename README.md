@@ -1,27 +1,54 @@
-# YouTube Live Monitor API
 
-API para monitorar e extrair links M3U8 de lives do YouTube em tempo real. Ideal para integração com NEOnews Player e outros sistemas de Digital Signage.
+Estrutura do Projeto
 
- Funcionalidades
+youtube-live-monitor-v2/
+├── public/                 # Dashboards (HTML/CSS/JS)
+├── routes/                 # API endpoints
+├── services/               # Lógica de negócio
+├── database/               # SQLite schema
+├── cookies/                # Cookie técnico
+├── logs/                   # Logs do sistema
+├── backups/                # Backups do banco
+├── .env                    # Configurações
+├── ecosystem.config.js     # PM2 config
+└── app.js                  # Servidor principal
 
--  **Extrai link M3U8** de qualquer live do YouTube
--  **Monitora mudanças** em tempo real (links expiram a cada 5-10 segundos)
--  **Endpoint fixo** para NEOnews (nunca precisa reconfigurar)
--  **Cache inteligente** de 30 minutos
--  **Múltiplas lives** simultâneas
--  **Rate limiting** e validação de URL
--  **Logs estruturados** com Winston
--  **Autenticação OAuth2** (não precisa de cookies manuais)
+🔒 Segurança
+Cookie técnico único (não por cliente)
 
-##  Pré-requisitos
+Senha admin configurável via .env
 
-- Node.js 18+ (https://nodejs.org)
-- npm ou yarn
-- Conta Google (para autenticação)
+Rate limiting para endpoints públicos
 
-## 📦 Instalação
+Validação de cookie no upload (teste real com yt-dlp)
 
-```bash
-git clone https://github.com/weslleyfreitassantos-cell/youtube-live-monitor.git
-cd youtube-live-monitor
-npm install
+📈 Performance
+Métrica	Valor
+Requisições ao YouTube	1 por live
+Memória RAM	~50-100 MB
+Escala	Ilimitada
+
+📊 Monitoramento
+Status	Cor	Significado	Ação
+HEALTHY	🟢	Cookie funcionando	Nada
+WARNING	🟡	1-2 falhas	Monitorar
+CRITICAL	🔴	3+ falhas	Trocar cookie
+
+**Para o Cliente:**
+- Adicione qualquer live do YouTube com apenas a URL
+- Receba um link permanente para usar no NEOnews
+- Copie o link em um clique
+- Visualize thumbnails e títulos das lives
+
+**Para o Administrador:**
+- Monitoramento automático do cookie técnico (testes a cada 30min)
+- Dashboard admin com status do sistema, CPU, RAM e lives ativas
+- Renovação de cookie por upload (sem reiniciar a API)
+- Alertas por Email, Discord e Telegram
+- Estatísticas de clientes por live
+
+**Tecnicamente:**
+- Arquitetura compartilhada (1 monitor por live, não por cliente)
+- SQLite para persistência e histórico de eventos
+- Rate limiting para proteção contra abusos
+- PM2 Ready para produção
