@@ -1,19 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const liveMonitor = require('../services/liveMonitor');
-const { getM3U8 } = require('../services/youtube');
 const https = require('https');
 const http = require('http');
 
-// Helper function para obter o link atual (AGORA COM SUPORTE A USER)
-async function getCurrentM3U8(url, userEmail = null) {
+// Helper function para obter o link atual
+async function getCurrentM3U8(url) {
     let status = liveMonitor.getLiveStatus(url);
     
     if (!status.monitoring) {
         console.log(`🚀 Iniciando monitoramento automático para: ${url}`);
-        console.log(`👤 Usuário: ${userEmail || 'modo local'}`);
-        
-        // 🔥 Inicia monitoramento com intervalo de 30 segundos
+        // 🔥 ALTERADO PARA 30 SEGUNDOS
         liveMonitor.startMonitoring(url, 30000);
         
         let tentativas = 0;
@@ -57,14 +54,16 @@ function downloadM3U8(m3u8Url) {
 
 // Endpoint para VLC, navegador e players comuns (com redirecionamento)
 router.get('/live.m3u8', async (req, res) => {
-    const { url, user } = req.query;
+    const { url } = req.query;
     
     if (!url) {
         return res.status(400).send('URL da live é obrigatória');
     }
     
+    // 🔥 ATUALIZA O LAST ACCESS (timeout)
     liveMonitor.updateLastAccess(url);
-    const m3u8Url = await getCurrentM3U8(url, user);
+    
+    const m3u8Url = await getCurrentM3U8(url);
     
     if (!m3u8Url) {
         return res.status(503).send('Link M3U8 ainda não disponível');
@@ -75,14 +74,16 @@ router.get('/live.m3u8', async (req, res) => {
 
 // Endpoint ESPECÍFICO para NEOnews (retorna o CONTEÚDO do M3U8)
 router.get('/neonews.m3u8', async (req, res) => {
-    const { url, user } = req.query;
+    const { url } = req.query;
     
     if (!url) {
         return res.status(400).send('URL da live é obrigatória');
     }
     
+    // 🔥 ATUALIZA O LAST ACCESS (timeout)
     liveMonitor.updateLastAccess(url);
-    const m3u8Url = await getCurrentM3U8(url, user);
+    
+    const m3u8Url = await getCurrentM3U8(url);
     
     if (!m3u8Url) {
         return res.status(503).send('Link M3U8 ainda não disponível');
@@ -100,14 +101,16 @@ router.get('/neonews.m3u8', async (req, res) => {
 
 // Endpoint original /play (mantido para compatibilidade)
 router.get('/play', async (req, res) => {
-    const { url, user } = req.query;
+    const { url } = req.query;
     
     if (!url) {
         return res.status(400).send('URL da live é obrigatória');
     }
     
+    // 🔥 ATUALIZA O LAST ACCESS (timeout)
     liveMonitor.updateLastAccess(url);
-    const m3u8Url = await getCurrentM3U8(url, user);
+    
+    const m3u8Url = await getCurrentM3U8(url);
     
     if (!m3u8Url) {
         return res.status(503).send('Link M3U8 ainda não disponível');

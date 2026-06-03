@@ -1,5 +1,6 @@
 const EventEmitter = require('events');
 const { getM3U8 } = require('./youtube');
+const logger = require('../utils/logger');
 
 class LiveMonitorService extends EventEmitter {
     constructor() {
@@ -11,27 +12,30 @@ class LiveMonitorService extends EventEmitter {
         this.timeoutChecker = setInterval(() => this.checkTimeouts(), 5 * 60 * 1000);
     }
 
-    // 🔥 ALTERADO: valor padrão de 5000 (5s) para 30000 (30s)
+    // 🔥 MONITORAMENTO COMPARTILHADO (não depende mais de userEmail)
     startMonitoring(url, checkInterval = 30000) {
         if (this.activeLives.has(url)) {
             console.log(`📡 Live já está sendo monitorada: ${url}`);
             return;
         }
 
-        console.log(`🎬 Iniciando monitoramento da live: ${url}`);
+        console.log(`🎬 Iniciando monitoramento compartilhado da live: ${url}`);
         console.log(`⏱️  Verificando a cada ${checkInterval / 1000} segundos`);
         
         const liveData = {
             currentM3U8: null,
             lastCheck: null,
-            lastAccess: Date.now(), // 🔥 Última vez que foi acessada
+            lastAccess: Date.now(),
             interval: null,
             changes: [],
             startTime: Date.now(),
+            subscribers: 1  // 🔥 Contador de assinantes (clientes usando esta live)
         };
 
         const checkLive = async () => {
             try {
+                console.log(`🔍 Verificando live compartilhada: ${url.substring(0, 60)}...`);
+                // 🔥 NÃO PASSA userEmail - usa cookie técnico padrão
                 const newM3U8 = await getM3U8(url);
                 const oldM3U8 = liveData.currentM3U8;
                 
@@ -55,16 +59,42 @@ class LiveMonitorService extends EventEmitter {
                 
             } catch (error) {
                 console.error(`❌ Erro ao verificar live ${url}:`, error.message);
+                logger.error(`Erro no monitoramento de ${url}: ${error.message}`);
             }
         };
 
         const intervalId = setInterval(checkLive, checkInterval);
         liveData.interval = intervalId;
         
+        // Executar primeira verificação imediatamente
         checkLive();
         this.activeLives.set(url, liveData);
         
         return liveData;
+    }
+
+    // 🔥 Incrementar contador de assinantes (quando um novo cliente adiciona a live)
+    incrementSubscribers(url) {
+        const liveData = this.activeLives.get(url);
+        if (liveData) {
+            liveData.subscribers++;
+            console.log(`📈 Live ${url.substring(0, 50)}... agora tem ${liveData.subscribers} assinantes`);
+        }
+    }
+
+    // 🔥 Decrementar contador de assinantes (quando um cliente remove a live)
+    decrementSubscribers(url) {
+        const liveData = this.activeLives.get(url);
+        if (liveData) {
+            liveData.subscribers--;
+            console.log(`📉 Live ${url.substring(0, 50)}... agora tem ${liveData.subscribers} assinantes`);
+            
+            // Se não tiver mais assinantes, para o monitoramento
+            if (liveData.subscribers <= 0) {
+                console.log(`⏰ Live sem assinantes, parando monitoramento: ${url.substring(0, 50)}...`);
+                this.stopMonitoring(url);
+            }
+        }
     }
 
     // 🔥 Atualiza o último acesso (chamado quando o NEOnews consulta)
@@ -116,9 +146,10 @@ class LiveMonitorService extends EventEmitter {
             monitoring: true,
             currentM3U8: liveData.currentM3U8,
             lastCheck: liveData.lastCheck,
-            lastAccess: liveData.lastAccess, // 🔥 Mostra último acesso
+            lastAccess: liveData.lastAccess,
             changesCount: liveData.changes.length,
             uptime: Date.now() - liveData.startTime,
+            subscribers: liveData.subscribers
         };
     }
 
@@ -132,9 +163,15 @@ class LiveMonitorService extends EventEmitter {
                 lastAccess: data.lastAccess,
                 uptime: Date.now() - data.startTime,
                 idleMinutes: Math.floor((Date.now() - data.lastAccess) / 60000),
+                subscribers: data.subscribers
             });
         }
         return lives;
+    }
+    
+    // 🔥 Verificar se uma live está sendo monitorada
+    isMonitoring(url) {
+        return this.activeLives.has(url);
     }
 }
 

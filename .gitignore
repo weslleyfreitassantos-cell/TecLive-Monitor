@@ -1,6 +1,50 @@
-﻿node_modules/
-cache/
+﻿# Dependências
+node_modules/
+
+# Banco de dados
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Cookies e arquivos sensíveis
+cookies/
+user-cookies/
 cookies.txt
-*.log
-.DS_Store
+
+# Arquivos de ambiente
 .env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+pm2-*.log
+
+# Cache
+cache/
+*.cache
+
+# Backups
+backups/
+
+# Arquivos temporários
+*.tmp
+_temp*
+temp.sql
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Arquivos de build
+dist/
+build/
+
+# PM2
+.pm2/

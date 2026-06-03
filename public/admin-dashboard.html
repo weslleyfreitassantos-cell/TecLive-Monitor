@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0f172a;
+            color: #fff;
+            padding: 20px;
+        }
+        
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        
+        h1 { font-size: 24px; }
+        
+        .refresh-btn {
+            background: #334155;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        
+        .refresh-btn:hover { background: #475569; }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            padding: 20px;
+            border-radius: 16px;
+            border-left: 4px solid #6366f1;
+        }
+        
+        .stat-value { font-size: 32px; font-weight: bold; margin: 8px 0; }
+        .stat-label { color: #94a3b8; font-size: 12px; text-transform: uppercase; }
+        
+        .card {
+            background: #1e293b;
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        
+        .card h3 {
+            color: #94a3b8;
+            margin-bottom: 16px;
+            font-size: 16px;
+            text-transform: uppercase;
+        }
+        
+        .status-healthy { color: #22c55e; }
+        .status-warning { color: #f59e0b; }
+        .status-critical { color: #ef4444; }
+        
+        .upload-area {
+            border: 2px dashed #334155;
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .upload-area:hover { border-color: #6366f1; background: rgba(99, 102, 241, 0.05); }
+        
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #334155; }
+        th { color: #94a3b8; font-weight: normal; font-size: 12px; }
+        
+        .live-stats { display: flex; flex-direction: column; gap: 8px; }
+        .live-stat-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        
+        .success { color: #22c55e; }
+        .error { color: #ef4444; }
+        
+        button {
+            background: #6366f1;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        button:hover { background: #4f46e5; }
+        
+        #uploadResult { margin-top: 12px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Admin Dashboard</h1>
+            <button class="refresh-btn" onclick="loadAll()">🔄 Atualizar</button>
+        </div>
+        
+        <div class="stats-grid" id="stats">
+            <div class="stat-card">Carregando...</div>
+        </div>
+        
+        <div class="card">
+            <h3>🍪 Status do Cookie Técnico</h3>
+            <div id="cookieStatus">Carregando...</div>
+        </div>
+        
+        <div class="card">
+            <h3>📤 Renovar Cookie Técnico</h3>
+            <div class="upload-area" onclick="document.getElementById('cookieFile').click()">
+                📁 Clique para selecionar cookies.txt
+                <input type="file" id="cookieFile" accept=".txt" style="display: none" onchange="uploadCookie()">
+            </div>
+            <div id="uploadResult"></div>
+        </div>
+        
+        <div class="card">
+            <h3>👥 Clientes por Live</h3>
+            <div id="liveStats">Carregando...</div>
+        </div>
+        
+        <div class="card">
+            <h3>📡 Saúde das Lives</h3>
+            <div id="livesHealth">Carregando...</div>
+        </div>
+    </div>
+    
+    <script>
+        let adminToken = localStorage.getItem('adminToken');
+        
+        if (!adminToken) {
+            window.location.href = '/admin-login.html';
+        }
+        
+        async function apiFetch(url, options = {}) {
+            const response = await fetch(url, {
+                ...options,
+                headers: {
+                    ...options.headers,
+                    'Authorization': `Bearer ${adminToken}`
+                }
+            });
+            
+            if (response.status === 401) {
+                localStorage.removeItem('adminToken');
+                window.location.href = '/admin-login.html';
+                throw new Error('Não autorizado');
+            }
+            return response;
+        }
+        
+        async function loadAll() {
+            await loadStats();
+            await loadCookieStatus();
+            await loadLiveStats();
+            await loadLivesHealth();
+        }
+        
+        async function loadStats() {
+            try {
+                const res = await apiFetch('/admin/system-status');
+                const data = await res.json();
+                document.getElementById('stats').innerHTML = `
+                    <div class="stat-card">
+                        <div class="stat-label">RAM</div>
+                        <div class="stat-value">${data.memory?.rss || 'N/A'} MB</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">CPU Load</div>
+                        <div class="stat-value">${data.cpu?.loadAvg1?.toFixed(2) || 'N/A'}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Lives</div>
+                        <div class="stat-value" id="liveCount">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Uptime</div>
+                        <div class="stat-value">${Math.floor(data.uptime / 3600)}h</div>
+                    </div>
+                `;
+            } catch (error) { console.error(error); }
+        }
+        
+        async function loadCookieStatus() {
+            try {
+                const res = await apiFetch('/admin/cookie-status');
+                const data = await res.json();
+                const statusClass = data.status === 'healthy' ? 'status-healthy' : 
+                                   data.status === 'warning' ? 'status-warning' : 'status-critical';
+                document.getElementById('cookieStatus').innerHTML = `
+                    <p><strong>Status:</strong> <span class="${statusClass}">${data.status?.toUpperCase() || 'UNKNOWN'}</span></p>
+                    <p><strong>Falhas:</strong> ${data.consecutiveFailures || 0}</p>
+                    <p><strong>Último sucesso:</strong> ${data.lastSuccess ? new Date(data.lastSuccess).toLocaleString() : 'Nunca'}</p>
+                `;
+            } catch (error) { console.error(error); }
+        }
+        
+        async function uploadCookie() {
+            const file = document.getElementById('cookieFile').files[0];
+            if (!file) return;
+            
+            const formData = new FormData();
+            formData.append('cookie', file);
+            document.getElementById('uploadResult').innerHTML = '⏳ Testando cookie...';
+            
+            try {
+                const res = await apiFetch('/admin/upload-cookie', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('uploadResult').innerHTML = '<span class="success">✅ Cookie atualizado!</span>';
+                    loadCookieStatus();
+                } else {
+                    document.getElementById('uploadResult').innerHTML = `<span class="error">❌ ${data.error}</span>`;
+                }
+            } catch (error) {
+                document.getElementById('uploadResult').innerHTML = `<span class="error">❌ Erro</span>`;
+            }
+            document.getElementById('cookieFile').value = '';
+        }
+        
+        async function loadLiveStats() {
+            try {
+                const res = await apiFetch('/admin/live-stats');
+                const data = await res.json();
+                if (!data.lives || data.lives.length === 0) {
+                    document.getElementById('liveStats').innerHTML = '<p>Nenhuma live cadastrada</p>';
+                    return;
+                }
+                let html = '<div class="live-stats">';
+                for (const live of data.lives) {
+                    html += `<div class="live-stat-item"><span>${live.title || live.youtube_id}</span><span>👥 ${live.client_count || 0}</span></div>`;
+                }
+                html += '</div>';
+                document.getElementById('liveStats').innerHTML = html;
+            } catch (error) { console.error(error); }
+        }
+        
+        async function loadLivesHealth() {
+            try {
+                const res = await apiFetch('/admin/lives-health');
+                const data = await res.json();
+                document.getElementById('liveCount').innerText = data.total || 0;
+                if (!data.lives || data.lives.length === 0) {
+                    document.getElementById('livesHealth').innerHTML = '<p>Nenhuma live ativa</p>';
+                    return;
+                }
+                let html = '<table><th>Live</th><th>Status</th><th>Atualização</th><th>Mudanças</th></tr>';
+                for (const live of data.lives) {
+                    const statusIcon = live.healthy ? '🟢' : (live.warning ? '🟡' : '🔴');
+                    html += `<tr><td>${live.url?.substring(0, 40)}...</td><td>${statusIcon}</td><td>${live.timeSinceLastCheck || 0}s</td><td>${live.changesCount || 0}</td></tr>`;
+                }
+                html += '</table>';
+                document.getElementById('livesHealth').innerHTML = html;
+            } catch (error) { console.error(error); }
+        }
+        
+        loadAll();
+        setInterval(loadAll, 30000);
+    </script>
+</body>
+</html>

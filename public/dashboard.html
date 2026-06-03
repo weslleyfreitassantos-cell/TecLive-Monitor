@@ -1,0 +1,61 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>YouTube Live Monitor - Dashboard</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🎥</div>
+                <div>
+                    <h1>YouTube Live Monitor</h1>
+                    <p>Cole a URL da live e receba um link permanente para o NEOnews</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- STATS e FORM lado a lado -->
+        <div style="display: flex; gap: 24px; margin-bottom: 40px; flex-wrap: wrap;">
+            <div class="stat-card" style="flex: 1;">
+                <div class="stat-icon">📡</div>
+                <div>
+                    <span>Lives Monitoradas</span>
+                    <h2 id="totalLives">0</h2>
+                </div>
+            </div>
+            
+            <div style="flex: 2;">
+                <div class="form-group">
+                    <input type="text" id="liveUrl" class="form-input" placeholder="https://www.youtube.com/watch?v=...">
+                    <button class="btn-primary" onclick="addLive()">Adicionar Live</button>
+                </div>
+                <div class="loading" id="loading">⏳ Processando...</div>
+                <div class="error" id="error"></div>
+                <div class="result-box" id="resultBox">
+                    <h3>✅ Live Adicionada!</h3>
+                    <p>Use o link abaixo no NEOnews (modo Transmissão ao Vivo):</p>
+                    <div class="link-code" id="apiLink"></div>
+                    <button class="btn-primary copy-btn" onclick="copyLink()">📋 Copiar Link</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- LIVES MONITORADAS -->
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 style="margin-bottom: 0;">📺 Lives Monitoradas</h2>
+                <button class="btn-danger" onclick="deleteAllLives()" style="padding: 8px 16px;">🗑️ Excluir Todas</button>
+            </div>
+            <div id="livesList" class="lives-list">
+                <p style="color: #666; text-align: center;">📭 Nenhuma live ativa. Adicione uma acima.</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>
