@@ -36,7 +36,16 @@
             cursor: pointer;
         }
         
-        .refresh-btn:hover { background: #475569; }
+        .logout-btn {
+            background: #ef4444;
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .logout-btn:hover { background: #dc2626; }
         
         .stats-grid {
             display: grid;
@@ -67,6 +76,8 @@
             margin-bottom: 16px;
             font-size: 16px;
             text-transform: uppercase;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 8px;
         }
         
         .status-healthy { color: #22c55e; }
@@ -88,48 +99,83 @@
         th, td { text-align: left; padding: 10px; border-bottom: 1px solid #334155; }
         th { color: #94a3b8; font-weight: normal; font-size: 12px; }
         
-        .live-stats { display: flex; flex-direction: column; gap: 8px; }
-        .live-stat-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px;
-            background: #0f172a;
-            border-radius: 8px;
-        }
-        
-        .success { color: #22c55e; }
-        .error { color: #ef4444; }
-        
         button {
             background: #6366f1;
             color: white;
             border: none;
-            padding: 8px 16px;
-            border-radius: 8px;
+            padding: 6px 12px;
+            border-radius: 6px;
             cursor: pointer;
+            margin: 2px;
         }
         button:hover { background: #4f46e5; }
+        .btn-danger { background: #ef4444; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-success { background: #22c55e; }
+        .btn-success:hover { background: #16a34a; }
         
-        #uploadResult { margin-top: 12px; font-size: 14px; }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background: #1e293b;
+            padding: 24px;
+            border-radius: 16px;
+            width: 400px;
+            max-width: 90%;
+        }
+        .modal-content input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: none;
+            background: #0f172a;
+            color: white;
+        }
+        .modal-content select {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            background: #0f172a;
+            color: white;
+        }
+        
+        .success { color: #22c55e; }
+        .error { color: #ef4444; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>📊 Admin Dashboard</h1>
-            <button class="refresh-btn" onclick="loadAll()">🔄 Atualizar</button>
+            <div>
+                <button class="refresh-btn" onclick="loadAll()">🔄 Atualizar</button>
+                <button class="logout-btn" onclick="logout()">Sair</button>
+            </div>
         </div>
         
         <div class="stats-grid" id="stats">
             <div class="stat-card">Carregando...</div>
         </div>
         
+        <!-- Status do Cookie -->
         <div class="card">
             <h3>🍪 Status do Cookie Técnico</h3>
             <div id="cookieStatus">Carregando...</div>
         </div>
         
+        <!-- Upload Cookie -->
         <div class="card">
             <h3>📤 Renovar Cookie Técnico</h3>
             <div class="upload-area" onclick="document.getElementById('cookieFile').click()">
@@ -139,14 +185,42 @@
             <div id="uploadResult"></div>
         </div>
         
+        <!-- Gerenciar Clientes -->
         <div class="card">
-            <h3>👥 Clientes por Live</h3>
+            <h3>👥 Gerenciar Clientes</h3>
+            <button onclick="showCreateClientModal()" style="margin-bottom: 15px;">➕ Novo Cliente</button>
+            <div id="clientsList">Carregando...</div>
+        </div>
+        
+        <!-- Clientes por Live -->
+        <div class="card">
+            <h3>📡 Clientes por Live</h3>
             <div id="liveStats">Carregando...</div>
         </div>
         
+        <!-- Saúde das Lives -->
         <div class="card">
-            <h3>📡 Saúde das Lives</h3>
+            <h3>🩺 Saúde das Lives</h3>
             <div id="livesHealth">Carregando...</div>
+        </div>
+    </div>
+    
+    <!-- Modal Criar Cliente -->
+    <div id="createClientModal" class="modal">
+        <div class="modal-content">
+            <h3>➕ Novo Cliente</h3>
+            <input type="text" id="clientName" placeholder="Nome">
+            <input type="email" id="clientEmail" placeholder="Email">
+            <input type="password" id="clientPassword" placeholder="Senha">
+            <select id="clientPlan">
+                <option value="1">Básico (3 lives)</option>
+                <option value="2">Profissional (15 lives)</option>
+                <option value="3">Corporativo (50 lives)</option>
+                <option value="4">Eventos (999 lives)</option>
+            </select>
+            <button onclick="createClient()">Criar</button>
+            <button onclick="closeCreateClientModal()">Cancelar</button>
+            <div id="createResult"></div>
         </div>
     </div>
     
@@ -154,6 +228,11 @@
         let adminToken = localStorage.getItem('adminToken');
         
         if (!adminToken) {
+            window.location.href = '/admin-login.html';
+        }
+        
+        function logout() {
+            localStorage.removeItem('adminToken');
             window.location.href = '/admin-login.html';
         }
         
@@ -177,6 +256,7 @@
         async function loadAll() {
             await loadStats();
             await loadCookieStatus();
+            await loadClients();
             await loadLiveStats();
             await loadLivesHealth();
         }
@@ -186,22 +266,10 @@
                 const res = await apiFetch('/admin/system-status');
                 const data = await res.json();
                 document.getElementById('stats').innerHTML = `
-                    <div class="stat-card">
-                        <div class="stat-label">RAM</div>
-                        <div class="stat-value">${data.memory?.rss || 'N/A'} MB</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">CPU Load</div>
-                        <div class="stat-value">${data.cpu?.loadAvg1?.toFixed(2) || 'N/A'}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Lives</div>
-                        <div class="stat-value" id="liveCount">0</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Uptime</div>
-                        <div class="stat-value">${Math.floor(data.uptime / 3600)}h</div>
-                    </div>
+                    <div class="stat-card"><div class="stat-label">RAM</div><div class="stat-value">${data.memory?.rss || 'N/A'} MB</div></div>
+                    <div class="stat-card"><div class="stat-label">CPU Load</div><div class="stat-value">${data.cpu?.loadAvg1?.toFixed(2) || 'N/A'}</div></div>
+                    <div class="stat-card"><div class="stat-label">Lives</div><div class="stat-value" id="liveCount">0</div></div>
+                    <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value">${Math.floor(data.uptime / 3600)}h</div></div>
                 `;
             } catch (error) { console.error(error); }
         }
@@ -210,8 +278,7 @@
             try {
                 const res = await apiFetch('/admin/cookie-status');
                 const data = await res.json();
-                const statusClass = data.status === 'healthy' ? 'status-healthy' : 
-                                   data.status === 'warning' ? 'status-warning' : 'status-critical';
+                const statusClass = data.status === 'healthy' ? 'status-healthy' : data.status === 'warning' ? 'status-warning' : 'status-critical';
                 document.getElementById('cookieStatus').innerHTML = `
                     <p><strong>Status:</strong> <span class="${statusClass}">${data.status?.toUpperCase() || 'UNKNOWN'}</span></p>
                     <p><strong>Falhas:</strong> ${data.consecutiveFailures || 0}</p>
@@ -243,6 +310,105 @@
             document.getElementById('cookieFile').value = '';
         }
         
+        async function loadClients() {
+            try {
+                const res = await apiFetch('/admin/clients');
+                const data = await res.json();
+                if (!data.clients || data.clients.length === 0) {
+                    document.getElementById('clientsList').innerHTML = '<p>Nenhum cliente cadastrado</p>';
+                    return;
+                }
+                let html = '<table><th>ID</th><th>Nome</th><th>Email</th><th>Status</th><th>Lives</th><th>Plano</th><th>Ações</th></tr>';
+                for (const c of data.clients) {
+                    html += `<tr>
+                        <td>${c.id}</td>
+                        <td>${c.name || '-'}</td>
+                        <td>${c.email}</td>
+                        <td>${c.status === 'active' ? '🟢 Ativo' : '🔴 Suspenso'}</td>
+                        <td>${c.lives_count || 0}</td>
+                        <td>${c.plan_name || 'Básico'}</td>
+                        <td>
+                            ${c.status === 'active' ? `<button class="btn-danger" onclick="suspendClient(${c.id})">Suspender</button>` : `<button class="btn-success" onclick="activateClient(${c.id})">Reativar</button>`}
+                            <button class="btn-danger" onclick="deleteClient(${c.id})">Excluir</button>
+                        </td>
+                    </tr>`;
+                }
+                html += '</table>';
+                document.getElementById('clientsList').innerHTML = html;
+            } catch (error) { console.error(error); }
+        }
+        
+        async function suspendClient(id) {
+            if (!confirm('Suspender este cliente? As lives serão removidas.')) return;
+            await apiFetch(`/admin/clients/${id}/suspend`, { method: 'PUT' });
+            loadClients();
+        }
+        
+        async function activateClient(id) {
+            await apiFetch(`/admin/clients/${id}/activate`, { method: 'PUT' });
+            loadClients();
+        }
+        
+        async function deleteClient(id) {
+            if (!confirm('⚠️ Excluir este cliente? Todas as lives serão removidas.')) return;
+            await apiFetch(`/admin/clients/${id}`, { method: 'DELETE' });
+            loadClients();
+        }
+        
+        function showCreateClientModal() {
+            document.getElementById('clientName').value = '';
+            document.getElementById('clientEmail').value = '';
+            document.getElementById('clientPassword').value = '';
+            document.getElementById('clientPlan').value = '1';
+            document.getElementById('createResult').innerHTML = '';
+            document.getElementById('createClientModal').style.display = 'flex';
+        }
+        
+        function closeCreateClientModal() {
+            document.getElementById('createClientModal').style.display = 'none';
+            document.getElementById('createResult').innerHTML = '';
+            document.getElementById('clientName').value = '';
+            document.getElementById('clientEmail').value = '';
+            document.getElementById('clientPassword').value = '';
+            document.getElementById('clientPlan').value = '1';
+        }
+        
+        async function createClient() {
+            const name = document.getElementById('clientName').value;
+            const email = document.getElementById('clientEmail').value;
+            const password = document.getElementById('clientPassword').value;
+            const planId = document.getElementById('clientPlan').value;
+            
+            if (!name || !email || !password) {
+                document.getElementById('createResult').innerHTML = '<span class="error">Preencha todos os campos</span>';
+                return;
+            }
+            
+            try {
+                const res = await apiFetch('/admin/clients', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, email, password, planId: parseInt(planId) })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('createResult').innerHTML = '<span class="success">✅ Cliente criado!</span>';
+                    document.getElementById('clientName').value = '';
+                    document.getElementById('clientEmail').value = '';
+                    document.getElementById('clientPassword').value = '';
+                    document.getElementById('clientPlan').value = '1';
+                    setTimeout(() => {
+                        closeCreateClientModal();
+                        loadClients();
+                    }, 1500);
+                } else {
+                    document.getElementById('createResult').innerHTML = `<span class="error">❌ ${data.error}</span>`;
+                }
+            } catch (error) {
+                document.getElementById('createResult').innerHTML = '<span class="error">❌ Erro ao criar cliente</span>';
+            }
+        }
+        
         async function loadLiveStats() {
             try {
                 const res = await apiFetch('/admin/live-stats');
@@ -253,7 +419,10 @@
                 }
                 let html = '<div class="live-stats">';
                 for (const live of data.lives) {
-                    html += `<div class="live-stat-item"><span>${live.title || live.youtube_id}</span><span>👥 ${live.client_count || 0}</span></div>`;
+                    html += `<div class="live-stat-item" style="display:flex; justify-content:space-between; padding:8px; border-bottom:1px solid #334155;">
+                        <span>${live.title || live.youtube_id}</span>
+                        <span>👥 ${live.client_count || 0}</span>
+                    </div>`;
                 }
                 html += '</div>';
                 document.getElementById('liveStats').innerHTML = html;
@@ -272,9 +441,14 @@
                 let html = '<table><th>Live</th><th>Status</th><th>Atualização</th><th>Mudanças</th></tr>';
                 for (const live of data.lives) {
                     const statusIcon = live.healthy ? '🟢' : (live.warning ? '🟡' : '🔴');
-                    html += `<tr><td>${live.url?.substring(0, 40)}...</td><td>${statusIcon}</td><td>${live.timeSinceLastCheck || 0}s</td><td>${live.changesCount || 0}</td></tr>`;
+                    html += `<tr>
+                        <td>${live.url?.substring(0, 40)}...</td>
+                        <td>${statusIcon}</td>
+                        <td>${live.timeSinceLastCheck || 0}s</td>
+                        <td>${live.changesCount || 0}</td>
+                    </tr>`;
                 }
-                html += '</table>';
+                html += '</tr>';
                 document.getElementById('livesHealth').innerHTML = html;
             } catch (error) { console.error(error); }
         }

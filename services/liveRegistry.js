@@ -13,7 +13,7 @@ class LiveRegistry {
     async getVideoTitle(url) {
         return new Promise((resolve) => {
             const command = `yt-dlp --print title "${url}"`;
-            exec(command, { timeout: 10000 }, (error, stdout) => {
+            exec(command, { timeout: 10000, windowsHide: true }, (error, stdout) => {
                 if (error) {
                     console.log(`⚠️ Não foi possível obter título: ${error.message}`);
                     resolve(null);

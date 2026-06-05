@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -19,9 +20,12 @@
     "googleapis": "^173.0.0",
     "helmet": "^8.2.0",
     "joi": "^18.2.1",
+    "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",
     "node-cache": "^5.1.2",
     "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.10",
+    "resend": "^6.12.4",
     "sqlite3": "^6.0.1",
     "winston": "^3.19.0"
   }

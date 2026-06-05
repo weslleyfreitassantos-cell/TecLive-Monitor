@@ -59,9 +59,44 @@ router.get('/system-status', adminAuth, (req, res) => {
     });
 });
 
-// Status do cookie
+// Status do cookie (MODIFICADO: usando cookie-manager)
 router.get('/cookie-status', adminAuth, (req, res) => {
-    res.json(getCookieStatus());
+    try {
+        const cookieManager = require('../cookie-manager');
+        const status = cookieManager.getStatus();
+        
+        // Formata para o dashboard
+        let dashboardStatus = 'unknown';
+        let consecutiveFailures = 0;
+        let lastSuccess = null;
+        
+        if (status.active === 'main') {
+            dashboardStatus = status.main.valid ? 'healthy' : 'critical';
+            consecutiveFailures = status.main.failCount;
+            lastSuccess = status.main.lastTest;
+        } else {
+            dashboardStatus = status.backup.valid ? 'healthy' : 'critical';
+            consecutiveFailures = status.backup.failCount;
+            lastSuccess = status.backup.lastTest;
+        }
+        
+        res.json({
+            status: dashboardStatus,
+            consecutiveFailures: consecutiveFailures,
+            lastSuccess: lastSuccess,
+            active: status.active,
+            main: status.main,
+            backup: status.backup
+        });
+    } catch (error) {
+        console.error('Erro ao obter status do cookie:', error);
+        res.json({
+            status: 'unknown',
+            consecutiveFailures: 0,
+            lastSuccess: null,
+            error: error.message
+        });
+    }
 });
 
 // Saúde das lives
@@ -85,10 +120,10 @@ router.post('/upload-cookie', adminAuth, upload.single('cookie'), async (req, re
         
         await fs.writeFile(tempPath, content);
         
-        // Testar o cookie
+        // Testar o cookie (MODIFICADO: adicionado windowsHide: true)
         const isValid = await new Promise((resolve) => {
             exec(`yt-dlp --cookies "${tempPath}" -g "https://www.youtube.com/watch?v=dGiMBVU3j8s" --simulate`, 
-                { timeout: 15000 }, (error) => resolve(!error));
+                { timeout: 15000, windowsHide: true }, (error) => resolve(!error));
         });
         
         if (!isValid) {
@@ -97,6 +132,16 @@ router.post('/upload-cookie', adminAuth, upload.single('cookie'), async (req, re
         }
         
         await fs.rename(tempPath, finalPath);
+        
+        // Após upload, atualiza o cookie-manager com o novo cookie
+        try {
+            const cookieManager = require('../cookie-manager');
+            const newCookieContent = await fs.readFile(finalPath, 'utf-8');
+            await cookieManager.updateMainCookie(newCookieContent, req.headers['x-admin-name'] || 'Admin');
+        } catch (cmError) {
+            console.error('Erro ao atualizar cookie-manager:', cmError);
+        }
+        
         res.json({ success: true, message: 'Cookie atualizado' });
         
     } catch (error) {

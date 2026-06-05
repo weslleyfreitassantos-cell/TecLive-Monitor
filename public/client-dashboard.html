@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
@@ -6,6 +6,7 @@
     <title>YouTube Live Monitor - Cliente</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body {
             font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
             background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
@@ -13,7 +14,9 @@
             color: white;
             padding: 20px;
         }
+        
         .container { max-width: 1200px; margin: 0 auto; }
+        
         .header {
             display: flex;
             justify-content: space-between;
@@ -24,8 +27,10 @@
             border-radius: 16px;
             backdrop-filter: blur(10px);
         }
+        
         .logo h1 { font-size: 24px; }
         .logo p { font-size: 12px; color: #94a3b8; }
+        
         .logout-btn {
             background: #ef4444;
             padding: 8px 20px;
@@ -36,6 +41,7 @@
             font-weight: 600;
         }
         .logout-btn:hover { background: #dc2626; }
+        
         .stat-card {
             background: rgba(255,255,255,0.05);
             backdrop-filter: blur(10px);
@@ -44,13 +50,16 @@
             margin-bottom: 20px;
             border-left: 4px solid #22c55e;
         }
+        
         .stat-number { font-size: 48px; font-weight: bold; margin-top: 10px; }
+        
         .form-group {
             display: flex;
             gap: 15px;
             flex-wrap: wrap;
             margin-top: 15px;
         }
+        
         .form-input {
             flex: 1;
             padding: 14px;
@@ -61,7 +70,9 @@
             font-size: 14px;
             font-family: monospace;
         }
+        
         .form-input:focus { outline: none; border-color: #6366f1; }
+        
         .btn-primary {
             background: linear-gradient(135deg, #6366f1, #8b5cf6);
             color: white;
@@ -72,6 +83,7 @@
             font-weight: 600;
         }
         .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(99,102,241,0.4); }
+        
         .btn-link {
             background: #22c55e;
             padding: 10px 20px;
@@ -82,7 +94,8 @@
             font-weight: 600;
             white-space: nowrap;
         }
-        .btn-link:hover { background: #16a34a; }
+        .btn-link:hover { background: #16a34a; transform: translateY(-1px); }
+        
         .btn-remove {
             background: #ef4444;
             padding: 10px 20px;
@@ -94,7 +107,8 @@
             width: 100%;
             margin-top: 5px;
         }
-        .btn-remove:hover { background: #dc2626; }
+        .btn-remove:hover { background: #dc2626; transform: translateY(-1px); }
+        
         .live-item {
             background: rgba(255,255,255,0.05);
             border-radius: 16px;
@@ -103,16 +117,30 @@
             display: flex;
             gap: 16px;
             flex-wrap: wrap;
+            transition: all 0.3s;
         }
-        .live-thumb { width: 160px; flex-shrink: 0; }
-        .live-thumb img { width: 100%; border-radius: 12px; aspect-ratio: 16/9; object-fit: cover; }
+        .live-item:hover { background: rgba(255,255,255,0.1); transform: translateX(5px); }
+        
+        .live-thumb {
+            width: 160px;
+            flex-shrink: 0;
+        }
+        .live-thumb img {
+            width: 100%;
+            border-radius: 12px;
+            aspect-ratio: 16/9;
+            object-fit: cover;
+        }
+        
         .live-info { flex: 1; min-width: 200px; }
-        .live-status { color: #22c55e; font-size: 12px; margin-bottom: 8px; }
-        .live-status::before { content: "●"; margin-right: 6px; }
+        .live-status { color: #22c55e; font-size: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+        .live-status::before { content: "●"; animation: pulse 1.5s infinite; }
         .live-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
-        .live-url { font-size: 11px; color: #94a3b8; font-family: monospace; word-break: break-all; }
+        .live-url { font-size: 11px; color: #94a3b8; font-family: monospace; word-break: break-all; margin-bottom: 10px; }
+        
         .live-link-area { display: flex; flex-direction: column; gap: 8px; min-width: 200px; }
         .live-link-code { background: #020617; padding: 8px 12px; border-radius: 8px; font-family: monospace; font-size: 11px; word-break: break-all; border: 1px solid #334155; }
+        
         .loading { display: none; text-align: center; padding: 20px; }
         .loading.show { display: block; }
         .error { color: #ef4444; padding: 10px; display: none; }
@@ -120,11 +148,14 @@
         .result-box { display: none; background: rgba(0,0,0,0.3); padding: 20px; border-radius: 12px; margin-top: 20px; }
         .result-box.show { display: block; }
         .link-code { background: #020617; padding: 15px; border-radius: 8px; font-family: monospace; font-size: 12px; word-break: break-all; margin: 15px 0; }
+        
+        @keyframes pulse { 50% { opacity: 0.4; } }
+        
         @media (max-width: 768px) {
             .live-thumb { width: 100%; }
             .live-link-area { width: 100%; }
             .btn-link, .btn-remove { width: 100%; text-align: center; }
-            .header { flex-direction: column; text-align: center; gap: 10px; }
+            .header { flex-direction: column; text-align: center; }
         }
     </style>
 </head>
@@ -193,18 +224,15 @@
             return response;
         }
         
-        // 🔥 FUNÇÃO PRINCIPAL - GERAR LINK SEGURO
-        async function getSecureLink(liveId) {
+        // 🔥 FUNÇÃO PARA GERAR LINK SEGURO
+        async function generateSecureLink(liveId) {
             try {
                 const response = await fetch(`/client/generate-link/${liveId}`, {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${clientToken}` }
                 });
                 const data = await response.json();
-                if (data.secure_link) {
-                    return data.secure_link;
-                }
-                throw new Error('Link não retornado');
+                return data.secure_link || null;
             } catch (error) {
                 console.error('Erro ao gerar link seguro:', error);
                 return null;
@@ -223,9 +251,11 @@
                         const thumbnail = getThumbnailUrl(live.youtube_url);
                         const title = live.title || 'Live sem título';
                         
-                        // 🔥 SOMENTE O LINK SEGURO - SEM FALLBACK ANTIGO
-                        let fullLink = await getSecureLink(live.id);
-                        if (!fullLink) fullLink = 'Erro ao gerar link';
+                        // 🔥 GERAR LINK SEGURO VIA API
+                        let fullLink = await generateSecureLink(live.id);
+                        if (!fullLink) {
+                            fullLink = `http://${window.location.hostname}:3002/secure/live/${live.id}.m3u8`;
+                        }
                         
                         html += `
                             <div class="live-item">
@@ -274,30 +304,26 @@
                 });
                 const data = await res.json();
                 
-                if (data.success && data.live_id) {
-                    // 🔥 GERAR LINK SEGURO (NÃO O LINK ANTIGO)
-                    const secureLink = await getSecureLink(data.live_id);
-                    if (secureLink) {
-                        document.getElementById('apiLink').innerHTML = secureLink;
-                        document.getElementById('resultBox').classList.add('show');
-                    } else {
-                        document.getElementById('error').innerHTML = '❌ Erro ao gerar link seguro';
-                        document.getElementById('error').classList.add('show');
-                    }
+                if (data.success) {
+                    // 🔥 GERAR LINK SEGURO
+                    const secureLink = await generateSecureLink(data.live_id);
+                    const apiLink = secureLink || `http://${window.location.hostname}:3002/secure/live/${data.live_id}.m3u8`;
+                    
+                    document.getElementById('apiLink').innerHTML = apiLink;
+                    document.getElementById('resultBox').classList.add('show');
                     document.getElementById('liveUrl').value = '';
                     loadLives();
                     setTimeout(() => {
                         document.getElementById('resultBox').classList.remove('show');
-                    }, 10000);
+                    }, 5000);
                 } else {
-                    document.getElementById('error').innerHTML = `❌ ${data.error || 'Erro desconhecido'}`;
+                    document.getElementById('error').innerHTML = `❌ ${data.error}`;
                     document.getElementById('error').classList.add('show');
                     setTimeout(() => {
                         document.getElementById('error').classList.remove('show');
                     }, 3000);
                 }
             } catch (error) {
-                console.error(error);
                 document.getElementById('error').innerHTML = '❌ Erro ao conectar com o servidor';
                 document.getElementById('error').classList.add('show');
             } finally {
@@ -307,9 +333,11 @@
         
         async function removeLive(liveId) {
             if (!confirm('⚠️ Tem certeza que deseja remover esta live?')) return;
+            
             try {
                 const res = await apiFetch(`/client/lives/${liveId}`, { method: 'DELETE' });
                 const data = await res.json();
+                
                 if (data.success) {
                     alert('✅ Live removida com sucesso!');
                     loadLives();
@@ -326,7 +354,9 @@
             if (navigator.clipboard && window.isSecureContext) {
                 navigator.clipboard.writeText(text).then(() => {
                     showCopyFeedback(elementId);
-                }).catch(() => fallbackCopy(text, elementId));
+                }).catch(() => {
+                    fallbackCopy(text, elementId);
+                });
             } else {
                 fallbackCopy(text, elementId);
             }
@@ -340,12 +370,19 @@
             textarea.style.left = '-9999px';
             document.body.appendChild(textarea);
             textarea.select();
+            textarea.setSelectionRange(0, text.length);
+            
             try {
-                document.execCommand('copy');
-                showCopyFeedback(elementId);
+                const success = document.execCommand('copy');
+                if (success) {
+                    showCopyFeedback(elementId);
+                } else {
+                    alert('❌ Não foi possível copiar. Selecione o texto manualmente.');
+                }
             } catch (err) {
                 alert('❌ Erro ao copiar. Selecione o texto manualmente.');
             }
+            
             document.body.removeChild(textarea);
         }
         
@@ -353,12 +390,22 @@
             const btn = event?.target || document.activeElement;
             const originalText = btn.innerText;
             btn.innerText = '✅ Copiado!';
-            setTimeout(() => { btn.innerText = originalText; }, 2000);
+            setTimeout(() => {
+                btn.innerText = originalText;
+            }, 2000);
+            
+            if (elementId) {
+                const linkElement = document.getElementById(elementId);
+                if (linkElement) {
+                    console.log('Link copiado:', linkElement.innerText);
+                }
+            }
         }
         
         function copyLink() {
             const linkElement = document.getElementById('apiLink');
             const link = linkElement.innerText;
+            
             if (link && link !== 'Adicione uma live para gerar o link') {
                 copyToClipboard(link, null);
             } else {
@@ -382,7 +429,7 @@
         }
         
         loadLives();
-        setInterval(loadLives, 30000);
+        setInterval(loadLives, 15000);
     </script>
 </body>
 </html>

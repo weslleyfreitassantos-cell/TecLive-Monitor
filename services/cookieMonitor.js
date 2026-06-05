@@ -61,7 +61,8 @@ async function testCookie() {
     for (const url of TEST_URLS) {
         const command = `yt-dlp --cookies "${COOKIE_PATH}" -g "${url}" --simulate`;
         const success = await new Promise((resolve) => {
-            exec(command, { timeout: 15000 }, (error) => resolve(!error));
+            // MODIFICADO: adicionado windowsHide: true para não abrir janela CMD
+            exec(command, { timeout: 15000, windowsHide: true }, (error) => resolve(!error));
         });
         if (success) return { working: true, url };
     }

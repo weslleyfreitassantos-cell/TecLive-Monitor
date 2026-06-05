@@ -8,7 +8,7 @@ db.serialize(() => {
     // TABELAS EXISTENTES
     // ========================================
     
-    // Tabela de usuários
+    // Tabela de usuários (antiga - manter para compatibilidade)
     const sql1 = `CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT UNIQUE,
@@ -125,6 +125,78 @@ db.serialize(() => {
     
     // Inserir registro inicial de cookie_health se não existir
     db.run(`INSERT OR IGNORE INTO cookie_health (id) VALUES (1)`);
+    
+    // ========================================
+    // TABELAS DE CLIENTES (SAAS)
+    // ========================================
+    
+    // Tabela de clientes (SEM admin)
+    const sql8 = `CREATE TABLE IF NOT EXISTS clients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        email TEXT UNIQUE,
+        password_hash TEXT,
+        status TEXT DEFAULT 'active',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_login DATETIME
+    )`;
+    db.run(sql8, (err) => {
+        if (err) console.error('Erro ao criar clients:', err.message);
+        else console.log('✅ Tabela clients criada/verificada');
+    });
+    
+    // Tabela de planos
+    const sql9 = `CREATE TABLE IF NOT EXISTS plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        max_lives INTEGER,
+        price REAL,
+        description TEXT
+    )`;
+    db.run(sql9, (err) => {
+        if (err) console.error('Erro ao criar plans:', err.message);
+        else {
+            console.log('✅ Tabela plans criada/verificada');
+            // Inserir planos padrão
+            db.run(`INSERT OR IGNORE INTO plans (name, max_lives, price, description) VALUES 
+                ('Básico', 3, 97, 'Até 3 lives simultâneas'),
+                ('Profissional', 15, 197, 'Até 15 lives simultâneas'),
+                ('Corporativo', 50, 397, 'Até 50 lives simultâneas'),
+                ('Eventos', 999, 997, 'Lives ilimitadas para eventos')`);
+        }
+    });
+    
+    // Tabela de assinaturas dos clientes
+    const sql10 = `CREATE TABLE IF NOT EXISTS subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER UNIQUE,
+        plan_id INTEGER,
+        expires_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(client_id) REFERENCES clients(id),
+        FOREIGN KEY(plan_id) REFERENCES plans(id)
+    )`;
+    db.run(sql10, (err) => {
+        if (err) console.error('Erro ao criar subscriptions:', err.message);
+        else console.log('✅ Tabela subscriptions criada/verificada');
+    });
+    
+    // Tabela de pagamentos
+    const sql11 = `CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        amount REAL,
+        status TEXT DEFAULT 'pending',
+        due_date DATETIME,
+        paid_at DATETIME,
+        transaction_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )`;
+    db.run(sql11, (err) => {
+        if (err) console.error('Erro ao criar payments:', err.message);
+        else console.log('✅ Tabela payments criada/verificada');
+    });
     
     console.log('✅ Banco de dados inicializado');
 });

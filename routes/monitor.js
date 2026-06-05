@@ -1,9 +1,13 @@
-const express = require('express');
+﻿const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
+const db = require('../database/schema');
 const liveRegistry = require('../services/liveRegistry');
 const liveMonitor = require('../services/liveMonitor');
 const logger = require('../utils/logger');
+
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // Rate limit para adicionar lives (protege contra abusos)
 const addLiveLimiter = rateLimit({
@@ -21,14 +25,42 @@ router.post('/start', addLiveLimiter, async (req, res) => {
             return res.status(400).json({ error: 'URL é obrigatória' });
         }
         
+        // Verificar se o cliente está autenticado (via token)
+        const token = req.headers['authorization']?.split(' ')[1];
+        let clientId = null;
+        
+        if (token) {
+            try {
+                const decoded = jwt.verify(token, JWT_SECRET);
+                clientId = decoded.clientId;
+                console.log(`👤 Cliente ${clientId} adicionando live: ${url}`);
+            } catch (e) {
+                console.log('⚠️ Token inválido, continuando sem associação');
+            }
+        }
+        
         console.log(`📢 Registrando live: ${url}`);
         
         // Registrar live (reutiliza se já existir)
         const result = await liveRegistry.registerLive(url);
         
+        // Associar a live ao cliente se estiver logado
+        if (clientId && result.live && result.live.id) {
+            db.run(
+                'INSERT OR IGNORE INTO user_live_subscriptions (user_id, live_source_id) VALUES (?, ?)',
+                [clientId, result.live.id],
+                (err) => {
+                    if (err) console.error('Erro ao associar live ao cliente:', err);
+                    else console.log(`✅ Live associada ao cliente ${clientId}`);
+                }
+            );
+        }
+        
+        // Retornar o live_id para o frontend
         res.json({
             success: true,
             message: result.isNew ? 'Live adicionada com sucesso' : 'Live já existente',
+            live_id: result.live.id,
             live: result.live,
             m3u8_url: result.m3u8Url
         });
@@ -47,7 +79,6 @@ router.get('/lives', async (req, res) => {
         // Enriquecer com títulos do banco de dados
         const enrichedLives = [];
         for (const live of lives) {
-            // Extrair ID do YouTube da URL
             const match = live.url.match(/(?:youtube\.com\/watch\?v=)([^&]+)/);
             const youtubeId = match ? match[1] : null;
             

@@ -1,223 +1,204 @@
-// ========================================
-// YOUTUBE LIVE MONITOR - DASHBOARD JS
-// ========================================
+// dashboard.js
+let currentToken = localStorage.getItem('clientToken');
 
-function getThumbnailUrl(url) {
-    const match = url.match(/(?:youtube\.com\/watch\?v=)([^&]+)/);
-    return match ? `https://img.youtube.com/vi/${match[1]}/mqdefault.jpg` : '/images/placeholder.png';
+// Verificar token
+if (!currentToken) {
+    window.location.href = '/client-login.html';
 }
 
-async function loadStats() {
-    try {
-        const response = await fetch('/monitor/lives');
-        const data = await response.json();
-        document.getElementById('totalLives').innerText = data.total || 0;
-        
-        const livesList = document.getElementById('livesList');
-        if (data.lives && data.lives.length > 0) {
-            let html = '';
-            for (let i = 0; i < data.lives.length; i++) {
-                const live = data.lives[i];
-                const thumbnail = getThumbnailUrl(live.url);
-                const title = live.title || live.url.substring(0, 50);
-                const fullLink = `http://${window.location.hostname}:3002/neonews/neonews.m3u8?url=${encodeURIComponent(live.url)}`;
-                
-                html += `
-                    <div class="live-item">
-                        <div class="live-thumb">
-                            <img src="${thumbnail}" alt="Thumbnail" onerror="this.src='/images/placeholder.png'">
-                            <span class="live-badge">AO VIVO</span>
-                        </div>
-                        <div class="live-info">
-                            <div class="live-status">AO VIVO</div>
-                            <div class="live-title">${escapeHtml(title)}</div>
-                        </div>
-                        <div class="live-link">
-                            <div class="live-link-code">${fullLink.substring(0, 35)}...</div>
-                            <button class="btn-link" onclick="copySpecificLink('${fullLink}')">📋 Copiar Link</button>
-                            <button class="btn-danger" style="margin-top: 5px; padding: 4px 8px; font-size: 11px;" onclick="deleteLive('${escapeHtml(live.url)}')">🗑️ Excluir</button>
-                        </div>
-                    </div>
-                `;
-            }
-            livesList.innerHTML = html;
-        } else {
-            livesList.innerHTML = '<p style="color: #666; text-align: center;">📭 Nenhuma live ativa. Adicione uma acima.</p>';
-        }
-    } catch (error) {
-        console.error('Erro:', error);
-    }
+// Elementos DOM
+const totalLivesEl = document.getElementById('totalLives');
+const livesListEl = document.getElementById('livesList');
+const loadingEl = document.getElementById('loading');
+const errorEl = document.getElementById('error');
+const resultBox = document.getElementById('resultBox');
+const apiLinkEl = document.getElementById('apiLink');
+
+let lastGeneratedLink = null;
+
+// Carregar dados iniciais
+async function loadDashboard() {
+    await loadLives();
 }
 
-async function addLive() {
-    const url = document.getElementById('liveUrl').value.trim();
-    if (!url) {
-        showError('Digite uma URL do YouTube');
-        return;
-    }
-
-    showLoading(true);
-    hideError();
-    hideResult();
-
+// Carregar lives
+async function loadLives() {
     try {
-        const response = await fetch('/monitor/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: url })
-        });
-        const data = await response.json();
-        
-        if (data.success) {
-            const apiLink = `http://${window.location.hostname}:3002/neonews/neonews.m3u8?url=${encodeURIComponent(url)}`;
-            document.getElementById('apiLink').innerHTML = apiLink;
-            showResult();
-            document.getElementById('liveUrl').value = '';
-            await loadStats();
-            
-            setTimeout(() => {
-                hideResult();
-            }, 5000);
-        } else {
-            showError(data.error || 'Erro ao adicionar live');
-            setTimeout(() => {
-                hideError();
-            }, 3000);
-        }
-    } catch (error) {
-        showError('Erro ao conectar com o servidor');
-        setTimeout(() => {
-            hideError();
-        }, 3000);
-    } finally {
-        showLoading(false);
-    }
-}
-
-// Excluir uma live individualmente
-async function deleteLive(url) {
-    if (!confirm('⚠️ Tem certeza que deseja parar o monitoramento desta live?')) return;
-    
-    showLoading(true);
-    
-    try {
-        const response = await fetch('/monitor/stop', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: url })
+        const response = await fetch('/client/lives', {
+            headers: { 'Authorization': 'Bearer ' + currentToken }
         });
         
-        const data = await response.json();
-        if (data.success) {
-            alert('✅ Live removida com sucesso!');
-            await loadStats();
-        } else {
-            alert('❌ Erro ao remover live: ' + (data.error || 'Tente novamente'));
-        }
-    } catch (error) {
-        alert('❌ Erro ao conectar com o servidor');
-    } finally {
-        showLoading(false);
-    }
-}
-
-// Excluir todas as lives
-async function deleteAllLives() {
-    if (!confirm('⚠️ ATENÇÃO! Isso irá parar o monitoramento de TODAS as lives. Continuar?')) return;
-    
-    showLoading(true);
-    
-    try {
-        const response = await fetch('/monitor/lives');
-        const data = await response.json();
+        if (!response.ok) throw new Error('Erro ao carregar lives');
         
-        if (!data.lives || data.lives.length === 0) {
-            alert('📭 Nenhuma live ativa para remover.');
-            showLoading(false);
+        const data = await response.json();
+        const lives = data.lives || [];
+        
+        totalLivesEl.textContent = lives.length;
+        
+        if (lives.length === 0) {
+            livesListEl.innerHTML = '<p style="color: #666; text-align: center;">📭 Nenhuma live ativa. Adicione uma acima.</p>';
             return;
         }
         
-        let successCount = 0;
-        let errorCount = 0;
+        livesListEl.innerHTML = '';
         
-        for (const live of data.lives) {
-            try {
-                const stopResponse = await fetch('/monitor/stop', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url: live.url })
-                });
-                const stopData = await stopResponse.json();
-                if (stopData.success) {
-                    successCount++;
-                } else {
-                    errorCount++;
-                }
-            } catch (e) {
-                errorCount++;
-            }
+        for (const live of lives) {
+            const liveDiv = document.createElement('div');
+            liveDiv.className = 'live-item';
+            liveDiv.setAttribute('data-live-id', live.id);
+            
+            const statusClass = live.current_m3u8 ? 'status-online' : 'status-offline';
+            const statusText = live.current_m3u8 ? '● AO VIVO' : '○ OFFLINE';
+            
+            liveDiv.innerHTML = `
+                <div style="flex: 1;">
+                    <div><strong>${live.title || 'Sem título'}</strong></div>
+                    <div class="live-url">${live.youtube_url || live.url}</div>
+                    <div class="live-status ${statusClass}">${statusText}</div>
+                </div>
+                <div class="live-actions">
+                    <button class="btn-secondary" onclick="generateLink(${live.id})">🔗 Gerar Link</button>
+                    <button class="btn-danger" onclick="removeLive(${live.id})">🗑️ Remover</button>
+                </div>
+            `;
+            livesListEl.appendChild(liveDiv);
         }
         
-        alert(`✅ ${successCount} lives removidas com sucesso!\n❌ ${errorCount} erros.`);
-        await loadStats();
+    } catch (err) {
+        console.error(err);
+        errorEl.textContent = err.message;
+        setTimeout(() => { errorEl.textContent = ''; }, 3000);
+    }
+}
+
+// 🔥 GERAR LINK SEGURO (NOVO FORMATO /live/:token.m3u8)
+async function generateLink(liveId) {
+    try {
+        console.log('Gerando link para live:', liveId);
+        console.log('Token:', currentToken);
         
-    } catch (error) {
-        alert('❌ Erro ao buscar lista de lives');
+        const response = await fetch(`/client/generate-link/${liveId}`, {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + currentToken }
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Erro ao gerar link');
+        }
+        
+        const data = await response.json();
+        console.log('Link gerado:', data.secure_link);
+        
+        // Armazenar link gerado
+        lastGeneratedLink = data.secure_link;
+        
+        // Mostrar no resultBox
+        apiLinkEl.innerHTML = `<a href="${data.secure_link}" target="_blank">${data.secure_link}</a>`;
+        resultBox.style.display = 'block';
+        
+        // Rolagem suave para o resultado
+        resultBox.scrollIntoView({ behavior: 'smooth' });
+        
+        // Esconder após 30 segundos (opcional)
+        setTimeout(() => {
+            if (resultBox.style.display === 'block') {
+                resultBox.style.display = 'none';
+            }
+        }, 30000);
+        
+    } catch (err) {
+        console.error('Erro:', err);
+        alert('Erro: ' + err.message);
+    }
+}
+
+// Adicionar live
+async function addLive() {
+    const url = document.getElementById('liveUrl').value.trim();
+    
+    if (!url) {
+        alert('Digite a URL do YouTube');
+        return;
+    }
+    
+    loadingEl.style.display = 'block';
+    errorEl.textContent = '';
+    resultBox.style.display = 'none';
+    
+    try {
+        const response = await fetch('/monitor/start', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + currentToken
+            },
+            body: JSON.stringify({ url: url })
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.error || 'Erro ao adicionar live');
+        }
+        
+        // Limpar campo
+        document.getElementById('liveUrl').value = '';
+        
+        // Recarregar lista
+        await loadLives();
+        
+        // Se retornou live_id, gerar link automaticamente
+        if (data.live_id) {
+            await generateLink(data.live_id);
+        }
+        
+    } catch (err) {
+        errorEl.textContent = err.message;
+        setTimeout(() => { errorEl.textContent = ''; }, 3000);
     } finally {
-        showLoading(false);
+        loadingEl.style.display = 'none';
     }
 }
 
-function showLoading(show) {
-    const loading = document.getElementById('loading');
-    if (show) {
-        loading.classList.add('show');
-    } else {
-        loading.classList.remove('show');
+// Remover live
+async function removeLive(liveId) {
+    if (!confirm('Tem certeza que deseja remover esta live?')) return;
+    
+    try {
+        const response = await fetch(`/client/lives/${liveId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + currentToken }
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Erro ao remover live');
+        }
+        
+        await loadLives();
+        
+    } catch (err) {
+        alert('Erro: ' + err.message);
     }
 }
 
-function showError(message) {
-    const errorDiv = document.getElementById('error');
-    errorDiv.innerHTML = `❌ ${message}`;
-    errorDiv.classList.add('show');
-}
-
-function hideError() {
-    const errorDiv = document.getElementById('error');
-    errorDiv.classList.remove('show');
-    errorDiv.innerHTML = '';
-}
-
-function showResult() {
-    const resultBox = document.getElementById('resultBox');
-    resultBox.classList.add('show');
-}
-
-function hideResult() {
-    const resultBox = document.getElementById('resultBox');
-    resultBox.classList.remove('show');
-}
-
+// Copiar link
 function copyLink() {
-    const link = document.getElementById('apiLink').innerText;
-    if (link) {
-        navigator.clipboard.writeText(link);
-        alert('✅ Link copiado!');
+    if (lastGeneratedLink) {
+        navigator.clipboard.writeText(lastGeneratedLink);
+        alert('Link copiado!');
     }
 }
 
-function copySpecificLink(link) {
-    navigator.clipboard.writeText(link);
-    alert('✅ Link copiado!');
+// Logout
+function logout() {
+    localStorage.removeItem('clientToken');
+    window.location.href = '/client-login.html';
 }
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+// Inicializar
+loadDashboard();
 
-// Inicialização
-loadStats();
-setInterval(loadStats, 15000);
+// Atualizar a cada 30 segundos
+setInterval(loadLives, 30000);
