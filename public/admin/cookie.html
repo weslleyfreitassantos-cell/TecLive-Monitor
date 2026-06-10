@@ -1,0 +1,565 @@
+﻿<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cookie Manager - NeoNews Live Converter</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: rgba(30, 30, 46, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 25px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        h1 {
+            color: #e94560;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #aaa;
+            margin-bottom: 25px;
+            font-size: 14px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        .status-valid {
+            background: #1b5e20;
+            color: #81c784;
+        }
+
+        .status-invalid {
+            background: #b71c1c;
+            color: #ff8a80;
+        }
+
+        .status-unknown {
+            background: #f57c00;
+            color: #ffe0b2;
+        }
+
+        .status-backup {
+            background: #e65100;
+            color: #ffcc80;
+        }
+
+        .status-missing {
+            background: #424242;
+            color: #bdbdbd;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #aaa;
+        }
+
+        .info-value {
+            font-family: 'Courier New', monospace;
+            color: #e94560;
+        }
+
+        .error-message {
+            background: rgba(185, 28, 28, 0.3);
+            border-left: 4px solid #b91c1c;
+            padding: 12px;
+            margin: 15px 0;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #ff8a80;
+        }
+
+        .error-details {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 12px;
+            margin-top: 10px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #aaa;
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+
+        .success-message {
+            background: rgba(27, 94, 32, 0.3);
+            border-left: 4px solid #1b5e20;
+            padding: 12px;
+            margin: 15px 0;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #81c784;
+        }
+
+        .upload-area {
+            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            margin: 20px 0;
+            transition: all 0.3s ease;
+        }
+
+        .upload-area:hover {
+            border-color: #e94560;
+            background: rgba(233, 69, 96, 0.1);
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .upload-btn {
+            background: #e94560;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            display: inline-block;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+
+        .upload-btn:hover {
+            background: #c72a4a;
+            transform: translateY(-2px);
+        }
+
+        button {
+            background: #0f3460;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            background: #1a4a7a;
+        }
+
+        .btn-primary {
+            background: #e94560;
+        }
+
+        .btn-primary:hover {
+            background: #c72a4a;
+        }
+
+        .btn-small {
+            background: transparent;
+            border: 1px solid #e94560;
+            color: #e94560;
+            padding: 5px 12px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .btn-small:hover {
+            background: #e94560;
+            color: white;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .failures-high {
+            color: #ff8a80;
+            font-weight: bold;
+        }
+
+        .text-success {
+            color: #81c784;
+        }
+
+        .text-warning {
+            color: #ffd43b;
+        }
+
+        .text-danger {
+            color: #ff8a80;
+        }
+
+        .since-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            margin-left: 8px;
+        }
+
+        .since-valid { background: #1b5e20; color: #81c784; }
+        .since-invalid { background: #b71c1c; color: #ff8a80; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🍪 Cookie Manager</h1>
+            <div class="subtitle">Gerenciamento de cookies do YouTube Monitor</div>
+
+            <div id="statusArea">
+                <div style="text-align: center;">
+                    <div class="loading"></div>
+                    <p>Carregando status...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📤 Substituir cookie</h3>
+            <div class="upload-area">
+                <input type="file" id="cookieFile" accept=".txt">
+                <label for="cookieFile" class="upload-btn">📁 Escolher arquivo</label>
+                <p id="fileName" style="margin-top: 15px; color: #aaa; font-size: 12px;">Nenhum arquivo escolhido</p>
+            </div>
+            <div style="text-align: center;">
+                <button id="uploadBtn" class="btn-primary" disabled>⬆️ UPLOAD</button>
+            </div>
+            <div id="uploadResult"></div>
+        </div>
+
+        <div class="card">
+            <h3>🔗 Links Rápidos</h3>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 15px;">
+                <button onclick="location.href='/status.html'">📊 Ver Status</button>
+                <button onclick="location.href='/converter.html'">🔄 Conversor de Live</button>
+                <button onclick="location.href='/api/monitors'">📡 Ver Monitores (API)</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+        let detailsVisible = false;
+        let currentDetailedError = null;
+
+        function getFriendlyError(error) {
+            if (!error) return null;
+            const msg = error.toLowerCase();
+            
+            if (msg.includes('netscape format') || msg.includes('cookie file entry') || msg.includes('does not look like a netscape')) {
+                return 'Formato de cookie inválido (use a extensão Get cookies.txt)';
+            }
+            
+            if (msg.includes('sign in to confirm') || msg.includes('authentication') || msg.includes('login required') || msg.includes('http error 403')) {
+                return 'Cookie expirado ou rejeitado pelo YouTube';
+            }
+            
+            if (msg.includes('timeout')) {
+                return 'Timeout na comunicação com o YouTube';
+            }
+            
+            if (msg.includes('not found') || msg.includes('404')) {
+                return 'Live não encontrada - pode ter terminado';
+            }
+            
+            return 'Falha ao validar cookie';
+        }
+
+        function formatSince(data) {
+            if (!data.lastStateChange) return '';
+            const changeTime = new Date(data.lastStateChange);
+            const now = new Date();
+            const diffMinutes = Math.floor((now - changeTime) / 60000);
+            
+            if (diffMinutes < 1) return 'há poucos segundos';
+            if (diffMinutes < 60) return `há ${diffMinutes} minutos`;
+            const hours = Math.floor(diffMinutes / 60);
+            return `há ${hours} horas`;
+        }
+
+        document.getElementById('cookieFile').addEventListener('change', function(e) {
+            if (e.target.files.length > 0) {
+                selectedFile = e.target.files[0];
+                document.getElementById('fileName').innerHTML = `✅ ${selectedFile.name}`;
+                document.getElementById('uploadBtn').disabled = false;
+            } else {
+                selectedFile = null;
+                document.getElementById('fileName').innerHTML = 'Nenhum arquivo escolhido';
+                document.getElementById('uploadBtn').disabled = true;
+            }
+        });
+
+        document.getElementById('uploadBtn').addEventListener('click', async () => {
+            if (!selectedFile) return;
+
+            const formData = new FormData();
+            formData.append('cookie', selectedFile);
+
+            const resultDiv = document.getElementById('uploadResult');
+            resultDiv.innerHTML = '<div class="loading"></div><p>Enviando e validando cookie...</p>';
+
+            try {
+                const response = await fetch('/api/cookie/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    resultDiv.innerHTML = `<div class="success-message">✅ ${data.message}</div>`;
+                    setTimeout(() => {
+                        fetchStatus();
+                        resultDiv.innerHTML = '';
+                    }, 2000);
+                } else {
+                    resultDiv.innerHTML = `<div class="error-message">❌ ${data.message}<br><small>${data.error || ''}</small></div>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error-message">❌ Erro ao enviar: ${error.message}</div>`;
+            }
+        });
+
+        function toggleErrorDetails() {
+            const detailsDiv = document.getElementById('errorDetails');
+            const btn = document.getElementById('toggleDetailsBtn');
+            if (detailsDiv) {
+                if (detailsDiv.style.display === 'none' || !detailsDiv.style.display) {
+                    detailsDiv.style.display = 'block';
+                    if (btn) btn.innerHTML = '🔽 Ocultar detalhes técnicos';
+                    detailsVisible = true;
+                } else {
+                    detailsDiv.style.display = 'none';
+                    if (btn) btn.innerHTML = '🔍 Ver detalhes técnicos';
+                    detailsVisible = false;
+                }
+            }
+        }
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/api/cookie/status');
+                const data = await response.json();
+
+                // LÓGICA CORRIGIDA DO ESTADO
+                let statusClass = '';
+                let statusText = '';
+                
+                // Verificar se houve algum teste
+                const hasBeenTested = data.lastCookieCheck !== null || data.consecutiveFailures > 0 || data.lastCookieError;
+                
+                if (!hasBeenTested || data.cookieStatus === 'unknown') {
+                    statusClass = 'status-unknown';
+                    statusText = '🟡 COOKIE NÃO TESTADO';
+                } else if (data.cookieStatus === 'valid' && data.consecutiveFailures === 0) {
+                    statusClass = 'status-valid';
+                    statusText = '🟢 COOKIE VÁLIDO';
+                } else {
+                    statusClass = 'status-invalid';
+                    statusText = '🔴 COOKIE INVÁLIDO';
+                }
+
+                const failuresClass = (data.consecutiveFailures || 0) >= 3 ? 'failures-high' : '';
+                
+                // Calcular cor do tempo desde última renovação
+                let renewClass = '';
+                let renewColor = '';
+                if (data.lastRenewTimeAgo !== null && data.lastRenewTimeAgo !== undefined && data.lastRenewTimeAgo !== 'Nunca') {
+                    if (data.lastRenewTimeAgo <= 5) {
+                        renewClass = 'text-success';
+                        renewColor = '#81c784';
+                    } else if (data.lastRenewTimeAgo <= 30) {
+                        renewClass = 'text-warning';
+                        renewColor = '#ffd43b';
+                    } else {
+                        renewClass = 'text-danger';
+                        renewColor = '#ff8a80';
+                    }
+                }
+
+                // Erro amigável
+                const rawError = data.lastCookieErrorDetailed || data.lastCookieError;
+                const friendlyError = rawError ? getFriendlyError(rawError) : null;
+                const hasError = friendlyError && statusClass === 'status-invalid';
+
+                let errorHtml = '';
+                if (hasError) {
+                    errorHtml = `
+                        <div class="info-row" style="flex-direction: column; align-items: flex-start;">
+                            <span class="info-label" style="margin-bottom: 8px;">Último erro:</span>
+                            <span class="info-value" style="color: #ff8a80; font-size: 13px; word-break: break-word;">${friendlyError}</span>
+                            ${rawError && rawError !== friendlyError ? `
+                            <div style="margin-top: 8px;">
+                                <button id="toggleDetailsBtn" class="btn-small" onclick="toggleErrorDetails()">🔍 Ver detalhes técnicos</button>
+                            </div>
+                            <div id="errorDetails" class="error-details" style="display: ${detailsVisible ? 'block' : 'none'};">
+                                <strong>Detalhes técnicos:</strong><br>
+                                ${escapeHtml(rawError)}
+                            </div>
+                            ` : ''}
+                        </div>
+                    `;
+                }
+
+                // Última renovação bem-sucedida
+                let renewHtml = '';
+                if (data.lastRenewSuccess && data.lastRenewSuccess !== 'Nunca' && data.lastRenewSuccess !== null) {
+                    renewHtml = `
+                        <div class="info-row">
+                            <span class="info-label">Última renovação bem-sucedida:</span>
+                            <span class="info-value ${renewClass}" style="color: ${renewColor};">${data.lastRenewDisplay || data.lastRenewSuccess}</span>
+                        </div>
+                    `;
+                } else {
+                    renewHtml = `
+                        <div class="info-row">
+                            <span class="info-label">Última renovação bem-sucedida:</span>
+                            <span class="info-value" style="color: #ff8a80;">Nunca</span>
+                        </div>
+                    `;
+                }
+
+                // Estado desde quando
+                let sinceHtml = '';
+                if (statusClass === 'status-valid' && data.lastRenewSuccess) {
+                    sinceHtml = `
+                        <div class="info-row">
+                            <span class="info-label">🟢 Válido desde:</span>
+                            <span class="info-value text-success">${new Date(data.lastRenewSuccess).toLocaleString()}</span>
+                        </div>
+                    `;
+                } else if (statusClass === 'status-invalid' && data.lastCookieCheck) {
+                    sinceHtml = `
+                        <div class="info-row">
+                            <span class="info-label">🔴 Inválido desde:</span>
+                            <span class="info-value text-danger">${new Date(data.lastCookieCheck).toLocaleString()}</span>
+                        </div>
+                    `;
+                }
+
+                const html = `
+                    <div style="text-align: center;">
+                        <div class="status-badge ${statusClass}">${statusText}</div>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Cookie ativo:</span>
+                        <span class="info-value">${data.activeCookie || 'nenhum'}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Backup disponível:</span>
+                        <span class="info-value">${data.hasBackup ? '✅ Sim' : '❌ Não'}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Falhas consecutivas:</span>
+                        <span class="info-value ${failuresClass}">${data.failureProgress || (data.consecutiveFailures + ' / 5')}</span>
+                    </div>
+                    ${errorHtml}
+                    ${renewHtml}
+                    ${sinceHtml}
+                    <div class="info-row">
+                        <span class="info-label">Última verificação:</span>
+                        <span class="info-value">${data.lastCookieCheck ? new Date(data.lastCookieCheck).toLocaleString() : 'Nunca'}</span>
+                    </div>
+                    <div style="text-align: center; margin-top: 20px;">
+                        <button onclick="testCookie()">🔍 Testar cookie atual</button>
+                    </div>
+                `;
+
+                document.getElementById('statusArea').innerHTML = html;
+            } catch (error) {
+                document.getElementById('statusArea').innerHTML = `
+                    <div class="error-message">
+                        ❌ Erro ao carregar status: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function testCookie() {
+            const resultDiv = document.getElementById('statusArea');
+            resultDiv.innerHTML = '<div class="loading"></div><p>Testando cookie...</p>';
+
+            try {
+                const response = await fetch('/api/cookie/test', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.valid) {
+                    resultDiv.innerHTML = `
+                        <div class="success-message">
+                            ✅ Cookie válido! O YouTube aceitou a autenticação.
+                        </div>
+                    `;
+                } else {
+                    const friendlyTestError = getFriendlyError(data.error);
+                    resultDiv.innerHTML = `
+                        <div class="error-message">
+                            ❌ ${friendlyTestError}<br>
+                            <small>${data.error || 'Erro de autenticação'}</small>
+                        </div>
+                    `;
+                }
+                setTimeout(() => fetchStatus(), 2000);
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error-message">
+                        ❌ Erro ao testar: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        fetchStatus();
+        setInterval(fetchStatus, 10000);
+    </script>
+</body>
+</html>

@@ -1,32 +1,42 @@
-{
-  "name": "youtube-live-api",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "compression": "^1.8.1",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.5.2",
-    "googleapis": "^173.0.0",
-    "helmet": "^8.2.0",
-    "joi": "^18.2.1",
-    "jsonwebtoken": "^9.0.3",
-    "multer": "^2.1.1",
-    "node-cache": "^5.1.2",
-    "node-cron": "^4.2.1",
-    "nodemailer": "^8.0.10",
-    "resend": "^6.12.4",
-    "sqlite3": "^6.0.1",
-    "winston": "^3.19.0"
-  }
+﻿{
+    "name":  "youtube-live-api",
+    "version":  "1.0.0",
+    "description":  "",
+    "main":  "index.js",
+    "scripts":  {
+                    "start":  "node app.js",
+                    "pm2-restart":  "pm2 restart youtube-monitor-v3",
+                    "pm2-stop":  "pm2 stop youtube-monitor-v3",
+                    "backup":  "node backup.js",
+                    "pm2-start":  "pm2 start ecosystem.config.js",
+                    "pm2-logs":  "pm2 logs youtube-monitor-v3",
+                    "dev":  "nodemon app.js",
+                    "logs-rotate":  "node logs-rotate.js"
+                },
+    "keywords":  [
+
+                 ],
+    "author":  "",
+    "license":  "ISC",
+    "type":  "commonjs",
+    "dependencies":  {
+                         "axios":  "^1.17.0",
+                         "bcryptjs":  "^3.0.3",
+                         "compression":  "^1.8.1",
+                         "cors":  "^2.8.6",
+                         "dotenv":  "^17.4.2",
+                         "express":  "^5.2.1",
+                         "express-rate-limit":  "^8.5.2",
+                         "googleapis":  "^173.0.0",
+                         "helmet":  "^8.2.0",
+                         "joi":  "^18.2.1",
+                         "jsonwebtoken":  "^9.0.3",
+                         "multer":  "^2.1.1",
+                         "node-cache":  "^5.1.2",
+                         "node-cron":  "^4.2.1",
+                         "nodemailer":  "^8.0.10",
+                         "resend":  "^6.12.4",
+                         "sqlite3":  "^6.0.1",
+                         "winston":  "^3.19.0"
+                     }
 }

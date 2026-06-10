@@ -1,0 +1,171 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>YouTube Live Monitor V3</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        .card {
+            background: #0f0f1a;
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid #2a2a3e;
+        }
+        h1 { color: #e94560; margin-bottom: 5px; }
+        h2 { color: #fff; margin-bottom: 15px; font-size: 18px; }
+        h3 { color: #ccc; margin: 15px 0 10px 0; font-size: 16px; }
+        .status-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .status-main { background: #00ff8822; color: #00ff88; border: 1px solid #00ff88; }
+        .status-backup { background: #ffaa0022; color: #ffaa00; border: 1px solid #ffaa00; }
+        .status-none { background: #ff660022; color: #ff6600; border: 1px solid #ff6600; }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #2a2a3e;
+        }
+        .info-label { color: #888; }
+        .info-value { color: #fff; font-family: monospace; }
+        button {
+            background: #e94560;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            margin-bottom: 20px;
+        }
+        button:hover { background: #c73e56; }
+        a { color: #e94560; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .timestamp { color: #555; font-size: 12px; text-align: center; margin-top: 20px; }
+        .live-item {
+            background: #1a1a2e;
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 10px;
+        }
+        .live-online { border-left: 3px solid #00ff88; }
+        .live-offline { border-left: 3px solid #ff4444; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>📊 YouTube Live Monitor V3</h1>
+            <p style="color: #888; margin-bottom: 20px;">Status do sistema de monitoramento</p>
+            <button onclick="loadAll()">🔄 Atualizar</button>
+        </div>
+        
+        <div id="healthCard" class="card">
+            <div style="text-align: center;">Carregando...</div>
+        </div>
+        
+        <div id="monitorsCard" class="card" style="display: none;">
+            <h2>📺 Lives Monitoradas</h2>
+            <div id="monitorsContent"></div>
+        </div>
+        
+        <div class="card">
+            <h3>🔗 Links Rápidos</h3>
+            <ul style="list-style: none; margin-top: 10px;">
+                <li>🍪 <a href="/admin/cookie">Gerenciar Cookie</a></li>
+                <li>🎬 <a href="/converter.html">Conversor de Live</a></li>
+                <li>📺 <a href="/api/monitors">Ver Monitores (API)</a></li>
+            </ul>
+        </div>
+        
+        <div class="timestamp" id="timestamp"></div>
+    </div>
+
+    <script>
+        async function loadAll() {
+            await loadHealth();
+            await loadMonitors();
+            document.getElementById('timestamp').innerHTML = `Última atualização: ${new Date().toLocaleString('pt-BR')}`;
+        }
+        
+        async function loadHealth() {
+            const container = document.getElementById('healthCard');
+            container.innerHTML = '<div style="text-align: center;">Carregando...</div>';
+            
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                
+                const uptimeSeconds = data.uptime || 0;
+                const uptimeHours = Math.floor(uptimeSeconds / 3600);
+                const uptimeMinutes = Math.floor((uptimeSeconds % 3600) / 60);
+                const uptimeText = `${uptimeHours}h ${uptimeMinutes}m`;
+                const cachedLives = data.cachedLives || data.activeMonitors || 0;
+                
+                container.innerHTML = `
+                    <div class="info-row">
+                        <span class="info-label">📺 Lives em cache</span>
+                        <span class="info-value">${cachedLives}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">⏱️ Uptime</span>
+                        <span class="info-value">${uptimeText}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">📅 Última verificação</span>
+                        <span class="info-value">${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR')}</span>
+                    </div>
+                `;
+            } catch (error) {
+                container.innerHTML = `<div style="color: #ff4444;">❌ Erro: ${error.message}</div>`;
+            }
+        }
+        
+        async function loadMonitors() {
+            const container = document.getElementById('monitorsCard');
+            
+            try {
+                const response = await fetch('/api/monitors');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.totalMonitors > 0) {
+                        container.style.display = 'block';
+                        let monitorsHtml = '';
+                        for (const m of data.monitors) {
+                            monitorsHtml += `
+                                <div class="live-item live-online">
+                                    <strong>🎬 Live: ${m.videoId}</strong><br>
+                                    Status: 🟢 Online<br>
+                                    Falhas: ${m.failCount || 0}
+                                </div>
+                            `;
+                        }
+                        document.getElementById('monitorsContent').innerHTML = monitorsHtml;
+                    } else {
+                        container.style.display = 'none';
+                    }
+                } else {
+                    container.style.display = 'none';
+                }
+            } catch (error) {
+                container.style.display = 'none';
+            }
+        }
+        
+        loadAll();
+        setInterval(loadAll, 30000);
+    </script>
+</body>
+</html>

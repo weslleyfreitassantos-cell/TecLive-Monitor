@@ -1,50 +1,40 @@
 ﻿# Dependências
 node_modules/
 
-# Banco de dados
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
-
-# Cookies e arquivos sensíveis
+# Cookies e dados sensíveis
 cookies/
-user-cookies/
-cookies.txt
+*.txt
+cookies.json
+database.json
 
-# Arquivos de ambiente
+# Backups e temporários
+*.bak
+*.backup
+*.old
+*.tmp
+tmp*
+*_backup*/
+backup_*/
+app.js.*
+scheduler.js.*
+systemState.js.*
+api/*.bak
+public/*.bak
+public/*.antes_*
+
+# Ambiente
 .env
 .env.local
-.env.*.local
 
 # Logs
-logs/
 *.log
-pm2-*.log
 
-# Cache
-cache/
-*.cache
+# Pastas de teste/lixo
+test/
+engine/
+monitor/
+config/
 
-# Backups
-backups/
-
-# Arquivos temporários
-*.tmp
-_temp*
-temp.sql
-
-# VS Code
-.vscode/
-*.code-workspace
-
-# Sistema operacional
+# Arquivos de sistema
 .DS_Store
 Thumbs.db
-
-# Arquivos de build
-dist/
-build/
-
-# PM2
-.pm2/

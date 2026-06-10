@@ -1,0 +1,230 @@
+﻿<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeoNews Live Converter</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 { color: #333; margin-bottom: 10px; }
+        .subtitle { color: #666; margin-bottom: 30px; }
+        input {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #ddd;
+            border-radius: 10px;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+        input:focus { outline: none; border-color: #667eea; }
+        button {
+            width: 100%;
+            padding: 15px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #5a67d8; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .result {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            display: none;
+        }
+        .result.show { display: block; }
+        .link-box {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .link-box input {
+            flex: 1;
+            margin-bottom: 0;
+            background: white;
+        }
+        .copy-btn {
+            width: auto;
+            padding: 15px 20px;
+            background: #28a745;
+            margin-top: 0;
+        }
+        .copy-btn:hover { background: #218838; }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+            color: #667eea;
+        }
+        .loading.show { display: block; }
+        .error {
+            display: none;
+            background: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+        .error.show { display: block; }
+        .success {
+            display: none;
+            background: #d4edda;
+            color: #155724;
+            padding: 10px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+        .success.show { display: block; }
+        .info {
+            margin-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 NeoNews Live Converter</h1>
+        <div class="subtitle">Converta qualquer live do YouTube para o NeoNews</div>
+
+        <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=...">
+
+        <button id="generateBtn">🚀 GERAR LINK</button>
+
+        <div class="loading" id="loading">⏳ Processando...</div>
+        <div class="error" id="error"></div>
+        <div class="success" id="success"></div>
+
+        <div class="result" id="result">
+            <label>🔗 Link NeoNews (cole no campo Servidor)</label>
+            <div class="link-box">
+                <input type="text" id="linkOutput" readonly>
+                <button class="copy-btn" id="copyBtn">📋 COPIAR</button>
+            </div>
+            <div class="info" id="info"></div>
+        </div>
+    </div>
+
+    <script>
+        const urlInput = document.getElementById('urlInput');
+        const generateBtn = document.getElementById('generateBtn');
+        const loading = document.getElementById('loading');
+        const errorDiv = document.getElementById('error');
+        const successDiv = document.getElementById('success');
+        const resultDiv = document.getElementById('result');
+        const linkOutput = document.getElementById('linkOutput');
+        const copyBtn = document.getElementById('copyBtn');
+        const infoDiv = document.getElementById('info');
+
+        generateBtn.addEventListener('click', async () => {
+            const youtubeUrl = urlInput.value.trim();
+
+            if (!youtubeUrl) {
+                showError('Por favor, insira uma URL do YouTube');
+                return;
+            }
+
+            resultDiv.classList.remove('show');
+            hideError();
+            hideSuccess();
+            showLoading();
+
+            try {
+                const response = await fetch('/api/convert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ youtubeUrl })
+                });
+
+                const data = await response.json();
+                hideLoading();
+
+                if (data.success) {
+                    linkOutput.value = data.serverUrl;
+                    infoDiv.innerHTML = `✅ ${data.videoId} | ${data.cached ? '✔️ Cache' : '🆕 Nova live'}`;
+                    resultDiv.classList.add('show');
+                    showSuccess('✅ Link gerado!');
+                } else {
+                    showError(data.error || 'Erro ao gerar link');
+                }
+            } catch (error) {
+                hideLoading();
+                showError('Erro: ' + error.message);
+            }
+        });
+
+        copyBtn.addEventListener('click', () => {
+            linkOutput.select();
+            document.execCommand('copy');
+            
+            // Limpa o campo de URL e foca para o próximo
+            urlInput.value = '';
+            urlInput.focus();
+            
+            // Esconde o resultado
+            resultDiv.classList.remove('show');
+            
+            showSuccess('📋 Copiado! Pronto para o próximo link');
+            setTimeout(() => hideSuccess(), 2000);
+        });
+
+        urlInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                generateBtn.click();
+            }
+        });
+
+        function showLoading() {
+            loading.classList.add('show');
+            generateBtn.disabled = true;
+        }
+
+        function hideLoading() {
+            loading.classList.remove('show');
+            generateBtn.disabled = false;
+        }
+
+        function showError(message) {
+            errorDiv.textContent = message;
+            errorDiv.classList.add('show');
+            setTimeout(() => hideError(), 4000);
+        }
+
+        function hideError() {
+            errorDiv.classList.remove('show');
+        }
+
+        function showSuccess(message) {
+            successDiv.textContent = message;
+            successDiv.classList.add('show');
+            setTimeout(() => hideSuccess(), 2000);
+        }
+
+        function hideSuccess() {
+            successDiv.classList.remove('show');
+        }
+    </script>
+</body>
+</html>

@@ -1,303 +1,147 @@
 ﻿<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>Status dos Cookies - YouTube Live Monitor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Status do Cookie - NeoNews</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background: #f5f5f5;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-        }
-        
-        .header {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        
-        .header h1 {
-            font-size: 24px;
-            color: #333;
-        }
-        
-        .card {
-            background: white;
-            border-radius: 16px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        }
-        
-        .card h2 {
-            font-size: 18px;
-            color: #333;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #eee;
-        }
-        
-        .cookie-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px 0;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .cookie-row:last-child {
-            border-bottom: none;
-        }
-        
-        .cookie-name {
-            font-weight: 600;
-            color: #555;
-            font-size: 16px;
-        }
-        
-        .cookie-status {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 14px;
-            font-weight: 500;
-        }
-        
-        .status-ok {
-            background: #d4edda;
-            color: #155724;
-        }
-        
-        .status-fail {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        
-        .status-warning {
-            background: #fff3cd;
-            color: #856404;
-        }
-        
-        .active-badge {
-            background: #007bff;
+            font-family: Arial, sans-serif;
+            background: #1a1a2e;
             color: white;
-            padding: 2px 10px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: 600;
-            margin-left: 8px;
+            margin: 0;
+            padding: 20px;
         }
-        
-        .details {
-            margin-top: 15px;
-            padding-top: 10px;
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #16213e;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.3);
         }
-        
-        .detail-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            font-size: 14px;
-            border-bottom: 1px dashed #eee;
-        }
-        
-        .detail-label {
-            color: #666;
-        }
-        
-        .detail-value {
-            font-weight: 500;
-            color: #333;
-        }
-        
-        .info-text {
-            font-size: 12px;
-            color: #888;
-            margin-top: 12px;
+        h1 { color: #e94560; margin-top: 0; }
+        .status-card {
+            background: #0f3460;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
             text-align: center;
         }
-        
-        .refresh-btn {
-            background: #007bff;
+        .status-display {
+            font-size: 24px;
+            font-weight: bold;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 0;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 1px solid #0f3460;
+        }
+        .info-label { font-weight: bold; color: #888; }
+        .info-value { font-family: monospace; }
+        .error { color: #ff6b6b; }
+        .success { color: #51cf66; }
+        .warning { color: #ffd43b; }
+        button {
+            background: #e94560;
             color: white;
             border: none;
             padding: 12px 24px;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 600;
-            width: 100%;
+            border-radius: 8px;
             cursor: pointer;
-            transition: background 0.2s;
+            font-size: 16px;
+            margin-top: 20px;
         }
-        
-        .refresh-btn:active {
-            background: #0056b3;
-        }
-        
-        .last-update {
-            text-align: center;
-            font-size: 11px;
-            color: #aaa;
-            margin-top: 15px;
-        }
-        
-        .cookie-icon {
-            font-size: 24px;
-        }
-        
-        @media (max-width: 480px) {
-            body { padding: 12px; }
-            .card { padding: 15px; }
-            .cookie-name { font-size: 14px; }
-        }
+        button:hover { background: #c72a4a; }
+        .refresh { background: #0f3460; margin-left: 10px; }
+        .refresh:hover { background: #1a4a7a; }
+        .cookie-valid { background: #1b5e20; }
+        .cookie-invalid { background: #b71c1c; }
+        .cookie-unknown { background: #f57c00; }
+        .cookie-backup { background: #e65100; }
+        .cookie-missing { background: #424242; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <h1>🍪 Status dos Cookies</h1>
-        </div>
+        <h1>🍪 Cookie Manager - Status Real</h1>
         
-        <div class="card">
-            <h2>📊 Situação Atual</h2>
-            <div id="mainCookie" class="cookie-row">
-                <span class="cookie-name">
-                    🥇 Cookie Principal
-                    <span id="mainActiveBadge" style="display:none;" class="active-badge">ATIVO</span>
-                </span>
-                <span id="mainStatus" class="cookie-status">🔄</span>
+        <div class="status-card">
+            <h3>Status do Cookie no YouTube</h3>
+            <div id="statusDisplay" class="status-display cookie-unknown">Carregando...</div>
+            <div id="failures" class="info-row">
+                <span class="info-label">Falhas consecutivas:</span>
+                <span id="failuresValue" class="info-value">--</span>
             </div>
-            <div id="backupCookie" class="cookie-row">
-                <span class="cookie-name">
-                    🥈 Cookie Reserva
-                    <span id="backupActiveBadge" style="display:none;" class="active-badge">ATIVO</span>
-                </span>
-                <span id="backupStatus" class="cookie-status">🔄</span>
+            <div id="lastError" class="info-row">
+                <span class="info-label">Último erro:</span>
+                <span id="lastErrorValue" class="info-value error">--</span>
+            </div>
+            <div id="lastSuccess" class="info-row">
+                <span class="info-label">Última renovação bem-sucedida:</span>
+                <span id="lastSuccessValue" class="info-value success">--</span>
+            </div>
+            <div id="lastCheck" class="info-row">
+                <span class="info-label">Última verificação:</span>
+                <span id="lastCheckValue" class="info-value">--</span>
             </div>
         </div>
         
-        <div class="card">
-            <h2>📋 Detalhes</h2>
-            <div id="mainDetails"></div>
-            <div id="backupDetails"></div>
+        <div class="status-card">
+            <h3>Arquivos de Cookie</h3>
+            <div id="activeCookie" class="info-row">
+                <span class="info-label">Cookie ativo:</span>
+                <span id="activeCookieValue" class="info-value">--</span>
+            </div>
+            <div id="backup" class="info-row">
+                <span class="info-label">Backup disponível:</span>
+                <span id="backupValue" class="info-value">--</span>
+            </div>
         </div>
         
-        <button class="refresh-btn" onclick="loadStatus()">🔄 Atualizar Status</button>
-        <div class="last-update" id="lastUpdate">-</div>
+        <div style="text-align: center;">
+            <button onclick="fetchStatus()">🔄 Atualizar</button>
+            <button onclick="location.href='/admin/cookie'" class="refresh">📤 Upload de Cookie</button>
+            <button onclick="location.href='/status.html'" class="refresh">📊 Voltar ao Status</button>
+        </div>
     </div>
     
     <script>
-        async function loadStatus() {
+        async function fetchStatus() {
             try {
                 const response = await fetch('/api/cookie/status');
                 const data = await response.json();
                 
-                // Atualiza último update
-                document.getElementById('lastUpdate').innerHTML = `Última atualização: ${new Date().toLocaleString('pt-BR')}`;
+                // Atualizar display do status
+                const statusDiv = document.getElementById('statusDisplay');
+                statusDiv.innerHTML = data.statusDisplay || 'Status desconhecido';
+                statusDiv.className = `status-display cookie-${data.cookieStatus || 'unknown'}`;
                 
-                // ===== COOKIE PRINCIPAL =====
-                const mainStatusEl = document.getElementById('mainStatus');
-                const mainDetailsEl = document.getElementById('mainDetails');
-                const mainActiveBadge = document.getElementById('mainActiveBadge');
+                // Atualizar informações
+                document.getElementById('failuresValue').innerHTML = data.consecutiveFailures || 0;
+                document.getElementById('lastErrorValue').innerHTML = data.lastCookieError || 'Nenhum erro';
+                document.getElementById('lastSuccessValue').innerHTML = data.lastRenewSuccess ? new Date(data.lastRenewSuccess).toLocaleString() : 'Nunca';
+                document.getElementById('lastCheckValue').innerHTML = new Date().toLocaleString();
+                document.getElementById('activeCookieValue').innerHTML = data.activeCookie || 'nenhum';
+                document.getElementById('backupValue').innerHTML = data.hasBackup ? '✅ Sim' : '❌ Não';
                 
-                if (data.main.valid) {
-                    mainStatusEl.innerHTML = '🟢 OK';
-                    mainStatusEl.className = 'cookie-status status-ok';
+                // Destaque para cookie inválido
+                if (data.cookieStatus === 'invalid') {
+                    document.getElementById('lastErrorValue').style.color = '#ff6b6b';
                 } else {
-                    mainStatusEl.innerHTML = '🔴 Falhou';
-                    mainStatusEl.className = 'cookie-status status-fail';
+                    document.getElementById('lastErrorValue').style.color = '#888';
                 }
-                
-                // Badge de ativo
-                if (data.active === 'main') {
-                    mainActiveBadge.style.display = 'inline-block';
-                } else {
-                    mainActiveBadge.style.display = 'none';
-                }
-                
-                mainDetailsEl.innerHTML = `
-                    <div class="detail-item">
-                        <span class="detail-label">Último teste:</span>
-                        <span class="detail-value">${data.main.lastTest ? new Date(data.main.lastTest).toLocaleString('pt-BR') : '-'}</span>
-                    </div>
-                    <div class="detail-item">
-                        <span class="detail-label">Falhas consecutivas:</span>
-                        <span class="detail-value" style="${data.main.failCount >= 5 ? 'color:#dc3545;font-weight:bold;' : ''}">${data.main.failCount}</span>
-                    </div>
-                `;
-                
-                // ===== COOKIE RESERVA =====
-                const backupStatusEl = document.getElementById('backupStatus');
-                const backupDetailsEl = document.getElementById('backupDetails');
-                const backupActiveBadge = document.getElementById('backupActiveBadge');
-                
-                if (data.backup.valid) {
-                    backupStatusEl.innerHTML = '🟢 OK';
-                    backupStatusEl.className = 'cookie-status status-ok';
-                } else {
-                    backupStatusEl.innerHTML = '🔴 Falhou';
-                    backupStatusEl.className = 'cookie-status status-fail';
-                }
-                
-                // Badge de ativo
-                if (data.active === 'backup') {
-                    backupActiveBadge.style.display = 'inline-block';
-                } else {
-                    backupActiveBadge.style.display = 'none';
-                }
-                
-                backupDetailsEl.innerHTML = `
-                    <div class="detail-item">
-                        <span class="detail-label">Último teste:</span>
-                        <span class="detail-value">${data.backup.lastTest ? new Date(data.backup.lastTest).toLocaleString('pt-BR') : '-'}</span>
-                    </div>
-                    <div class="detail-item">
-                        <span class="detail-label">Falhas consecutivas:</span>
-                        <span class="detail-value" style="${data.backup.failCount >= 5 ? 'color:#dc3545;font-weight:bold;' : ''}">${data.backup.failCount}</span>
-                    </div>
-                `;
-                
-                // Alerta crítico se ambos falharam
-                if (!data.main.valid && !data.backup.valid) {
-                    const alertDiv = document.createElement('div');
-                    alertDiv.style.cssText = 'margin-top:15px;padding:12px;background:#dc3545;color:white;border-radius:8px;text-align:center;font-weight:bold;';
-                    alertDiv.innerHTML = '🔴🔴🔴 EMERGÊNCIA: AMBOS OS COOKIES FALHARAM! 🔴🔴🔴';
-                    
-                    const detailsCard = document.querySelector('.card:last-of-type');
-                    if (!document.getElementById('criticalAlert')) {
-                        alertDiv.id = 'criticalAlert';
-                        detailsCard.parentNode.insertBefore(alertDiv, detailsCard.nextSibling);
-                    }
-                } else {
-                    const existingAlert = document.getElementById('criticalAlert');
-                    if (existingAlert) existingAlert.remove();
-                }
-                
             } catch (error) {
-                console.error('Erro ao carregar status:', error);
-                document.getElementById('mainStatus').innerHTML = '❌ Erro';
-                document.getElementById('backupStatus').innerHTML = '❌ Erro';
+                console.error('Erro ao buscar status:', error);
             }
         }
         
-        // Carrega ao iniciar
-        loadStatus();
-        
-        // Atualiza a cada 30 segundos
-        setInterval(loadStatus, 30000);
+        fetchStatus();
+        setInterval(fetchStatus, 10000);
     </script>
 </body>
 </html>
