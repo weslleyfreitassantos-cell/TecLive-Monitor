@@ -1,0 +1,350 @@
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 3002;
+
+app.use(express.json());
+app.use(express.static('public'));
+
+// ========== CONFIGURA??O ==========
+const cookiesDir = path.join(__dirname, 'cookies');
+if (!fs.existsSync(cookiesDir)) {
+    fs.mkdirSync(cookiesDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: cookiesDir,
+    filename: (req, file, cb) => {
+        cb(null, 'temp.txt');
+    }
+});
+const upload = multer({ storage: storage });
+
+let converter = null; // Ser? inicializado depois
+
+// ========== VALIDA??O EM 3 N?VEIS ==========
+async function validateCookie(cookiePath, liveUrl) {
+    const content = fs.readFileSync(cookiePath, 'utf8');
+    
+    // N?vel 1: Estrutura do arquivo
+    if (content.length < 5000) {
+        throw new Error(`Arquivo muito pequeno (${content.length} bytes)`);
+    }
+    
+    if (!content.includes('.youtube.com') && !content.includes('youtube.com')) {
+        throw new Error('Arquivo n?o cont?m dom?nios do YouTube');
+    }
+    
+    console.log('? N?vel 1: Estrutura OK');
+    
+    const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
+    
+    // N?vel 2: Simulate
+    try {
+        await execPromise(`${ytCmd} --cookies "${cookiePath}" --simulate "${liveUrl}"`, { timeout: 20000 });
+        console.log('? N?vel 2: Simula??o OK');
+    } catch (error) {
+        throw new Error('Falha na simula??o: ' + error.message);
+    }
+    
+    // N?vel 3: Extrair HLS
+    try {
+        const { stdout } = await execPromise(`${ytCmd} --cookies "${cookiePath}" -g --format best "${liveUrl}"`, { timeout: 30000 });
+        const hlsUrl = stdout.trim();
+        
+        if (!hlsUrl.includes('.m3u8') && !hlsUrl.includes('manifest')) {
+            throw new Error('Resposta n?o cont?m URL HLS');
+        }
+        
+        console.log('? N?vel 3: Extra??o HLS OK');
+        return { valid: true, hlsUrl: hlsUrl };
+        
+    } catch (error) {
+        throw new Error('Falha na extra??o HLS: ' + error.message);
+    }
+}
+
+function getTestLiveUrl() {
+    if (converter && converter.liveCache && converter.liveCache.size > 0) {
+        const firstLive = converter.liveCache.values().next().value;
+        if (firstLive && firstLive.youtubeUrl) {
+            return firstLive.youtubeUrl;
+        }
+    }
+    return 'https://www.youtube.com/watch?v=rdHcRsSCBiU';
+}
+
+// ========== ROTAS DE COOKIE ==========
+app.post('/api/cookie/test', async (req, res) => {
+    const mainPath = path.join(cookiesDir, 'main.txt');
+    
+    if (!fs.existsSync(mainPath)) {
+        return res.json({ valid: false, error: 'Nenhum cookie configurado' });
+    }
+    
+    try {
+        await validateCookie(mainPath, getTestLiveUrl());
+        res.json({ valid: true, message: 'Cookie v?lido' });
+    } catch (error) {
+        res.json({ valid: false, error: error.message });
+    }
+});
+
+app.post('/api/cookie/upload', upload.single('cookie'), async (req, res) => {
+    const tempPath = path.join(cookiesDir, 'temp.txt');
+    const mainPath = path.join(cookiesDir, 'main.txt');
+    const backupPath = path.join(cookiesDir, 'backup.txt');
+    
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado' });
+        }
+        
+        await validateCookie(tempPath, getTestLiveUrl());
+        
+        let backupCreated = false;
+        if (fs.existsSync(mainPath)) {
+            fs.copyFileSync(mainPath, backupPath);
+            backupCreated = true;
+        }
+        
+        fs.copyFileSync(tempPath, mainPath);
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        
+        res.json({ success: true, message: 'Cookie atualizado', backupCreated });
+        
+    } catch (error) {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        res.status(400).json({ success: false, message: 'Cookie inv?lido', error: error.message });
+    }
+});
+
+app.get('/api/cookie/status', (req, res) => {
+    const mainPath = path.join(cookiesDir, 'main.txt');
+    const backupPath = path.join(cookiesDir, 'backup.txt');
+    let mainSize = fs.existsSync(mainPath) ? fs.statSync(mainPath).size : 0;
+    
+    res.json({
+        healthy: mainSize > 5000,
+        hasBackup: fs.existsSync(backupPath),
+        activeCookie: mainSize > 5000 ? 'main.txt' : (fs.existsSync(backupPath) ? 'backup.txt' : 'nenhum'),
+        cookieSize: mainSize,
+        lastCheck: new Date().toISOString()
+    });
+});
+
+// ========== SISTEMA PRINCIPAL ==========
+const EmailAlerts = require('./alerts/emailAlerts');
+const ConvertAPI = require('./api/convert');
+
+const emailAlerts = new EmailAlerts();
+converter = new ConvertAPI(emailAlerts);
+
+app.post('/api/convert', async (req, res) => {
+    const { youtubeUrl } = req.body;
+    if (!youtubeUrl) {
+        return res.status(400).json({ success: false, error: 'URL obrigat?ria' });
+    }
+    const baseUrl = process.env.BASE_URL || 'http://localhost:' + PORT;
+    const result = await converter.convert(youtubeUrl, baseUrl);
+    res.json(result);
+});
+
+app.get('/api/monitors', (req, res) => {
+    const monitors = [];
+    if (converter.liveCache) {
+        for (const [url, data] of converter.liveCache.entries()) {
+            monitors.push({
+                videoId: data.videoId,
+                youtubeUrl: url,
+                status: data.isLive ? 'online' : 'offline',
+                clients: data.hits || 1
+            });
+        }
+    }
+    res.json({ totalMonitors: monitors.length, monitors });
+});
+
+app.get('/neonews/:videoId.m3u8', async (req, res) => {
+    const videoId = req.params.videoId;
+    let streamUrl = null;
+    
+    if (converter.liveCache) {
+        for (const [url, data] of converter.liveCache.entries()) {
+            if (data.videoId === videoId) {
+                streamUrl = data.m3u8Url || data.streamUrl;
+                data.hits = (data.hits || 1) + 1;
+                break;
+            }
+        }
+    }
+    
+    if (!streamUrl) {
+        return res.status(404).send('Stream n?o encontrada');
+    }
+    res.redirect(streamUrl);
+});
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', version: '3.0.0' });
+});
+
+app.get('/stats', (req, res) => {
+    res.json(converter.getLiveStats());
+});
+
+app.get('/admin/cookie', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public/admin/cookie.html'));
+});
+
+app.get('/', (req, res) => {
+    res.redirect('/converter.html');
+});
+
+
+// ========== ENDPOINTS DE DIAGNOSTICO ==========
+
+// Health check completo
+app.get('/health', (req, res) => {
+    const stats = converter.getLiveStats();
+    let activeCookie = 'nenhum';
+    
+    if (converter.cookiesDir) {
+        const mainPath = path.join(converter.cookiesDir, 'main.txt');
+        const backupPath = path.join(converter.cookiesDir, 'backup.txt');
+        if (fs.existsSync(mainPath)) activeCookie = 'main.txt';
+        else if (fs.existsSync(backupPath)) activeCookie = 'backup.txt';
+    }
+    
+    res.json({
+        status: 'ok',
+        version: '3.0.0',
+        timestamp: new Date().toISOString(),
+        activeCookie: activeCookie,
+        cachedLives: stats.totalCached,
+        activeMonitors: stats.totalCached,
+        emailConfigured: !!process.env.EMAIL_USER,
+        uptime: process.uptime(),
+        uptimeHuman: formatUptime(process.uptime())
+    });
+});
+
+// Testar email
+app.post('/admin/test-email', async (req, res) => {
+    try {
+        console.log('?? Enviando email de teste...');
+        await emailAlerts.liveUp('teste-id', 'Teste do sistema V3 - NeoNews Live Monitor');
+        res.json({ success: true, message: 'Email de teste enviado! Verifique sua caixa de entrada.' });
+    } catch (error) {
+        console.error('? Erro ao enviar email:', error.message);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Testar cookie atual
+app.post('/admin/test-cookie', async (req, res) => {
+    const mainPath = path.join(cookiesDir, 'main.txt');
+    const backupPath = path.join(cookiesDir, 'backup.txt');
+    const cookiePath = fs.existsSync(mainPath) ? mainPath : (fs.existsSync(backupPath) ? backupPath : null);
+    
+    if (!cookiePath) {
+        return res.json({ 
+            success: false, 
+            valid: false, 
+            error: 'Nenhum cookie encontrado. Fa?a upload em /admin/cookie' 
+        });
+    }
+    
+    const stats = fs.statSync(cookiePath);
+    const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
+    const testUrl = 'https://www.youtube.com/watch?v=rdHcRsSCBiU';
+    const command = `${ytCmd} --cookies "${cookiePath}" -g --format best "${testUrl}"`;
+    
+    console.log('?? Testando cookie:', cookiePath);
+    
+    try {
+        const { stdout, stderr } = await execPromise(command, { timeout: 30000 });
+        const hlsUrl = stdout.trim();
+        
+        if (hlsUrl.includes('.m3u8') || hlsUrl.includes('manifest')) {
+            res.json({ 
+                success: true,
+                valid: true, 
+                message: 'Cookie valido',
+                cookieFile: path.basename(cookiePath),
+                cookieSize: stats.size,
+                hlsExtracted: true
+            });
+        } else {
+            res.json({ 
+                success: false,
+                valid: false, 
+                error: 'Cookie nao extraiu HLS',
+                cookieFile: path.basename(cookiePath)
+            });
+        }
+    } catch (error) {
+        res.json({ 
+            success: false,
+            valid: false, 
+            error: error.message,
+            cookieFile: path.basename(cookiePath),
+            cookieSize: stats.size
+        });
+    }
+});
+
+// Status detalhado dos monitores
+app.get('/admin/monitors', (req, res) => {
+    const monitors = [];
+    
+    if (converter && converter.liveCache) {
+        for (const [url, data] of converter.liveCache.entries()) {
+            const monitorInfo = data.monitor ? data.monitor.getLiveInfo() : {};
+            monitors.push({
+                videoId: data.videoId,
+                url: url,
+                status: data.isLive ? 'online' : 'offline',
+                clients: data.hits || 1,
+                createdAt: data.createdAt,
+                lastCheck: monitorInfo.lastCheck || data.lastCheck,
+                failCount: monitorInfo.failCount || 0,
+                cookieActive: monitorInfo.cookieActive !== undefined ? monitorInfo.cookieActive : !!monitorInfo.cookieSwitches,
+                cookieSwitches: monitorInfo.cookieSwitches || 0
+            });
+        }
+    }
+    
+    res.json({
+        totalMonitors: monitors.length,
+        monitors: monitors,
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Fun??o auxiliar
+function formatUptime(seconds) {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${hours}h ${minutes}m ${secs}s`;
+}
+
+app.listen(PORT, () => {
+    console.log('\n========================================');
+    console.log('NeoNews Live Converter V3');
+    console.log('========================================');
+    console.log(`Servidor: http://localhost:${PORT}`);
+    console.log(`Admin Cookie: http://localhost:${PORT}/admin/cookie`);
+    console.log(`Valida??o: 3 n?veis (estrutura, simulate, HLS)`);
+    console.log('========================================\n');
+});
+
+

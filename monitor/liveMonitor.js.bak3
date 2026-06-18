@@ -1,0 +1,212 @@
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const path = require('path');
+const fs = require('fs');
+
+class LiveMonitor {
+    constructor(youtubeUrl, emailAlerts = null) {
+        this.youtubeUrl = youtubeUrl;
+        this.m3u8Url = null;
+        this.isLive = false;
+        this.wasLive = false;
+        this.lastCheck = null;
+        this.emailAlerts = emailAlerts;
+        this.startTime = null;
+        this.monitorInterval = null;
+        this.failCount = 0;
+        this.maxFails = 5;
+        this.warningSent = false;
+        this.cookiesDir = path.join(__dirname, '../cookies');
+        this.mainCookie = path.join(this.cookiesDir, 'main.txt');
+        this.backupCookie = path.join(this.cookiesDir, 'backup.txt');
+        this.currentCookie = this.mainCookie;
+        this.cookieSwitchCount = 0;
+    }
+
+    getActiveCookie() {
+        if (fs.existsSync(this.mainCookie)) {
+            return this.mainCookie;
+        }
+        if (fs.existsSync(this.backupCookie)) {
+            if (this.currentCookie !== this.backupCookie) {
+                console.log('?? Switching to backup cookie');
+                this.currentCookie = this.backupCookie;
+                this.cookieSwitchCount++;
+            }
+            return this.backupCookie;
+        }
+        return null;
+    }
+
+    async extractM3U8() {
+        const cookiePath = this.getActiveCookie();
+        const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
+        
+        let command;
+        let usingCookie = false;
+        
+        if (cookiePath) {
+            command = `${ytCmd} --cookies "${cookiePath}" -g --format best "${this.youtubeUrl}"`;
+            usingCookie = true;
+            console.log(`?? [${new Date().toISOString()}] Renewing WITH cookie: ${path.basename(cookiePath)}`);
+        } else {
+            command = `${ytCmd} -g --format best "${this.youtubeUrl}"`;
+            console.log(`?? [${new Date().toISOString()}] Renewing WITHOUT cookie - WARNING`);
+            
+            // Send preventive alert
+            if (!this.warningSent && this.emailAlerts) {
+                this.warningSent = true;
+                console.log('?? Sending preventive alert: system without cookie');
+                try {
+                    await this.emailAlerts.sistemaSemCookie(this.youtubeUrl);
+                    console.log('? Preventive email sent successfully');
+                } catch (emailError) {
+                    console.log('? Error sending preventive email:', emailError.message);
+                }
+            }
+        }
+        
+        try {
+            const { stdout } = await execPromise(command, { timeout: 30000 });
+            const urls = stdout.trim().split('\n');
+            const videoUrl = urls.find(u => u.includes('.m3u8') || u.includes('.ts'));
+            
+            if (videoUrl) {
+                this.m3u8Url = videoUrl;
+                this.isLive = true;
+                this.lastCheck = new Date();
+                
+                const wasFailing = this.failCount > 0;
+                this.failCount = 0;
+                
+                if (wasFailing) {
+                    console.log(`? Monitor recovered after ${wasFailing} failures`);
+                    if (this.emailAlerts) {
+                        await this.emailAlerts.liveUp(this.getVideoId(), this.youtubeUrl);
+                    }
+                } else {
+                    console.log(`? URL renewed successfully${usingCookie ? ' (with cookie)' : ' (without cookie - degraded mode)'}`);
+                }
+                
+                if (!this.startTime) {
+                    this.startTime = new Date();
+                    console.log(`?? Live started: ${this.youtubeUrl}`);
+                }
+                
+                this.wasLive = true;
+                return this.m3u8Url;
+            }
+            
+            throw new Error('No stream found');
+            
+        } catch (error) {
+            this.failCount++;
+            console.log(`? Failure ${this.failCount}/${this.maxFails}: ${error.message.substring(0, 100)}`);
+            
+            const isAuthError = error.message.includes('Sign in') || 
+                                error.message.includes('bot') || 
+                                error.message.includes('cookies') || 
+                                error.message.includes('403') ||
+                                error.message.includes('login');
+            
+            if (isAuthError) {
+                console.log('?? AUTH ERROR - Cookie may have expired');
+                
+                if (this.failCount >= 3 && fs.existsSync(this.backupCookie) && this.currentCookie !== this.backupCookie) {
+                    console.log('?? Trying backup cookie...');
+                    this.currentCookie = this.backupCookie;
+                }
+                
+                if (this.failCount >= this.maxFails && this.emailAlerts) {
+                    await this.emailAlerts.cookieExpired();
+                    console.log('?? Cookie expired email sent');
+                }
+            }
+            
+            if (this.failCount >= this.maxFails) {
+                if (this.wasLive) {
+                    console.log(`?? LIVE OFFLINE: ${this.youtubeUrl}`);
+                    if (this.emailAlerts && this.startTime) {
+                        const duration = this.calculateDuration();
+                        await this.emailAlerts.liveDown(this.getVideoId(), this.youtubeUrl, duration);
+                    }
+                }
+                this.isLive = false;
+                this.wasLive = false;
+            } else {
+                this.isLive = this.wasLive;
+            }
+            
+            throw error;
+        }
+    }
+
+    calculateDuration() {
+        if (!this.startTime) return 'unknown';
+        const diff = Math.floor((Date.now() - this.startTime) / 1000);
+        const hours = Math.floor(diff / 3600);
+        const minutes = Math.floor((diff % 3600) / 60);
+        return `${hours}h ${minutes}m`;
+    }
+
+    getVideoId() {
+        const match = this.youtubeUrl.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
+        return match ? match[1] : 'unknown';
+    }
+
+    startMonitoring(intervalSeconds = 30) {
+        const cookieStatus = this.getActiveCookie();
+        console.log(`?? Monitor started - checking every ${intervalSeconds} seconds`);
+        if (cookieStatus) {
+            console.log(`?? Active cookie: ${path.basename(cookieStatus)}`);
+        } else {
+            console.log(`?? Active cookie: NONE - Degraded mode`);
+        }
+        
+        this.extractM3U8().catch(() => {});
+        
+        this.monitorInterval = setInterval(() => {
+            this.extractM3U8().catch(() => {});
+        }, intervalSeconds * 1000);
+    }
+
+    stopMonitoring() {
+        if (this.monitorInterval) {
+            clearInterval(this.monitorInterval);
+            this.monitorInterval = null;
+        }
+    }
+
+        getSystemState() {
+        const mainExists = fs.existsSync(this.mainCookie);
+        const backupExists = fs.existsSync(this.backupCookie);
+        
+        if (mainExists) {
+            return { state: 'HEALTHY', message: 'Using main cookie' };
+        } else if (backupExists) {
+            return { state: 'BACKUP', message: 'Using backup cookie - Please update main cookie' };
+        } else if (this.isLive) {
+            return { state: 'DEGRADED', message: 'Working without cookie - Update preventive' };
+        } else {
+            return { state: 'CRITICAL', message: 'No cookie and no live - Immediate action needed' };
+        }
+    }
+
+     {
+        return {
+            isLive: this.isLive,
+            streamUrl: this.m3u8Url ? this.m3u8Url.substring(0, 100) + '...' : null,
+            originalUrl: this.youtubeUrl,
+            lastCheck: this.lastCheck,
+            startTime: this.startTime,
+            failCount: this.failCount,
+            cookieActive: this.getActiveCookie() !== null,
+            cookieSwitches: this.cookieSwitchCount
+        };
+    }
+}
+
+module.exports = LiveMonitor;
+
+

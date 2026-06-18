@@ -1,0 +1,153 @@
+﻿// api/convert.js
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const path = require('path');
+const fs = require('fs');
+
+class ConvertAPI {
+    constructor(emailAlerts) {
+        this.emailAlerts = emailAlerts;
+        this.liveCache = new Map();
+    }
+
+    getCookiePath() {
+        const cookiesDir = path.join(__dirname, '../cookies');
+        const mainPath = path.join(cookiesDir, 'main.txt');
+        const backupPath = path.join(cookiesDir, 'backup.txt');
+        
+        if (fs.existsSync(mainPath)) {
+            return mainPath;
+        } else if (fs.existsSync(backupPath)) {
+            return backupPath;
+        }
+        return null;
+    }
+
+    async convert(youtubeUrl, baseUrl) {
+        const videoId = this.extractVideoId(youtubeUrl);
+        
+        if (this.liveCache.has(youtubeUrl)) {
+            const cached = this.liveCache.get(youtubeUrl);
+            return {
+                success: true,
+                videoId: videoId,
+                streamUrl: cached.m3u8Url,
+                serverUrl: `${baseUrl}/neonews/${videoId}.m3u8`,
+                isLive: cached.isLive,
+                cached: true,
+                message: 'Live já está em cache'
+            };
+        }
+        
+        console.log(`[${new Date().toISOString()}] Requisicao: ${youtubeUrl}`);
+        
+        const cookiePath = this.getCookiePath();
+        const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
+        
+        let command;
+        if (cookiePath) {
+            command = `${ytCmd} --cookies "${cookiePath}" -g --format best "${youtubeUrl}"`;
+            console.log(`🍪 Usando cookie: ${path.basename(cookiePath)}`);
+        } else {
+            command = `${ytCmd} -g --format best "${youtubeUrl}"`;
+            console.log(`⚠️ Nenhum cookie encontrado, tentando sem autenticação`);
+        }
+        
+        console.log(`🔧 Executando: ${command}`);
+        
+        try {
+            const { stdout } = await execPromise(command, { timeout: 30000 });
+            const streamUrl = stdout.trim().split('\n')[0];
+            
+            if (!streamUrl || (!streamUrl.includes('.m3u8') && !streamUrl.includes('manifest'))) {
+                throw new Error('URL retornada não é um stream HLS válido');
+            }
+            
+            console.log(`✅ Stream capturada`);
+            
+            const LiveMonitor = require('../monitor/liveMonitor');
+            const monitor = new LiveMonitor(youtubeUrl, this.emailAlerts);
+            monitor.m3u8Url = streamUrl;
+            monitor.isLive = true;
+            monitor.startMonitoring(30);
+            
+            this.liveCache.set(youtubeUrl, {
+                videoId: videoId,
+                youtubeUrl: youtubeUrl,
+                m3u8Url: streamUrl,
+                isLive: true,
+                monitor: monitor,
+                hits: 1,
+                createdAt: Date.now()
+            });
+            
+            console.log(`✅ Live salva em cache. Total: ${this.liveCache.size}`);
+            
+            return {
+                success: true,
+                videoId: videoId,
+                streamUrl: streamUrl,
+                serverUrl: `${baseUrl}/neonews/${videoId}.m3u8`,
+                isLive: true,
+                cached: false,
+                message: 'Live detectada com sucesso'
+            };
+            
+        } catch (error) {
+            console.error(`❌ Erro na conversão: ${error.message}`);
+            
+            const LiveMonitor = require('../monitor/liveMonitor');
+            const monitor = new LiveMonitor(youtubeUrl, this.emailAlerts);
+            monitor.isLive = false;
+            monitor.failCount = 1;
+            monitor.startMonitoring(30);
+            
+            this.liveCache.set(youtubeUrl, {
+                videoId: videoId,
+                youtubeUrl: youtubeUrl,
+                m3u8Url: null,
+                isLive: false,
+                monitor: monitor,
+                hits: 1,
+                createdAt: Date.now()
+            });
+            
+            console.log(`⚠️ Monitor criado mesmo com falha. Total: ${this.liveCache.size}`);
+            
+            return {
+                success: false,
+                videoId: videoId,
+                error: error.message,
+                message: 'Falha ao processar live'
+            };
+        }
+    }
+
+    extractVideoId(url) {
+        const match = url.match(/(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&]|$)/);
+        return match ? match[1] : "url_invalida";
+    }
+
+    getLiveStats() {
+        const stats = {
+            totalCached: this.liveCache.size,
+            lives: []
+        };
+        
+        for (const [url, data] of this.liveCache.entries()) {
+            stats.lives.push({
+                videoId: data.videoId,
+                url: url,
+                isLive: data.isLive,
+                hits: data.hits,
+                lastAccess: data.lastAccess ? new Date(data.lastAccess).toISOString() : null,
+                createdAt: new Date(data.createdAt).toISOString()
+            });
+        }
+        
+        return stats;
+    }
+}
+
+module.exports = ConvertAPI;

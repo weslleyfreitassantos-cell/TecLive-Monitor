@@ -1,0 +1,430 @@
+﻿const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+const { spawn } = require('child_process');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 3002;
+
+app.use(express.json());
+app.use(express.static('public'));
+
+// ========== CONFIGURACAO ==========
+const cookiesDir = path.join(__dirname, 'cookies');
+if (!fs.existsSync(cookiesDir)) {
+    fs.mkdirSync(cookiesDir, { recursive: true });
+}
+
+// ========== CONTROLE DE CONCORRÊNCIA ==========
+let uploadInProgress = false;
+let lastCookieValidation = null;
+let lastCookieValid = false;
+
+// ========== CONFIGURACAO DO MULTER COM NOME ÚNICO ==========
+const storage = multer.diskStorage({
+    destination: cookiesDir,
+    filename: (req, file, cb) => {
+        const uniqueName = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`;
+        cb(null, uniqueName);
+    }
+});
+const upload = multer({ storage: storage });
+
+// ========== MIDDLEWARE DE ERRO DO MULTER ==========
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        console.error(`❌ Erro Multer: ${err.message}`);
+        return res.status(400).json({ success: false, message: err.message });
+    }
+    next(err);
+});
+
+let converter = null;
+
+// ========== FUNÇÃO PARA EXECUTAR YT-DLP COM SPAWN (MAIS ROBUSTO) ==========
+function runYtdlp(args, timeout = 30000) {
+    return new Promise((resolve, reject) => {
+        const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
+        const child = spawn(ytCmd, args);
+        
+        let stdout = '';
+        let stderr = '';
+        let timedOut = false;
+        
+        const timeoutId = setTimeout(() => {
+            timedOut = true;
+            child.kill('SIGTERM');
+            reject(new Error(`Timeout após ${timeout}ms`));
+        }, timeout);
+        
+        child.stdout.on('data', (data) => { stdout += data.toString(); });
+        child.stderr.on('data', (data) => { stderr += data.toString(); });
+        
+        child.on('close', (code) => {
+            clearTimeout(timeoutId);
+            if (timedOut) return;
+            
+            if (code === 0) {
+                resolve(stdout.trim());
+            } else {
+                reject(new Error(stderr.trim() || `Código de saída: ${code}`));
+            }
+        });
+        
+        child.on('error', (err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+        });
+    });
+}
+
+// ========== VALIDACAO SIMPLIFICADA (SEM DEPENDÊNCIA DE URL ESPECÍFICA) ==========
+async function validateCookieSimple(cookiePath) {
+    // Nivel 1: Verificar tamanho sem ler todo o arquivo
+    const stats = fs.statSync(cookiePath);
+    if (stats.size < 5000) {
+        throw new Error(`Arquivo muito pequeno (${stats.size} bytes)`);
+    }
+    
+    // Nivel 2: Verificar domínio do YouTube
+    const content = fs.readFileSync(cookiePath, 'utf8');
+    if (!content.includes('.youtube.com') && !content.includes('youtube.com')) {
+        throw new Error('Cookie inválido - domínio YouTube não encontrado');
+    }
+    
+    console.log('✅ Estrutura do cookie OK');
+    
+    // Nivel 3: Teste de autenticação (sem depender de vídeo específico)
+    try {
+        console.log('🔍 Testando autenticação do cookie...');
+        await runYtdlp([
+            '--cookies', cookiePath,
+            '--flat-playlist',
+            '--playlist-end', '1',
+            '--dump-json',
+            'https://www.youtube.com/feed/subscriptions'
+        ], 20000);
+        console.log('✅ Cookie válido (autenticação confirmada)');
+        return true;
+    } catch (error) {
+        throw new Error('Cookie inválido: ' + error.message);
+    }
+}
+
+// ========== ROTAS DE COOKIE ==========
+app.post('/api/cookie/test', async (req, res) => {
+    const mainPath = path.join(cookiesDir, 'main.txt');
+    
+    if (!fs.existsSync(mainPath)) {
+        return res.json({ valid: false, error: 'Nenhum cookie configurado' });
+    }
+    
+    // Cache de 5 minutos para evitar validações repetidas
+    const cacheTime = 5 * 60 * 1000;
+    if (lastCookieValidation && (Date.now() - lastCookieValidation) < cacheTime) {
+        console.log('📦 Usando cache de validação do cookie');
+        return res.json({ valid: lastCookieValid, message: lastCookieValid ? 'Cookie válido (cache)' : 'Cookie inválido (cache)' });
+    }
+    
+    try {
+        await validateCookieSimple(mainPath);
+        lastCookieValid = true;
+        lastCookieValidation = Date.now();
+        res.json({ valid: true, message: 'Cookie válido' });
+    } catch (error) {
+        lastCookieValid = false;
+        lastCookieValidation = Date.now();
+        res.json({ valid: false, error: error.message });
+    }
+});
+
+app.post('/api/cookie/upload', upload.single('cookie'), async (req, res) => {
+    const startTime = Date.now();
+    
+    // TRAVA GLOBAL - impede uploads concorrentes
+    if (uploadInProgress) {
+        console.log('⚠️ Upload já em andamento, rejeitando requisição');
+        return res.status(409).json({ 
+            success: false, 
+            message: 'Já existe um upload em andamento. Aguarde alguns segundos.' 
+        });
+    }
+    
+    uploadInProgress = true;
+    
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado' });
+        }
+        
+        const tempPath = req.file.path;
+        const mainPath = path.join(cookiesDir, 'main.txt');
+        const backupPath = path.join(cookiesDir, 'backup.txt');
+        
+        console.log(`📁 Upload: ${req.file.originalname} (${req.file.size} bytes) -> ${path.basename(tempPath)}`);
+        
+        // Validação do cookie
+        await validateCookieSimple(tempPath);
+        
+        console.log(`✅ Cookie validado em ${Date.now() - startTime}ms`);
+        
+        // BACKUP SEGURO (sem apagar o main.txt antes)
+        let backupCreated = false;
+        if (fs.existsSync(mainPath)) {
+            fs.copyFileSync(mainPath, backupPath);
+            backupCreated = true;
+            console.log('📁 Backup do main.txt criado');
+        }
+        
+        // RENAME COM FALLBACK (nunca fica sem main.txt)
+        try {
+            if (fs.existsSync(mainPath)) {
+                fs.unlinkSync(mainPath);
+            }
+            fs.renameSync(tempPath, mainPath);
+            console.log('✅ Rename atômico bem-sucedido');
+        } catch (renameError) {
+            console.log(`⚠️ Rename falhou: ${renameError.message}, usando fallback`);
+            fs.copyFileSync(tempPath, mainPath);
+            if (fs.existsSync(tempPath)) {
+                fs.unlinkSync(tempPath);
+            }
+            console.log('✅ Fallback copy+unlink bem-sucedido');
+        }
+        
+        // Atualizar cache de validação
+        lastCookieValidation = Date.now();
+        lastCookieValid = true;
+        
+        console.log(`✅ Cookie atualizado com sucesso! Tempo total: ${Date.now() - startTime}ms`);
+        
+        res.json({ 
+            success: true, 
+            message: 'Cookie atualizado com sucesso',
+            backupCreated: backupCreated,
+            elapsedMs: Date.now() - startTime
+        });
+        
+    } catch (error) {
+        console.error(`❌ Erro no upload: ${error.message}`);
+        
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+        
+        res.status(400).json({ success: false, message: error.message });
+    } finally {
+        uploadInProgress = false;
+    }
+});
+
+// ========== ROTA /API/COOKIE/STATUS ==========
+app.get('/api/cookie/status', (req, res) => {
+    const mainPath = path.join(cookiesDir, 'main.txt');
+    const backupPath = path.join(cookiesDir, 'backup.txt');
+    
+    const mainExists = fs.existsSync(mainPath);
+    const backupExists = fs.existsSync(backupPath);
+    
+    const MIN_SIZE = 5000;
+    
+    let mainValid = false;
+    let backupValid = false;
+    let mainSize = 0;
+    let backupSize = 0;
+    
+    if (mainExists) {
+        mainSize = fs.statSync(mainPath).size;
+        mainValid = mainSize > MIN_SIZE;
+    }
+    
+    if (backupExists) {
+        backupSize = fs.statSync(backupPath).size;
+        backupValid = backupSize > MIN_SIZE;
+    }
+    
+    let activeCookie = 'nenhum';
+    let healthy = false;
+    
+    if (mainValid) {
+        activeCookie = 'main.txt';
+        healthy = true;
+    } else if (backupValid) {
+        activeCookie = 'backup.txt';
+        healthy = true;
+    }
+    
+    let hasBackup = false;
+    if (activeCookie === 'main.txt' && backupValid) {
+        hasBackup = true;
+    } else if (activeCookie === 'backup.txt' && mainValid) {
+        hasBackup = true;
+    }
+    
+    res.json({
+        healthy: healthy,
+        hasBackup: hasBackup,
+        activeCookie: activeCookie,
+        cookieSize: activeCookie !== 'nenhum' ? (activeCookie === 'main.txt' ? mainSize : backupSize) : 0,
+        lastCheck: new Date().toISOString()
+    });
+});
+
+// ========== SISTEMA PRINCIPAL ==========
+const EmailAlerts = require('./alerts/emailAlerts');
+const ConvertAPI = require('./api/convert');
+
+const emailAlerts = new EmailAlerts();
+converter = new ConvertAPI(emailAlerts);
+
+app.post('/api/convert', async (req, res) => {
+    const { youtubeUrl } = req.body;
+    if (!youtubeUrl) {
+        return res.status(400).json({ success: false, error: 'URL obrigatoria' });
+    }
+    const baseUrl = process.env.BASE_URL || 'http://localhost:' + PORT;
+    const result = await converter.convert(youtubeUrl, baseUrl);
+    res.json(result);
+});
+
+// ========== ROTA /API/MONITORS ==========
+app.get('/api/monitors', (req, res) => {
+    const monitors = [];
+    
+    if (converter && converter.liveCache) {
+        for (const [url, data] of converter.liveCache.entries()) {
+            let status = data.status;
+            let failCount = 0;
+            
+            if (data.monitor) {
+                status = data.monitor.liveState || data.monitor.status || data.status;
+                failCount = data.monitor.failCount || 0;
+            }
+            
+            if (!status) {
+                status = data.isLive ? 'online' : 'offline';
+            }
+            
+            monitors.push({
+                videoId: data.videoId,
+                youtubeUrl: url,
+                status: status,
+                isLive: status === 'online',
+                failCount: failCount,
+                lastRenewSuccess: data.lastUpdate || data.lastRenewSuccess
+            });
+        }
+    }
+    
+    if (monitors.length > 0) {
+        const offlineCount = monitors.filter(m => m.status !== 'online').length;
+        if (offlineCount > 0) {
+            console.log(`📊 /api/monitors: ${monitors.length} lives (${offlineCount} offline/ended)`);
+            monitors.forEach(m => {
+                if (m.status !== 'online') {
+                    console.log(`   - ${m.videoId}: ${m.status}`);
+                }
+            });
+        }
+    }
+    
+    res.json({ totalMonitors: monitors.length, monitors });
+});
+
+// ========== ROTA PARA NEONEWS ==========
+app.get('/neonews/:videoId.m3u8', async (req, res) => {
+    const videoId = req.params.videoId;
+    let streamUrl = null;
+    
+    if (converter && converter.liveCache) {
+        for (const [url, data] of converter.liveCache.entries()) {
+            if (data.videoId === videoId) {
+                streamUrl = data.m3u8Url || data.streamUrl;
+                break;
+            }
+        }
+    }
+    
+    if (!streamUrl) {
+        return res.status(404).send('Stream not found');
+    }
+    
+    const https = require('https');
+    const http = require('http');
+    
+    try {
+        const urlObj = new URL(streamUrl);
+        const protocol = urlObj.protocol === 'https:' ? https : http;
+        
+        protocol.get(streamUrl, (proxyRes) => {
+            let m3u8Content = '';
+            
+            if (proxyRes.statusCode !== 200) {
+                return res.status(502).send('Stream error');
+            }
+            
+            proxyRes.on('data', (chunk) => { m3u8Content += chunk; });
+            proxyRes.on('end', () => {
+                res.writeHead(200, {
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Access-Control-Allow-Origin': '*',
+                    'Cache-Control': 'no-cache'
+                });
+                res.end(m3u8Content);
+            });
+        }).on('error', (err) => {
+            res.status(500).send('Error');
+        });
+    } catch (err) {
+        res.status(500).send('Invalid URL');
+    }
+});
+
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        version: '3.0.0',
+        uptime: process.uptime(),
+        cachedLives: converter && converter.liveCache ? converter.liveCache.size : 0
+    });
+});
+
+app.get('/stats', (req, res) => {
+    res.json(converter.getLiveStats());
+});
+
+app.get('/admin/cookie', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public/admin/cookie.html'));
+});
+
+app.get('/', (req, res) => {
+    res.redirect('/dashboard.html');
+});
+
+app.post('/admin/test-recovery', async (req, res) => {
+    try {
+        const systemState = require('./systemState');
+        if (systemState && systemState.sendRecoveryEmail) {
+            let liveCount = converter && converter.liveCache ? converter.liveCache.size : 1;
+            await systemState.sendRecoveryEmail(emailAlerts, liveCount);
+            res.json({ success: true, message: 'E-mail de recuperação enviado!' });
+        } else {
+            res.json({ success: false, message: 'SystemState não disponível' });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// INICIAR SERVIDOR
+app.listen(PORT, () => {
+    console.log('\n========================================');
+    console.log('NeoNews Live Converter V3');
+    console.log('========================================');
+    console.log('Dashboard: http://localhost:' + PORT + '/dashboard.html');
+    console.log('Conversor: http://localhost:' + PORT + '/converter.html');
+    console.log('API Health: http://localhost:' + PORT + '/health');
+    console.log('========================================\n');
+});

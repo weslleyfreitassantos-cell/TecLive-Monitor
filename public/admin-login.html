@@ -1,140 +1,88 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
+﻿<!DOCTYPE html>
+<html lang="pt-br">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Login</title>
+    <title>Login Admin - Live Monitor</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
         body {
-            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0a0e1a;
+            color: #e0e0e0;
             min-height: 100vh;
             display: flex;
-            align-items: center;
             justify-content: center;
-            padding: 20px;
+            align-items: center;
         }
-        
-        .login-card {
-            background: #1e293b;
+        .login-container {
+            background: #0f1322;
+            border: 1px solid rgba(46,204,113,0.2);
             border-radius: 24px;
-            padding: 40px;
+            padding: 40px 32px;
             width: 100%;
             max-width: 400px;
-            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25);
-        }
-        
-        .logo {
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
             text-align: center;
-            margin-bottom: 32px;
         }
-        
-        .logo h1 {
-            color: white;
-            font-size: 28px;
-            margin-bottom: 8px;
-        }
-        
-        .logo p {
-            color: #94a3b8;
-            font-size: 14px;
-        }
-        
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        h1 span { color: #2ecc71; }
+        .sub { font-size: 12px; color: #7a8aa0; margin-bottom: 32px; }
         input {
             width: 100%;
-            padding: 14px 16px;
-            background: #0f172a;
-            border: 1px solid #334155;
+            padding: 12px 16px;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(46,204,113,0.3);
             border-radius: 12px;
-            color: white;
+            color: #e0e0e0;
             font-size: 16px;
             margin-bottom: 20px;
-            transition: all 0.2s;
-        }
-        
-        input:focus {
             outline: none;
-            border-color: #6366f1;
-            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
         }
-        
+        input:focus { border-color: #2ecc71; box-shadow: 0 0 8px rgba(46,204,113,0.2); }
         button {
             width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #6366f1, #8b5cf6);
-            color: white;
+            padding: 12px;
+            background: linear-gradient(135deg, #2ecc71, #27ae60);
             border: none;
             border-radius: 12px;
+            color: white;
+            font-weight: bold;
             font-size: 16px;
-            font-weight: 600;
             cursor: pointer;
-            transition: all 0.2s;
         }
-        
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(99, 102, 241, 0.4);
-        }
-        
+        button:hover { transform: translateY(-2px); opacity: 0.9; }
         .error {
-            color: #ef4444;
-            margin-top: 16px;
-            text-align: center;
-            font-size: 14px;
+            background: rgba(231,76,60,0.1);
+            border-left: 3px solid #e74c3c;
+            padding: 10px;
+            margin-top: 20px;
+            font-size: 13px;
+            border-radius: 8px;
+            color: #e74c3c;
         }
-        
-        .footer {
-            margin-top: 24px;
-            text-align: center;
-            color: #475569;
+        .info {
             font-size: 12px;
+            color: #7a8aa0;
+            margin-top: 24px;
         }
     </style>
 </head>
 <body>
-    <div class="login-card">
-        <div class="logo">
-            <h1>🔐 Admin Login</h1>
-            <p>Acesso restrito ao administrador</p>
-        </div>
-        
-        <input type="password" id="password" placeholder="Senha de administrador" onkeypress="if(event.key==='Enter') login()">
-        <button onclick="login()">Entrar</button>
-        
-        <div id="error" class="error"></div>
-        <div class="footer">YouTube Live Monitor v2.0</div>
-    </div>
-    
-    <script>
-        async function login() {
-            const password = document.getElementById('password').value;
-            
-            if (!password) {
-                document.getElementById('error').innerText = 'Digite a senha';
-                return;
-            }
-            
-            try {
-                const response = await fetch('/admin/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    localStorage.setItem('adminToken', data.token);
-                    window.location.href = '/admin-dashboard.html';
-                } else {
-                    document.getElementById('error').innerText = 'Senha incorreta';
-                }
-            } catch (error) {
-                document.getElementById('error').innerText = 'Erro ao conectar com o servidor';
-            }
-        }
-    </script>
+<div class="login-container">
+    <h1>Tec<span>Live Monitor</span></h1>
+    <div class="sub">Área Restrita</div>
+    <form action="/admin-login" method="POST">
+        <input type="password" name="password" placeholder="Senha de administrador" autofocus required>
+        <button type="submit">Entrar</button>
+    </form>
+    <div id="errorMsg" class="error" style="display: none;">Senha incorreta. Tente novamente.</div>
+    <div class="info">Acesso apenas para administradores autorizados.</div>
+</div>
+<script>
+    if (window.location.search.includes('error=1')) {
+        document.getElementById('errorMsg').style.display = 'block';
+    }
+</script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NeoNews Live Monitor</title>
+    <title>Live Monitor</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0e1a; color: #e0e0e0; min-height: 100vh; }
@@ -13,48 +13,13 @@
         .logo h1 { font-size: 32px; font-weight: 700; color: #e0e0e0; }
         .logo h1 span { color: #2ecc71; }
         .logo .subtitle { font-size: 12px; color: #7a8aa0; text-transform: uppercase; letter-spacing: 2px; }
-        
-        .total-lives-header {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 20px;
-            background: rgba(46,204,113,0.08);
-            padding: 10px 24px;
-            border-radius: 48px;
-            border: 1px solid rgba(46,204,113,0.15);
-        }
-        .total-lives-item {
-            display: flex;
-            align-items: baseline;
-            gap: 8px;
-        }
-        .total-lives-label {
-            font-size: 13px;
-            color: #7a8aa0;
-            font-weight: 500;
-            letter-spacing: 0.5px;
-        }
-        .total-lives-value {
-            font-size: 24px;
-            font-weight: 700;
-            color: #2ecc71;
-            font-family: monospace;
-        }
-        .header-divider {
-            width: 1px;
-            height: 30px;
-            background: rgba(46,204,113,0.3);
-        }
-        .header-clock {
-            font-family: monospace;
-            font-size: 20px;
-            font-weight: 600;
-            color: #5dade2;
-            letter-spacing: 1px;
-        }
-        
-        .stats-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 20px; margin-bottom: 32px; }
+        .total-lives-header { display: flex; align-items: center; justify-content: center; gap: 20px; background: rgba(46,204,113,0.08); padding: 10px 24px; border-radius: 48px; border: 1px solid rgba(46,204,113,0.15); }
+        .total-lives-item { display: flex; align-items: baseline; gap: 8px; }
+        .total-lives-label { font-size: 13px; color: #7a8aa0; font-weight: 500; letter-spacing: 0.5px; }
+        .total-lives-value { font-size: 24px; font-weight: 700; color: #2ecc71; font-family: monospace; }
+        .header-divider { width: 1px; height: 30px; background: rgba(46,204,113,0.3); }
+        .header-clock { font-family: monospace; font-size: 20px; font-weight: 600; color: #5dade2; letter-spacing: 1px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 32px; }
         .stat-card { background: #0f1322; border: 1px solid rgba(46,204,113,0.12); border-radius: 16px; padding: 20px; text-align: center; }
         .stat-value { font-size: 48px; font-weight: 700; color: #2ecc71; }
         .stat-label { font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase; color: #7a8aa0; }
@@ -63,82 +28,19 @@
         .card-header { padding: 14px 20px; background: rgba(0,0,0,0.25); border-bottom: 1px solid rgba(46,204,113,0.1); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
         .card-header h2 { font-size: 13px; font-weight: 600; color: #2ecc71; text-transform: uppercase; }
         .card-header .badge { background: rgba(46,204,113,0.1); padding: 3px 10px; border-radius: 16px; font-size: 11px; color: #2ecc71; }
-        
-        .search-filters {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-        .search-box {
-            display: flex;
-            align-items: center;
-            background: rgba(0,0,0,0.3);
-            border: 1px solid rgba(46,204,113,0.2);
-            border-radius: 8px;
-            padding: 4px 8px;
-            transition: all 0.2s;
-        }
-        .search-box:focus-within {
-            border-color: #2ecc71;
-            box-shadow: 0 0 8px rgba(46,204,113,0.2);
-        }
-        .search-box input {
-            background: transparent;
-            border: none;
-            color: #e0e0e0;
-            padding: 6px 8px;
-            font-size: 12px;
-            outline: none;
-            width: 160px;
-        }
-        .search-box input::placeholder {
-            color: #7a8aa0;
-        }
-        .search-box button {
-            background: transparent;
-            border: none;
-            color: #2ecc71;
-            cursor: pointer;
-            padding: 4px 6px;
-            font-size: 14px;
-            transition: all 0.2s;
-        }
-        .search-box button:hover {
-            transform: scale(1.1);
-        }
-        .filter-buttons {
-            display: flex;
-            gap: 8px;
-        }
-        .filter-btn {
-            background: rgba(46,204,113,0.08);
-            border: 1px solid rgba(46,204,113,0.2);
-            color: #7a8aa0;
-            padding: 4px 14px;
-            border-radius: 20px;
-            font-size: 12px;
-            cursor: pointer;
-            transition: all 0.2s;
-            font-weight: 500;
-        }
-        .filter-btn:hover {
-            background: rgba(46,204,113,0.15);
-            color: #2ecc71;
-        }
-        .filter-btn.active {
-            background: rgba(46,204,113,0.2);
-            border-color: #2ecc71;
-            color: #2ecc71;
-        }
-        
+        .search-filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .search-box { display: flex; align-items: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.2); border-radius: 8px; padding: 4px 8px; transition: all 0.2s; }
+        .search-box:focus-within { border-color: #2ecc71; box-shadow: 0 0 8px rgba(46,204,113,0.2); }
+        .search-box input { background: transparent; border: none; color: #e0e0e0; padding: 6px 8px; font-size: 12px; outline: none; width: 160px; }
+        .search-box input::placeholder { color: #7a8aa0; }
+        .search-box button { background: transparent; border: none; color: #2ecc71; cursor: pointer; padding: 4px 6px; font-size: 14px; transition: all 0.2s; }
+        .search-box button:hover { transform: scale(1.1); }
+        .filter-buttons { display: flex; gap: 8px; }
+        .filter-btn { background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.2); color: #7a8aa0; padding: 4px 14px; border-radius: 20px; font-size: 12px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+        .filter-btn:hover { background: rgba(46,204,113,0.15); color: #2ecc71; }
+        .filter-btn.active { background: rgba(46,204,113,0.2); border-color: #2ecc71; color: #2ecc71; }
         .card-content { padding: 20px; flex: 1; display: flex; flex-direction: column; }
-        .monitors-table-container {
-            max-height: 400px;
-            overflow-y: auto;
-            overflow-x: auto;
-            border-radius: 8px;
-        }
+        .monitors-table-container { max-height: 400px; overflow-y: auto; overflow-x: auto; border-radius: 8px; }
         .monitors-table-container::-webkit-scrollbar { width: 8px; height: 8px; }
         .monitors-table-container::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
         .monitors-table-container::-webkit-scrollbar-thumb { background: rgba(46,204,113,0.3); border-radius: 4px; }
@@ -152,8 +54,12 @@
         .status-ended { color: #ff0000; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
         .status-degraded { color: #f1c40f; font-weight: 600; }
         .video-id { font-family: monospace; color: #5dade2; }
-        
-        /* -- resto do CSS (autenticação, timeline, etc.) permanece igual -- */
+        .health-bar-container { width: 80px; background: #2a2d4e; border-radius: 10px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
+        .health-bar { height: 8px; background: linear-gradient(90deg, #00b4ff, #6c5ce7); border-radius: 10px; width: 0%; transition: width 0.3s; }
+        .badge-cause { background: #2a2d4e; border-radius: 20px; padding: 2px 8px; font-size: 0.65rem; font-weight: bold; margin-left: 6px; display: inline-block; color: #f1c40f; }
+        .details-row { display: none; background: #0d0f20; }
+        .details-row td { padding: 16px 20px; text-align: left; }
+        .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; font-size: 0.8rem; }
         .auth-container { display: flex; flex-direction: column; gap: 16px; min-height: 380px; height: 100%; }
         .auth-row { display: flex; gap: 16px; flex-wrap: wrap; }
         .auth-card { flex: 1; background: rgba(0,0,0,0.25); border-radius: 12px; padding: 20px; text-align: center; border: 1px solid rgba(46,204,113,0.1); transition: all 0.2s ease; }
@@ -186,320 +92,385 @@
         .fill-green { background: linear-gradient(90deg, #2ecc71, #27ae60); color: #0f1322; }
         .fill-cyan { background: linear-gradient(90deg, #5dade2, #3498db); color: #0f1322; }
         .fill-red { background: linear-gradient(90deg, #e74c3c, #c0392b); color: #fff; }
-        .management-area { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
-        .file-label { display: inline-flex; align-items: center; gap: 8px; background: rgba(46,204,113,0.1); border: 1px solid rgba(46,204,113,0.3); border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 12px; }
-        .file-label:hover { background: rgba(46,204,113,0.2); }
-        .upload-button { padding: 8px 20px; background: linear-gradient(135deg, #e74c3c, #c0392b); border: none; border-radius: 8px; color: #fff; font-weight: 600; cursor: pointer; }
-        .upload-button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(231,76,60,0.3); }
-        .upload-button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .action-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+        .action-buttons { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 0; }
         .btn-converter { background: rgba(93,173,226,0.1); border: 1px solid #5dade2; color: #5dade2; padding: 8px 20px; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; text-align: center; }
         .btn-converter:hover { background: rgba(93,173,226,0.2); transform: translateY(-1px); }
-        .message { margin-top: 12px; padding: 8px 12px; border-radius: 6px; font-size: 11px; }
-        .message-info { background: rgba(93,173,226,0.1); border-left: 2px solid #5dade2; color: #5dade2; }
-        .message-success { background: rgba(46,204,113,0.1); border-left: 2px solid #2ecc71; color: #2ecc71; }
-        .message-error { background: rgba(231,76,60,0.1); border-left: 2px solid #e74c3c; color: #e74c3c; }
-        .filename { font-size: 11px; color: #2ecc71; margin-left: 8px; }
-        @media (max-width: 900px) { .container { padding: 16px; } .two-columns { grid-template-columns: 1fr; } .search-filters { width: 100%; } }
+        .cookie-status-msg { font-size: 12px; color: #2ecc71; margin-left: 8px; }
+        @media (max-width: 900px) {
+            .container { padding: 16px; }
+            .two-columns { grid-template-columns: 1fr; }
+            .search-filters { width: 100%; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/tippy.js@6/dist/tippy-bundle.umd.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tippy.js@6/dist/tippy.css" />
 </head>
 <body>
-    <div class="bg-pattern"></div>
-    <div class="container">
-        <div class="header">
-            <div class="logo">
-                <h1>NeoNews <span>Live Monitor</span></h1>
-                <div class="subtitle">Central de Monitoramento em Tempo Real</div>
-            </div>
-            <div class="total-lives-header">
-                <div class="total-lives-item">
-                    <span class="total-lives-label">📋 TOTAL LIVES CADASTRADAS</span>
-                    <span class="total-lives-value" id="totalLivesHeader">0</span>
-                </div>
-                <div class="header-divider"></div>
-                <div class="header-clock" id="liveClock">--:--:--</div>
-            </div>
+<div class="bg-pattern"></div>
+<div class="container">
+    <div class="header">
+        <div class="logo">
+            <h1>Tec<span>Live Monitor</span></h1>
+            <div class="subtitle">Central de Monitoramento em Tempo Real</div>
         </div>
-
-        <div class="stats-grid">
-            <div class="stat-card"><div class="stat-value" id="mainStatus">---</div><div class="stat-label">SERVIDOR</div></div>
-            <div class="stat-card"><div class="stat-value" id="activeLivesCard">0</div><div class="stat-label">LIVES ATIVAS</div></div>
-            <div class="stat-card"><div class="stat-value" id="mainCookie">---</div><div class="stat-label">COOKIE</div></div>
-            <div class="stat-card"><div class="stat-value" id="mainUptime">0m</div><div class="stat-label">UPTIME</div></div>
-        </div>
-
-        <div class="two-columns">
-            <div class="card">
-                <div class="card-header">
-                    <h2>📡 MONITORES ATIVOS</h2>
-                    <div class="search-filters">
-                        <div class="search-box">
-                            <input type="text" id="searchInput" placeholder="Buscar LIVE ID..." autocomplete="off">
-                            <button id="searchBtn">🔍</button>
-                        </div>
-                        <div class="filter-buttons">
-                            <button class="filter-btn active" data-filter="all">TODOS</button>
-                            <button class="filter-btn" data-filter="online">ONLINE</button>
-                            <button class="filter-btn" data-filter="offline">ENCERRADA</button>
-                        </div>
-                        <!-- botão LIMPAR removido -->
-                    </div>
-                    <!-- badge de contagem removido -->
-                </div>
-                <div class="card-content">
-                    <div class="monitors-table-container">
-                        <div id="monitorsContent"></div>
-                    </div>
-                </div>
+        <div class="total-lives-header">
+            <div class="total-lives-item">
+                <span class="total-lives-label">📋 TOTAL LIVES CADASTRADAS</span>
+                <span class="total-lives-value" id="totalLivesHeader">0</span>
             </div>
-            <div class="card">
-                <div class="card-header"><h2>🍪 AUTENTICAÇÃO</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
-                <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
-            </div>
-        </div>
-
-        <div class="two-columns">
-            <div class="card">
-                <div class="card-header"><h2>⏱️ LINHA DO TEMPO</h2><span class="badge">TERMINAL</span></div>
-                <div class="card-content"><div id="timelineContent" class="timeline"></div></div>
-            </div>
-            <div class="card">
-                <div class="card-header"><h2>📊 ATIVIDADE</h2><span class="badge">ULTIMOS 60 MIN</span></div>
-                <div class="card-content"><div id="chartContent"></div></div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h2>⚙️ GERENCIAMENTO</h2><span class="badge">ADMIN</span></div>
-            <div class="card-content">
-                <div class="management-area">
-                    <input type="file" id="cookieFile" accept=".txt" style="display:none;">
-                    <label for="cookieFile" class="file-label">📁 Selecionar cookie</label>
-                    <span id="fileName" class="filename"></span>
-                    <button id="uploadBtn" class="upload-button" disabled>UPLOAD</button>
-                </div>
-                <div id="uploadMessage"></div>
-                <div class="action-buttons">
-                    <button onclick="location.href='/converter.html'" class="btn-converter">CONVERSOR DE LINKS</button>
-                </div>
-            </div>
+            <div class="header-divider"></div>
+            <div class="header-clock" id="liveClock">--:--:--</div>
         </div>
     </div>
 
-    <script>
-        // (mantido o JavaScript original, apenas removida referência ao badge e ao botão clear)
-        let selectedFile = null;
-        let eventLog = [];
-        let renewalCount = 0;
-        let lastRenewTime = null;
-        let isUploading = false;
-        let allMonitorsData = [];
-        let currentFilter = 'all';
-        let currentSearch = '';
+    <div class="stats-grid">
+        <div class="stat-card"><div class="stat-value" id="mainStatus">---</div><div class="stat-label">SERVIDOR</div></div>
+        <div class="stat-card"><div class="stat-value" id="activeLivesCard">0</div><div class="stat-label">LIVES ATIVAS</div></div>
+        <div class="stat-card"><div class="stat-value" id="mainUptime">0m</div><div class="stat-label">UPTIME</div></div>
+    </div>
 
-        function addEvent(message) {
-            const time = new Date().toLocaleTimeString('pt-BR');
-            eventLog.unshift({ time, message });
-            if (eventLog.length > 20) eventLog.pop();
-            const container = document.getElementById('timelineContent');
-            if (eventLog.length === 0) { container.innerHTML = '<div class="empty-state">Aguardando eventos...</div>'; return; }
-            container.innerHTML = eventLog.map(e => `<div class="timeline-item"><span class="timeline-time">[${e.time}]</span><span>${e.message}</span></div>`).join('');
+    <div class="two-columns">
+        <div class="card">
+            <div class="card-header">
+                <h2>📡 MONITORES ATIVOS</h2>
+                <div class="search-filters">
+                    <div class="search-box">
+                        <input type="text" id="searchInput" placeholder="Buscar LIVE ID..." autocomplete="off">
+                        <button id="searchBtn">🔍</button>
+                    </div>
+                    <div class="filter-buttons">
+                        <button class="filter-btn active" data-filter="all">TODOS</button>
+                        <button class="filter-btn" data-filter="online">ONLINE</button>
+                        <button class="filter-btn" data-filter="offline">ENCERRADA</button>
+                        <button class="filter-btn" data-filter="degraded">INSTÁVEL</button>
+                    </div>
+                </div>
+            </div>
+            <div class="card-content">
+                <div class="monitors-table-container">
+                    <div id="monitorsContent"></div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h2>AUTENTICAÇÃO</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
+            <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
+        </div>
+    </div>
+
+    <div class="two-columns">
+        <div class="card">
+            <div class="card-header"><h2>⏱️ LINHA DO TEMPO</h2><span class="badge">TERMINAL</span></div>
+            <div class="card-content"><div id="timelineContent" class="timeline"></div></div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h2>📊 ATIVIDADE</h2><span class="badge">ULTIMOS 60 MIN</span></div>
+            <div class="card-content"><div id="chartContent"></div></div>
+        </div>
+    </div>
+
+    <!-- Card de GERENCIAMENTO com botão SAIR -->
+    <div class="card">
+        <div class="card-header">
+            <h2>⚙️ GERENCIAMENTO</h2>
+            <span class="badge">ADMIN</span>
+        </div>
+        <div class="card-content">
+            <div class="action-buttons">
+                <button onclick="location.href='/converter.html'" class="btn-converter">
+                    CONVERSOR DE LINKS
+                </button>
+                <button onclick="location.href='/admin-logout'" class="btn-converter" 
+                        style="background:#e74c3c; border-color:#e74c3c; color:white;">
+                    🚪 SAIR
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let eventLog = [];
+    let renewalCount = 0;
+    let lastRenewTime = null;
+    let allMonitorsData = [];
+    let currentFilter = 'all';
+    let currentSearch = '';
+
+    function computeHealthScore(health) {
+        const weights = { network: 25, metadata: 25, playlist: 25, cookies: 25 };
+        let score = 0;
+        for (const [comp, weight] of Object.entries(weights)) {
+            const status = health?.[comp]?.status;
+            if (status === 'ok') score += weight;
+            else if (status === 'warning') score += weight * 0.6;
         }
+        return score;
+    }
 
-        function updateChart(monitors) {
-            const totalLives = monitors.length;
-            const totalOnline = monitors.filter(m => m.status === 'online').length;
-            const totalFailures = monitors.reduce((sum, m) => sum + (m.failCount || 0), 0);
-            const maxVal = Math.max(totalLives, totalOnline, totalFailures, renewalCount, 5);
-            document.getElementById('chartContent').innerHTML = `
-                <div class="chart-item"><div class="chart-label"><span>📺 TOTAL LIVES</span><span style="color:#2ecc71">${totalLives}</span></div><div class="chart-bar"><div class="chart-fill fill-green" style="width: ${(totalLives/maxVal)*100}%">${totalLives}</div></div></div>
-                <div class="chart-item"><div class="chart-label"><span>🟢 LIVES ATIVAS</span><span style="color:#5dade2">${totalOnline}</span></div><div class="chart-bar"><div class="chart-fill fill-cyan" style="width: ${(totalOnline/maxVal)*100}%">${totalOnline}</div></div></div>
-                <div class="chart-item"><div class="chart-label"><span>❌ FALHAS</span><span style="color:#e74c3c">${totalFailures}</span></div><div class="chart-bar"><div class="chart-fill fill-red" style="width: ${(totalFailures/maxVal)*100}%">${totalFailures}</div></div></div>
-            `;
+    function getStatusDisplay(status, health) {
+        switch (status) {
+            case 'online': return { icon: '🟢', label: 'ONLINE', class: 'status-online' };
+            case 'degraded': return { icon: '🟡', label: 'INSTÁVEL', class: 'status-degraded' };
+            case 'offline': return { icon: '🔴', label: 'OFFLINE', class: 'status-offline' };
+            case 'ended': return { icon: '⚫', label: 'ENCERRADA', class: 'status-ended' };
+            default: return { icon: '❓', label: status || 'DESCONHECIDO', class: 'status-offline' };
         }
+    }
 
-        function updateClock() { 
-            const clockElement = document.getElementById('liveClock');
-            if (clockElement) clockElement.innerHTML = new Date().toLocaleTimeString('pt-BR');
+    function getMainCause(monitor) {
+        if (monitor.status !== 'degraded') return '';
+        const health = monitor.health;
+        const order = ['playlist', 'cookies', 'network', 'metadata'];
+        for (const comp of order) {
+            if (health?.[comp]?.status !== 'ok') return comp.toUpperCase();
         }
-        setInterval(updateClock, 1000);
-        updateClock();
+        return '';
+    }
 
-        function getStatusDisplay(status) {
-            switch (status) {
-                case 'online': return { text: '🟢 ONLINE', class: 'status-online' };
-                case 'degraded': return { text: '🟡 DEGRADADO', class: 'status-degraded' };
-                case 'offline': return { text: '🔴 OFFLINE', class: 'status-offline' };
-                case 'ended': return { text: '🔴 LIVE ENCERRADA', class: 'status-ended' };
-                default: return { text: '⚫ DESCONHECIDO', class: 'status-offline' };
+    function buildTooltipContent(monitor) {
+        const health = monitor.health;
+        const problems = [];
+        for (const [comp, data] of Object.entries(health || {})) {
+            if (data?.status !== 'ok' && data?.message) {
+                const icons = { network: '🌐', metadata: '📺', playlist: '🎬', cookies: '🍪' };
+                problems.push(`${icons[comp] || '⚠️'} ${comp.toUpperCase()}: ${data.message}`);
             }
         }
+        if (problems.length === 0) return '✅ Todos os componentes saudáveis';
+        return problems.join('\n');
+    }
 
-        function filterAndDisplayMonitors() {
-            let filtered = [...allMonitorsData];
-            if (currentFilter === 'online') filtered = filtered.filter(m => m.status === 'online');
-            else if (currentFilter === 'offline') filtered = filtered.filter(m => m.status === 'ended' || m.status === 'offline');
-            if (currentSearch.trim() !== '') {
-                const searchTerm = currentSearch.toLowerCase().trim();
-                filtered = filtered.filter(m => m.videoId && m.videoId.toLowerCase().includes(searchTerm));
-            }
-            const container = document.getElementById('monitorsContent');
-            if (filtered.length === 0) {
-                container.innerHTML = '<div class="empty-state">🔍 Nenhum monitor encontrado<br>Altere os filtros ou a busca</div>';
-                return;
-            }
-            let html = '<table class="monitor-table"><thead><tr><th>LIVE ID</th><th>STATUS</th><th>FALHAS</th></tr></thead><tbody>';
-            filtered.forEach(m => {
-                const statusDisplay = getStatusDisplay(m.status);
-                html += `<tr><td class="video-id">${m.videoId || 'N/A'}</td><td class="${statusDisplay.class}">${statusDisplay.text}</td><td>${m.failCount || 0}</td></tr>`;
-                if (m.lastRenewSuccess && (!lastRenewTime || new Date(m.lastRenewSuccess) > lastRenewTime)) { renewalCount++; lastRenewTime = new Date(m.lastRenewSuccess); }
+    function addEvent(message) {
+        const time = new Date().toLocaleTimeString('pt-BR');
+        eventLog.unshift({ time, message });
+        if (eventLog.length > 20) eventLog.pop();
+        const container = document.getElementById('timelineContent');
+        if (eventLog.length === 0) { container.innerHTML = '<div class="empty-state">Aguardando eventos...</div>'; return; }
+        container.innerHTML = eventLog.map(e => `<div class="timeline-item"><span class="timeline-time">[${e.time}]</span><span>${e.message}</span></div>`).join('');
+    }
+
+    function updateChart(monitors) {
+        const totalLives = monitors.length;
+        const totalOnline = monitors.filter(m => m.status === 'online').length;
+        const totalFailures = monitors.reduce((sum, m) => sum + (m.failCount || 0), 0);
+        const maxVal = Math.max(totalLives, totalOnline, totalFailures, renewalCount, 5);
+        document.getElementById('chartContent').innerHTML = `
+            <div class="chart-item"><div class="chart-label"><span>📺 TOTAL LIVES</span><span style="color:#2ecc71">${totalLives}</span></div><div class="chart-bar"><div class="chart-fill fill-green" style="width: ${(totalLives/maxVal)*100}%">${totalLives}</div></div></div>
+            <div class="chart-item"><div class="chart-label"><span>🟢 LIVES ATIVAS</span><span style="color:#5dade2">${totalOnline}</span></div><div class="chart-bar"><div class="chart-fill fill-cyan" style="width: ${(totalOnline/maxVal)*100}%">${totalOnline}</div></div></div>
+            <div class="chart-item"><div class="chart-label"><span>❌ FALHAS</span><span style="color:#e74c3c">${totalFailures}</span></div><div class="chart-bar"><div class="chart-fill fill-red" style="width: ${(totalFailures/maxVal)*100}%">${totalFailures}</div></div></div>
+        `;
+    }
+
+    function updateClock() { 
+        const clockElement = document.getElementById('liveClock');
+        if (clockElement) clockElement.innerHTML = new Date().toLocaleTimeString('pt-BR');
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    function filterAndDisplayMonitors() {
+        let filtered = [...allMonitorsData];
+        if (currentFilter === 'online') filtered = filtered.filter(m => m.status === 'online');
+        else if (currentFilter === 'offline') filtered = filtered.filter(m => m.status === 'ended' || m.status === 'offline');
+        else if (currentFilter === 'degraded') filtered = filtered.filter(m => m.status === 'degraded');
+        
+        if (currentSearch.trim() !== '') {
+            const searchTerm = currentSearch.toLowerCase().trim();
+            filtered = filtered.filter(m => m.videoId && m.videoId.toLowerCase().includes(searchTerm));
+        }
+        const container = document.getElementById('monitorsContent');
+        if (filtered.length === 0) {
+            container.innerHTML = '<div class="empty-state">🔍 Nenhum monitor encontrado<br>Altere os filtros ou a busca</div>';
+            return;
+        }
+        let html = '<table class="monitor-table"><thead><tr><th>LIVE ID</th><th>STATUS</th><th>SAÚDE</th><th>ÚLTIMA RENOVAÇÃO</th><tr></thead><tbody>';
+        filtered.forEach(m => {
+            const score = computeHealthScore(m.health);
+            const statusDisp = getStatusDisplay(m.status, m.health);
+            const mainCause = getMainCause(m);
+            const tooltipText = buildTooltipContent(m);
+            const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
+            const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
+            
+            html += `<tr class="${statusDisp.class}" data-video-id="${m.videoId}" style="cursor:pointer;">`;
+            html += `<td class="video-id">${m.videoId || 'N/A'}</td>`;
+            html += `<td class="${statusDisp.class}" data-tippy-content="${tooltipText.replace(/"/g, '&quot;')}">
+                        <div>${statusDisp.icon} ${statusDisp.label}</div>
+                        ${mainCause ? `<div style="font-size: 0.7rem; opacity: 0.8; margin-top: 2px;">[${mainCause}]</div>` : ''}
+                     </td>`;
+            html += `<td><div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>${score}%</td>`;
+            html += `<td>${lastRenew}</td>`;
+            html += `</tr>`;
+            
+            html += `<tr class="details-row" id="details-${m.videoId.replace(/[^a-zA-Z0-9]/g, '_')}"><td colspan="4"><div class="details-grid">`;
+            html += `<div>🕒 Última renovação: ${lastRenew}</div>`;
+            html += `<div>🍪 Cookie: ${m.health?.cookies?.message || 'N/A'}</div>`;
+            html += `<div>🎬 Media Sequence: ${m.lastMediaSequence || 'N/A'}</div>`;
+            html += `<div>⚠️ Falhas consecutivas: ${m.failCount || 0}</div>`;
+            html += `<div>📡 Stalled: ${m.stalledCount || 0}</div>`;
+            html += `<div>📅 Último acesso: ${m.lastAccess ? new Date(m.lastAccess).toLocaleTimeString('pt-BR') : 'N/A'}</div>`;
+            html += `</div></td></tr>`;
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+        
+        if (typeof tippy !== 'undefined') {
+            tippy('[data-tippy-content]', {
+                content: (reference) => reference.getAttribute('data-tippy-content'),
+                allowHTML: true,
+                placement: 'top',
+                theme: 'translucent'
             });
-            html += '</tbody></table>';
+        } else {
+            document.querySelectorAll('[data-tippy-content]').forEach(el => {
+                el.title = el.getAttribute('data-tippy-content');
+            });
+        }
+        
+        document.querySelectorAll('.monitor-table tbody tr:not(.details-row)').forEach(row => {
+            row.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const videoId = row.getAttribute('data-video-id');
+                if (!videoId) return;
+                const detailsRow = document.getElementById(`details-${videoId.replace(/[^a-zA-Z0-9]/g, '_')}`);
+                if (detailsRow) {
+                    const isVisible = detailsRow.style.display === 'table-row';
+                    detailsRow.style.display = isVisible ? 'none' : 'table-row';
+                }
+            });
+        });
+    }
+
+    async function loadFunctionalCookieStatus() {
+        try {
+            const res = await fetch('/api/cookie/functional-status', { cache: 'no-store' });
+            const data = await res.json();
+            const functional = data.functional || {};
+            const container = document.getElementById('cookieContent');
+            if (!container) return;
+            let html = `<div style="text-align:center; margin-bottom:16px; padding:8px; background:rgba(0,0,0,0.2); border-radius:12px;">
+                          <span style="font-size:14px; font-weight:bold;"> ESTADO FUNCIONAL DOS COOKIES</span>
+                        </div>`;
+            const cookies = ['cookie1', 'cookie2', 'cookie3'];
+            for (const cookie of cookies) {
+                const info = functional[cookie] || { valid: false, reason: null };
+                const isValid = info.valid === true;
+                const reason = info.reason || (isValid ? '' : 'Falha na autenticação');
+                html += `<div style="background:#0f1322; margin-bottom:12px; border-radius:12px; padding:12px; border-left: 4px solid ${isValid ? '#2ecc71' : '#e74c3c'};">`;
+                html += `<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">`;
+                html += `<div><strong> ${cookie.toUpperCase()}</strong> ${isValid ? '✅ Válido' : '❌ Inválido'}</div>`;
+                html += `<div style="display:flex; align-items:center; gap:8px;">`;
+                if (!isValid) {
+                    html += `<button class="cookie-replace-btn" data-cookie="${cookie}" style="background:#e74c3c; border:none; color:white; padding:4px 12px; border-radius:20px; cursor:pointer;">📤 Substituir</button>`;
+                }
+                html += `<span id="msg-${cookie}" class="cookie-status-msg"></span>`;
+                html += `</div>`;
+                html += `</div>`;
+                if (!isValid && reason) {
+                    html += `<div style="font-size:11px; color:#e74c3c; margin-top:6px;">⚠️ ${reason}</div>`;
+                }
+                html += `</div>`;
+            }
+            html += `<div style="margin-top:12px; font-size:11px; color:#7a8aa0;">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div>`;
             container.innerHTML = html;
-        }
-
-        // Validação robusta
-        function isValidCookie(content) {
-            if (!content || content === 'nenhum') return false;
-            if (content.includes('INVALID') || content.length < 5000) return false;
-            return (content.includes('.youtube.com') || content.includes('youtube.com'));
-        }
-
-        function prepareAuthData(apiData) {
-            const truncate = (str, maxLen = 80) => {
-                if (!str || str === 'nenhum') return str;
-                return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
-            };
-            const cookie1Valid = isValidCookie(apiData.cookie1);
-            const cookie2Valid = isValidCookie(apiData.cookie2);
-            const cookie3Valid = isValidCookie(apiData.cookie3);
-            return {
-                cookie1: apiData.cookie1 || 'nenhum',
-                cookie2: apiData.cookie2 || 'nenhum',
-                cookie3: apiData.cookie3 || 'nenhum',
-                cookie1Valid: cookie1Valid,
-                cookie2Valid: cookie2Valid,
-                cookie3Valid: cookie3Valid,
-                cookie1Display: truncate(apiData.cookie1 || 'nenhum', 80),
-                cookie2Display: truncate(apiData.cookie2 || 'nenhum', 80),
-                cookie3Display: truncate(apiData.cookie3 || 'nenhum', 80),
-                consecutiveFailures: apiData.consecutiveFailures || 0,
-                lastCookieCheck: apiData.lastCookieCheck || apiData.lastCheck,
-                cookieStatus: (cookie1Valid || cookie2Valid || cookie3Valid) ? 'valid' : 'invalid'
-            };
-        }
-
-        function renderAuthContent(auth) {
-            const hasCookie1 = auth.cookie1Valid === true;
-            const hasCookie2 = auth.cookie2Valid === true;
-            const hasCookie3 = auth.cookie3Valid === true;
-            const hasAnyCookie = hasCookie1 || hasCookie2 || hasCookie3;
-            let totalValidos = (hasCookie1?1:0) + (hasCookie2?1:0) + (hasCookie3?1:0);
-            let statusMsg = '';
-            let statusColor = '';
-            if (totalValidos === 3) {
-                statusMsg = `🍪 COOKIES ATIVOS: ${totalValidos}/3 VÁLIDOS`;
-                statusColor = '#2ecc71';
-            } else if (totalValidos > 0) {
-                statusMsg = `⚠️ COOKIES ATIVOS: ${totalValidos}/3 (${3-totalValidos} inválido(s))`;
-                statusColor = '#f1c40f';
-            } else {
-                statusMsg = '🔴 NENHUM COOKIE VÁLIDO';
-                statusColor = '#e74c3c';
-            }
-            if (!hasAnyCookie) {
-                return `<div class="public-mode-card"><div class="public-mode-icon">🔓</div><div class="public-mode-title">MODO PÚBLICO</div><div class="public-mode-message">Nenhum cookie configurado</div><div class="public-mode-subtitle">Monitor operando sem autenticação</div><div class="public-mode-subtitle" style="margin-top:16px; font-size:11px; color:#5dade2;">⚡ Apenas lives públicas são suportadas</div></div>`;
-            }
-            const failures = auth.consecutiveFailures || 0;
-            const progressPercent = Math.min((failures / 5) * 100, 100);
-            const progressClass = progressPercent > 60 ? 'danger' : 'success';
-            const failureClass = failures >= 3 ? 'danger' : '';
-            const displayValue = (valid, raw, fallback = '❌ Indisponível') => {
-                if (!valid) return fallback;
-                const firstLine = (raw || '').split('\n')[0];
-                return firstLine.length > 80 ? firstLine.substring(0, 80) + '...' : firstLine;
-            };
-            let html = `<div style="text-align:center; margin-bottom:16px; padding:8px; background:rgba(0,0,0,0.2); border-radius:12px;"><span style="font-size:14px; font-weight:bold; color:${statusColor};">${statusMsg}</span></div>`;
-            html += `<div class="auth-row">`;
-            html += `<div class="auth-card"><div class="auth-label">🍪 COOKIE 1 (PRINCIPAL)</div><div class="auth-value ${!hasCookie1 ? 'danger' : ''}" title="${(auth.cookie1 || '').replace(/"/g, '&quot;').substring(0,200)}">${displayValue(hasCookie1, auth.cookie1, '❌ Indisponível')}</div></div>`;
-            html += `<div class="auth-card"><div class="auth-label">🍪 COOKIE 2 (BACKUP)</div><div class="auth-value ${!hasCookie2 ? 'danger' : ''}" title="${(auth.cookie2 || '').replace(/"/g, '&quot;').substring(0,200)}">${displayValue(hasCookie2, auth.cookie2, '❌ Indisponível')}</div></div>`;
-            html += `<div class="auth-card"><div class="auth-label">🍪 COOKIE 3 (ROTAÇÃO)</div><div class="auth-value ${!hasCookie3 ? 'danger' : ''}" title="${(auth.cookie3 || '').replace(/"/g, '&quot;').substring(0,200)}">${displayValue(hasCookie3, auth.cookie3, '❌ Indisponível')}</div></div>`;
-            html += `</div>`;
-            if (failures > 0) {
-                html += `<div class="failure-section"><div class="failure-header"><span class="failure-label">⚠️ FALHAS CONSECUTIVAS</span><span class="failure-value ${failureClass}">${failures} / 5</span></div><div class="progress-bar"><div class="progress-fill ${progressClass}" style="width: ${progressPercent}%"></div></div></div>`;
-            }
-            const lastCheckDate = auth.lastCookieCheck ? new Date(auth.lastCookieCheck).toLocaleString('pt-BR') : 'Nunca';
-            html += `<div class="validation-section"><div class="validation-label">🕐 ÚLTIMA VALIDAÇÃO</div><div class="validation-value">${lastCheckDate}</div></div>`;
-            return html;
-        }
-
-        async function uploadCookie(file) { /* mesmo código já funcional */ }
-        async function fetchData() {
-            try {
-                const [healthRes, cookieRes, monitorsRes] = await Promise.all([ fetch('/health'), fetch('/api/cookie/status'), fetch('/api/monitors') ]);
-                const health = await healthRes.json();
-                const cookieRaw = await cookieRes.json();
-                const monitors = await monitorsRes.json();
-                const auth = prepareAuthData(cookieRaw);
-                const isOnline = (health.status === 'healthy' || health.status === 'ok');
-                document.getElementById('mainStatus').innerHTML = isOnline ? 'ONLINE' : 'OFFLINE';
-                const liveCount = monitors.monitors?.length || 0;
-                const activeCount = monitors.monitors?.filter(m => m.status === 'online').length || 0;
-                document.getElementById('totalLivesHeader').innerHTML = liveCount;
-                document.getElementById('activeLivesCard').innerHTML = activeCount;
-                // contador removido do HTML, então não precisamos atualizar o badge
-                allMonitorsData = monitors.monitors || [];
-                filterAndDisplayMonitors();
-                const validCount = (auth.cookie1Valid?1:0)+(auth.cookie2Valid?1:0)+(auth.cookie3Valid?1:0);
-                let cookieDisplay = 'NENHUM';
-                if (validCount === 3) cookieDisplay = 'VÁLIDO';
-                else if (validCount > 0) cookieDisplay = 'PARCIAL';
-                document.getElementById('mainCookie').innerHTML = cookieDisplay;
-                document.getElementById('cookieStatusBadge').innerHTML = cookieDisplay;
-                const uptimeSec = health.uptime || 0;
-                const hours = Math.floor(uptimeSec / 3600);
-                const minutes = Math.floor((uptimeSec % 3600) / 60);
-                document.getElementById('mainUptime').innerHTML = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-                document.getElementById('cookieContent').innerHTML = renderAuthContent(auth);
-                updateChart(monitors.monitors || []);
-                if (liveCount > 0 && (!window.lastLiveCount || window.lastLiveCount !== liveCount)) addEvent(`📺 ${liveCount} live(s) monitorada(s) (${activeCount} ativa(s))`);
-                window.lastLiveCount = liveCount;
-                const uploadBtn = document.getElementById('uploadBtn');
-                if (uploadBtn && !isUploading) uploadBtn.disabled = !selectedFile;
-            } catch (error) { console.error('Erro:', error); addEvent('Erro ao buscar dados do servidor'); }
-        }
-
-        function setupFilters() {
-            const searchInput = document.getElementById('searchInput');
-            const searchBtn = document.getElementById('searchBtn');
-            const filterBtns = document.querySelectorAll('.filter-btn');
-            searchBtn.addEventListener('click', () => { currentSearch = searchInput.value; filterAndDisplayMonitors(); });
-            searchInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') { currentSearch = searchInput.value; filterAndDisplayMonitors(); } });
-            filterBtns.forEach(btn => {
-                btn.addEventListener('click', () => {
-                    filterBtns.forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    currentFilter = btn.getAttribute('data-filter');
-                    filterAndDisplayMonitors();
+            
+            document.querySelectorAll('.cookie-replace-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const cookieName = btn.getAttribute('data-cookie');
+                    const cookieNumber = cookieName.replace('cookie', '');
+                    const fileInput = document.createElement('input');
+                    fileInput.type = 'file';
+                    fileInput.accept = '.txt';
+                    fileInput.onchange = async (event) => {
+                        const file = event.target.files[0];
+                        if (!file) return;
+                        const formData = new FormData();
+                        formData.append('cookie', file);
+                        const uploadUrl = `/api/cookie/upload?type=${cookieNumber}`;
+                        const msgSpan = document.getElementById(`msg-${cookieName}`);
+                        if (msgSpan) msgSpan.textContent = "⏳ Enviando...";
+                        try {
+                            const resp = await fetch(uploadUrl, { method: 'POST', body: formData });
+                            const data = await resp.json();
+                            if (data.success) {
+                                if (msgSpan) msgSpan.textContent = "✅ Arquivo carregado com sucesso! Arquivo válido.";
+                                await loadFunctionalCookieStatus();
+                                fetchData();
+                                setTimeout(() => {
+                                    if (msgSpan && msgSpan.textContent.includes("sucesso")) {
+                                        msgSpan.textContent = "";
+                                    }
+                                }, 5000);
+                            } else {
+                                if (msgSpan) msgSpan.textContent = `❌ Erro: ${data.message}`;
+                                setTimeout(() => { if (msgSpan) msgSpan.textContent = ""; }, 5000);
+                            }
+                        } catch (err) {
+                            if (msgSpan) msgSpan.textContent = `❌ Erro: ${err.message}`;
+                            setTimeout(() => { if (msgSpan) msgSpan.textContent = ""; }, 5000);
+                        }
+                    };
+                    fileInput.click();
                 });
             });
+        } catch (err) {
+            console.error('Erro ao carregar status funcional:', err);
+            const container = document.getElementById('cookieContent');
+            if (container) container.innerHTML = '<div class="public-mode-card">🔓 MODO PÚBLICO<br>Nenhum cookie configurado</div>';
         }
+    }
 
-        document.getElementById('cookieFile').addEventListener('change', function(e) {
-            const fileNameSpan = document.getElementById('fileName');
-            const uploadBtn = document.getElementById('uploadBtn');
-            if (e.target.files.length > 0) { selectedFile = e.target.files[0]; fileNameSpan.innerHTML = `✓ ${selectedFile.name.substring(0, 30)}`; uploadBtn.disabled = false; addEvent(`📁 Arquivo selecionado: ${selectedFile.name}`); }
-            else { selectedFile = null; fileNameSpan.innerHTML = ''; uploadBtn.disabled = true; }
+    async function fetchData() {
+        try {
+            const [healthRes, monitorsRes] = await Promise.all([ fetch('/health'), fetch('/api/monitors') ]);
+            const health = await healthRes.json();
+            const monitors = await monitorsRes.json();
+            const isOnline = (health.status === 'healthy' || health.status === 'ok');
+            document.getElementById('mainStatus').innerHTML = isOnline ? 'ONLINE' : 'OFFLINE';
+            const liveCount = monitors.monitors?.length || 0;
+            const activeCount = monitors.monitors?.filter(m => m.status === 'online' || m.status === 'degraded').length || 0;
+            document.getElementById('totalLivesHeader').innerHTML = liveCount;
+            document.getElementById('activeLivesCard').innerHTML = activeCount;
+            allMonitorsData = monitors.monitors || [];
+            filterAndDisplayMonitors();
+            const uptimeSec = health.uptime || 0;
+            const hours = Math.floor(uptimeSec / 3600);
+            const minutes = Math.floor((uptimeSec % 3600) / 60);
+            document.getElementById('mainUptime').innerHTML = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+            await loadFunctionalCookieStatus();
+            updateChart(monitors.monitors || []);
+            if (liveCount > 0 && (!window.lastLiveCount || window.lastLiveCount !== liveCount)) {
+                const degradedCount = monitors.monitors?.filter(m => m.status === 'degraded').length || 0;
+                addEvent(`📺 ${liveCount} live(s) monitorada(s) (${activeCount} ativa(s), ${degradedCount} degradada(s))`);
+            }
+            window.lastLiveCount = liveCount;
+        } catch (error) { console.error('Erro:', error); addEvent('Erro ao buscar dados do servidor'); }
+    }
+
+    function setupFilters() {
+        const searchInput = document.getElementById('searchInput');
+        const searchBtn = document.getElementById('searchBtn');
+        const filterBtns = document.querySelectorAll('.filter-btn');
+        searchBtn.addEventListener('click', () => { currentSearch = searchInput.value; filterAndDisplayMonitors(); });
+        searchInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') { currentSearch = searchInput.value; filterAndDisplayMonitors(); } });
+        filterBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                filterBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentFilter = btn.getAttribute('data-filter');
+                filterAndDisplayMonitors();
+            });
         });
+    }
 
-        document.getElementById('uploadBtn').addEventListener('click', async () => { if (isUploading) { addEvent('⚠️ Upload já em andamento, aguarde...'); return; } if (!selectedFile) { addEvent('❌ Nenhum arquivo selecionado'); return; } await uploadCookie(selectedFile); });
-
-        fetchData();
-        setInterval(fetchData, 5000);
-        setupFilters();
-        addEvent('✅ Sistema iniciado');
-        addEvent('📊 Dashboard NOC carregado');
-        addEvent('🔍 Filtros e busca disponíveis');
-    </script>
+    fetchData();
+    setInterval(fetchData, 5000);
+    setupFilters();
+    addEvent('✅ Sistema iniciado');
+    addEvent('📊 Dashboard NOC carregado');
+    addEvent('🔍 Filtros e busca disponíveis');
+</script>
 </body>
 </html>

@@ -1,0 +1,23 @@
+{
+  "cookie1.txt": {
+    "state": "valid",
+    "failCount": 0,
+    "lastFailure": null,
+    "lastSuccess": "2026-06-17T21:41:23.252Z",
+    "reason": null
+  },
+  "cookie2.txt": {
+    "state": "valid",
+    "failCount": 0,
+    "lastFailure": null,
+    "lastSuccess": "2026-06-17T21:40:07.025Z",
+    "reason": null
+  },
+  "cookie3.txt": {
+    "state": "valid",
+    "failCount": 0,
+    "lastFailure": null,
+    "lastSuccess": "2026-06-17T21:40:45.331Z",
+    "reason": null
+  }
+}
