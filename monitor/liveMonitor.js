@@ -1,4 +1,4 @@
-﻿// monitor/liveMonitor.js - Versão estável (com integração CookieRotator)
+﻿// monitor/liveMonitor.js - Versão com ABR (master artificial) e suporte a maxHeight dinâmico
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -7,8 +7,31 @@ const http = require('http');
 const scheduler = require('../scheduler');
 const CookieRotator = require('../cookieRotator');
 
+// ============================================================
+// ✅ AGENTES HTTP COM KEEPALIVE E MAX SOCKETS ALTO
+// ============================================================
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 30000
+});
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 30000
+});
+
+// ============================================================
+
 let systemState = null;
 try { systemState = require('../systemState'); } catch(e) {}
+
+// ========== CONSTANTES GLOBAIS ==========
+const YTDLP_TIMEOUT = 60000;
+const METADATA_TTL = 15000;
+const LIVE_STALL_TIME = 60000;
 
 const LiveState = {
     ONLINE: 'online',
@@ -25,21 +48,18 @@ const ComponentStatus = {
 };
 
 class LiveMonitor {
-    // 🔥 Adicionado parâmetro cookieRotator
     constructor(youtubeUrl, emailAlerts, activeMonitorsMap = null, scheduler = null, cookieRotator = null) {
         this.youtubeUrl = youtubeUrl;
         this.emailAlerts = emailAlerts;
         this.videoId = this.extractVideoId(youtubeUrl);
         this.m3u8Url = null;
         this.isLive = false;
-        // 🔥 INTERVALO REDUZIDO PARA 8 SEGUNDOS
         this.intervalMs = 8000;
-        // 🔥 MAX STALL REDUZIDO PARA 60 SEGUNDOS (compatível com o novo intervalo)
-        this.maxStallTimeMs = 60000;
+        this.maxStallTimeMs = LIVE_STALL_TIME;
         
         this._activeMonitors = activeMonitorsMap;
         this._scheduler = scheduler;
-        this._cookieRotator = cookieRotator; // 🔥 Guarda referência
+        this._cookieRotator = cookieRotator;
         
         this.metadataFails = 0;
         this.segmentFails = 0;
@@ -76,16 +96,14 @@ class LiveMonitor {
         
         this._monitorStopped = false;
         this._liveEnded = false;
-        this._liveEndedAt = null; // 🔥 NOVO: timestamp do encerramento
+        this._liveEndedAt = null;
         this._stableCycles = 0;
         this._currentIntervalMs = this.intervalMs;
         
-        // Cache de metadados
         this._cachedMetadata = null;
         this._metadataCacheTime = 0;
-        this._metadataTTL = 30000;
+        this._metadataTTL = METADATA_TTL;
         
-        // 🔥 Usa o CookieRotator recebido (se existir), senão cria um novo (fallback)
         if (!this._cookieRotator) {
             this._cookieRotator = new CookieRotator(this.cookiesDir);
         }
@@ -93,9 +111,11 @@ class LiveMonitor {
         this.needsRefresh = false;
         this.refreshPromise = null;
         this.lastRefreshReq = null;
-
-        // 🔥 NOVA VARIÁVEL PARA CONTROLE DO PERÍODO DE GRAÇA
         this._liveEndedFirstDetection = null;
+        this.lastRefreshFailedAt = 0;
+        
+        // ✅ NOVO: armazenar maxHeight (passado pelo proxy)
+        this._currentMaxHeight = null; // será setado via proxy
         
         if (this._scheduler && this.videoId) {
             this._scheduler.register(this);
@@ -103,7 +123,6 @@ class LiveMonitor {
     }
 
     calculateMaxRepeats() {
-        // Com intervalMs = 8000 e maxStallTimeMs = 60000, temos 7 repetições
         return Math.max(3, Math.ceil(this.maxStallTimeMs / this.intervalMs));
     }
 
@@ -118,34 +137,42 @@ class LiveMonitor {
         return this._cookieRotator.getFallbackCookiePath();
     }
 
-    _runYtdlp(args, timeout = 30000) {
+    _runYtdlp(args, timeout = YTDLP_TIMEOUT) {
         return new Promise((resolve, reject) => {
             const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
             const child = spawn(ytCmd, args);
             let stdout = '';
             let stderr = '';
             let timedOut = false;
+            let killTimeoutId = null;
             const timeoutId = setTimeout(() => {
                 timedOut = true;
                 child.kill('SIGTERM');
+                killTimeoutId = setTimeout(() => {
+                    if (!child.killed) {
+                        console.warn(`⚠️ yt-dlp (pid ${child.pid}) não respondeu a SIGTERM, forçando SIGKILL`);
+                        try { child.kill('SIGKILL'); } catch (e) { /* processo já pode ter morrido */ }
+                    }
+                }, 5000);
                 reject(new Error(`Timeout após ${timeout}ms`));
             }, timeout);
             child.stdout.on('data', (data) => { stdout += data.toString(); });
             child.stderr.on('data', (data) => { stderr += data.toString(); });
             child.on('close', (code) => {
                 clearTimeout(timeoutId);
+                if (killTimeoutId) clearTimeout(killTimeoutId);
                 if (timedOut) return;
                 if (code === 0) resolve(stdout.trim());
                 else reject(new Error(stderr.trim() || `Código de saída: ${code}`));
             });
             child.on('error', (err) => {
                 clearTimeout(timeoutId);
+                if (killTimeoutId) clearTimeout(killTimeoutId);
                 reject(err);
             });
         });
     }
 
-    // Método com cache de metadados + integração com CookieRotator
     async getLiveMetadata(force = false) {
         const agora = Date.now();
         if (!force && this._cachedMetadata && (agora - this._metadataCacheTime) < this._metadataTTL) {
@@ -156,7 +183,7 @@ class LiveMonitor {
             const cookiePath = this.getCookiePath();
             const args = ['--dump-json', this.youtubeUrl];
             if (cookiePath) args.unshift('--cookies', cookiePath);
-            const stdout = await this._runYtdlp(args, 30000);
+            const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
             const metadata = JSON.parse(stdout);
             this._cachedMetadata = metadata;
             this._metadataCacheTime = agora;
@@ -164,7 +191,6 @@ class LiveMonitor {
             this.metadataFails = 0;
             if (cookiePath) this.updateHealthComponent('cookies', ComponentStatus.OK, 'Cookie funcionando');
             
-            // 🔥 INTEGRAÇÃO COOKIEROTATOR: sucesso (marca o cookie como bem-sucedido)
             if (this._cookieRotator && cookiePath) {
                 const cookieName = path.basename(cookiePath);
                 this._cookieRotator.markSuccess(cookieName);
@@ -174,13 +200,11 @@ class LiveMonitor {
         } catch (error) {
             console.error(`[${this.videoId}] ❌ Erro spawn: ${error.message}`);
             const errorMsg = error.message.toLowerCase();
-            // 🔥 ADICIONADA DETECÇÃO DE "THIS LIVE EVENT HAS ENDED"
             const isLiveEnded = errorMsg.includes('video unavailable') || 
                                errorMsg.includes('not available') || 
                                errorMsg.includes('recording is not available') ||
                                errorMsg.includes('this live event has ended');
             
-            // 🔥 INTEGRAÇÃO COOKIEROTATOR: falha de autenticação
             if (errorMsg.includes('403') || errorMsg.includes('401') || errorMsg.includes('sign in')) {
                 const cookieUsed = this.getCookiePath();
                 if (this._cookieRotator && cookieUsed) {
@@ -227,16 +251,104 @@ class LiveMonitor {
         return null;
     }
 
-    extractHlsUrl(metadata) {
+    // ============================================================
+    // ✅ FUNÇÃO CORRIGIDA: RECEBE maxHeight POR PARÂMETRO
+    // ============================================================
+    extractHlsUrl(metadata, maxHeight = null) {
         if (!metadata.formats || !Array.isArray(metadata.formats)) return null;
-        const hlsFormats = metadata.formats.filter(f => (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && f.vcodec !== 'none' && f.acodec !== 'none');
+
+        // Usa o maxHeight passado, ou o armazenado no monitor, ou o do .env, ou 1080
+        const effectiveMax = maxHeight !== null ? maxHeight :
+                           (this._currentMaxHeight !== null ? this._currentMaxHeight :
+                           parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080);
+
+        // ✅ Se o maxHeight foi passado explicitamente (pela URL), forçamos construção artificial
+        const forceArtificial = (maxHeight !== null || this._currentMaxHeight !== null);
+
+        // 1. Tentar usar master original (se existir) APENAS se não for forçado
+        if (!forceArtificial) {
+            const masterFormat = metadata.formats.find(f =>
+                f.protocol === 'm3u8_native' &&
+                f.url &&
+                !f.height &&
+                f.format_note && f.format_note.toLowerCase().includes('master')
+            );
+            if (masterFormat) {
+                this._masterContent = null;
+                console.log(`[${this.videoId}] 📺 Usando master original do YouTube.`);
+                return masterFormat.url;
+            }
+        } else {
+            console.log(`[${this.videoId}] 📺 Forçando construção artificial devido ao parâmetro max.`);
+        }
+
+        // 2. Construir master artificial a partir das variantes, respeitando maxHeight
+        let hlsFormats = metadata.formats.filter(f => 
+            (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && 
+            f.vcodec !== 'none' && 
+            f.acodec !== 'none' &&
+            f.height // tem altura definida (não é master)
+        );
+
         if (hlsFormats.length === 0) return null;
-        hlsFormats.sort((a,b) => ((b.height||0)*100000 + (b.fps||0)*1000 + (b.tbr||0)) - ((a.height||0)*100000 + (a.fps||0)*1000 + (a.tbr||0)));
-        const best = hlsFormats[0];
-        console.log(`[${this.videoId}] 📺 Selecionado HLS: ${best.height}p (${best.fps||'?'}fps, bitrate: ${best.tbr||'?'})`);
-        return best.url;
+
+        // Filtra pela altura máxima
+        hlsFormats = hlsFormats.filter(f => (f.height || 0) <= effectiveMax);
+        if (hlsFormats.length === 0) {
+            // Se nenhum formato atende o max, pega o menor disponível
+            hlsFormats = metadata.formats.filter(f => 
+                (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && 
+                f.vcodec !== 'none' && 
+                f.acodec !== 'none' &&
+                f.height
+            );
+            hlsFormats.sort((a, b) => (a.height || 0) - (b.height || 0));
+            const fallback = hlsFormats[0];
+            console.log(`[${this.videoId}] ⚠️ Nenhum formato ≤ ${effectiveMax}p, usando fallback ${fallback.height}p.`);
+            this._masterContent = null;
+            return fallback.url;
+        }
+
+        // Ordena por altura (crescente)
+        hlsFormats.sort((a, b) => (a.height || 0) - (b.height || 0));
+
+        console.log(`[${this.videoId}] 🛠️ Construindo manifesto master artificial com ${hlsFormats.length} qualidades (max ${effectiveMax}p).`);
+
+        // Escolhe a melhor variante (a de maior altura) como URL principal
+        const bestVariant = hlsFormats[hlsFormats.length - 1];
+        const bestUrl = bestVariant.url;
+
+        // Gera as linhas do master
+        const masterLines = hlsFormats.map(f => {
+            const height = f.height || 360;
+            const width = f.width || Math.round(height * 16/9);
+            const fps = f.fps || 30;
+            let bandwidth = 0;
+            if (height <= 240) bandwidth = 300000;
+            else if (height <= 360) bandwidth = 600000;
+            else if (height <= 480) bandwidth = 1200000;
+            else if (height <= 720) bandwidth = 2500000;
+            else if (height <= 1080) bandwidth = 5000000;
+            else bandwidth = 8000000;
+            return `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${width}x${height},FRAME-RATE=${fps}\n${f.url}`;
+        });
+
+        const masterContent = '#EXTM3U\n' + masterLines.join('\n');
+
+        // ✅ Armazena o master artificial na instância
+        this._masterContent = {
+            isMaster: true,
+            content: masterContent,
+            urls: hlsFormats.map(f => f.url)
+        };
+
+        // Retorna a URL da melhor variante (para compatibilidade)
+        return bestUrl;
     }
 
+    // ============================================================
+    // extractMediaSequence (com agentes)
+    // ============================================================
     async extractMediaSequence(m3u8Url) {
         if (!m3u8Url) return null;
         return new Promise((resolve) => {
@@ -245,7 +357,9 @@ class LiveMonitor {
             const finish = (v) => { if(resolved) return; resolved=true; if(timeoutId) clearTimeout(timeoutId); resolve(v); };
             const urlObj = new URL(m3u8Url);
             const protocol = urlObj.protocol === 'https:' ? https : http;
-            const request = protocol.get(m3u8Url, (res) => {
+            const request = protocol.get(m3u8Url, {
+                agent: urlObj.protocol === 'https:' ? httpsAgent : httpAgent
+            }, (res) => {
                 if(res.statusCode !== 200) { finish(null); return; }
                 let data = '';
                 res.on('data', chunk => data += chunk);
@@ -350,22 +464,29 @@ class LiveMonitor {
         if(this.liveState !== newState) {
             console.log(`[${this.videoId}] 🔄 Estado alterado: ${this.liveState} → ${newState}`);
             this.liveState = newState;
-            // 🔥 ALTERAÇÃO SOLICITADA: adicionado timestamp de encerramento
             if(newState === LiveState.ENDED) {
                 console.log(`[${this.videoId}] 🛑 Live encerrada, parando monitor`);
                 this._liveEnded = true;
-                this._liveEndedAt = Date.now(); // Registra o momento exato do encerramento
+                this._liveEndedAt = Date.now();
             }
         }
         this.isLive = this.liveState === LiveState.ONLINE;
         return newState;
     }
 
+    static REFRESH_RETRY_BACKOFF_MS = 1500;
+
     async requestRefresh() {
         if (this.refreshPromise) return this.refreshPromise;
-        const now = Date.now();
-        if (this.lastRefreshReq && (now - this.lastRefreshReq) < 5000) return Promise.resolve();
-        this.lastRefreshReq = now;
+
+        const sinceLastFailure = Date.now() - (this.lastRefreshFailedAt || 0);
+        if (this.lastRefreshFailedAt && sinceLastFailure < LiveMonitor.REFRESH_RETRY_BACKOFF_MS) {
+            const waitMs = LiveMonitor.REFRESH_RETRY_BACKOFF_MS - sinceLastFailure;
+            console.log(`[${this.videoId}] ⏳ Renovação falhou há pouco, aguardando ${waitMs}ms antes de tentar de novo...`);
+            await new Promise(resolve => setTimeout(resolve, waitMs));
+        }
+
+        this.lastRefreshReq = Date.now();
         this.refreshPromise = this._forceRenew().finally(() => {
             this.refreshPromise = null;
             this.needsRefresh = false;
@@ -378,157 +499,166 @@ class LiveMonitor {
         try {
             const metadataResult = await this.getLiveMetadata(true);
             if (!metadataResult.success) throw new Error(metadataResult.error);
-            const newUrl = this.extractHlsUrl(metadataResult.metadata);
+            // Passa o maxHeight atual para a extração
+            const newUrl = this.extractHlsUrl(metadataResult.metadata, this._currentMaxHeight);
             if (!newUrl) throw new Error('Nova URL não encontrada');
             if (newUrl !== this.m3u8Url) {
                 this.m3u8Url = newUrl;
                 console.log(`[${this.videoId}] ✅ URL HLS forçada: ${newUrl.substring(0, 100)}...`);
             }
+            this.lastRefreshFailedAt = 0;
             return true;
         } catch (err) {
             console.error(`[${this.videoId}] ❌ Falha na renovação forçada:`, err.message);
+            this.lastRefreshFailedAt = Date.now();
             return false;
         }
     }
 
-    // 🔥 NOVO: verifica se a URL HLS está próxima de expirar (parâmetro expire)
     _isUrlNearExpiry(url) {
         if (!url) return true;
         const match = url.match(/expire=(\d+)/);
         if (!match) return false;
         const expireTimestamp = parseInt(match[1]) * 1000;
-        const fiveMinutes = 5 * 60 * 1000;
-        return (expireTimestamp - Date.now()) < fiveMinutes;
+        const tenMinutes = 10 * 60 * 1000;
+        return (expireTimestamp - Date.now()) < tenMinutes;
     }
 
     async checkAndRenew() {
-        if (this._running || this._monitorStopped || this._liveEnded) return;
+        if (this._monitorStopped || this._liveEnded) return;
         
-        // 🔥 Renovação preventiva se a URL estiver perto de expirar
         if (this.m3u8Url && this._isUrlNearExpiry(this.m3u8Url)) {
-            console.log(`[${this.videoId}] ⏰ URL próxima do vencimento, renovando preventivamente...`);
+            console.log(`[${this.videoId}] ⏰ URL próxima do vencimento, invalidando cache e renovando...`);
+            this._cachedMetadata = null;
+            this._metadataCacheTime = 0;
             await this._forceRenew();
         }
         
         if (this.needsRefresh) {
             this.needsRefresh = false;
+            this._cachedMetadata = null;
+            this._metadataCacheTime = 0;
             await this._forceRenew();
         }
-        this._running = true;
-        try {
-            console.log(`[${this.videoId}] 🔍 Ciclo de verificação (spawn)...`);
-            const metadataResult = await this.getLiveMetadata();
-            if (!metadataResult.success) {
-                // 🔥 PERÍODO DE GRAÇA DE 10 MINUTOS
-                if (metadataResult.isLiveEnded) {
-                    if (!this._liveEndedFirstDetection) {
-                        this._liveEndedFirstDetection = Date.now();
-                        console.log(`[${this.videoId}] ⏳ Live possivelmente encerrada. Aguardando 10min para confirmar...`);
-                        this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Live possivelmente encerrada (aguardando confirmação 10min)');
-                        this.liveState = LiveState.DEGRADED;
-                        return;
-                    }
-                    const minutesWaiting = (Date.now() - this._liveEndedFirstDetection) / 60000;
-                    if (minutesWaiting < 10) {
-                        console.log(`[${this.videoId}] ⏳ Confirmando encerramento... (${minutesWaiting.toFixed(1)}/10 min)`);
-                        // 🔥 Continua tentando renovar a URL durante o período de graça
-                        if (this.m3u8Url) {
-                            await this._forceRenew().catch(() => {});
-                        }
-                        this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Confirmando encerramento (${minutesWaiting.toFixed(1)}/10min)`);
-                        this.liveState = LiveState.DEGRADED;
-                        return;
-                    }
-                    // Confirmado após 10 minutos
-                    console.log(`[${this.videoId}] 🛑 Live encerrada confirmada após 10min. Parando monitor.`);
-                    this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada (confirmado)');
-                    this.applyDerivedState();
-                    return;
-                }
-                // Se voltou a funcionar, reseta o contador de graça
-                this._liveEndedFirstDetection = null;
-                
-                // Fallback para outros erros (não relacionados a encerramento)
-                if (metadataResult.errorType !== 'network') this.updateNetworkHealth(true);
-                this.applyDerivedState();
-                return;
-            }
-            
-            // Se chegou aqui, a live está respondendo normalmente → reseta o contador de graça
-            this._liveEndedFirstDetection = null;
-            this.updateNetworkHealth(true);
-            
-            const metadata = metadataResult.metadata;
-            const isValid = this.validateMetadata(metadata);
-            if (isValid === false) {
-                this.applyDerivedState();
-                return;
-            }
-            const newUrl = this.extractHlsUrl(metadata);
-            if (!newUrl) {
-                console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada`);
-                this.urlFails++;
-                this.updateHealthComponent('playlist', ComponentStatus.WARNING, 'URL não encontrada');
-                if (this.urlFails >= this.maxFails) this.updateHealthComponent('playlist', ComponentStatus.ERROR, `${this.urlFails} falhas consecutivas`);
-                this.applyDerivedState();
-                return;
-            }
-            this.urlFails = 0;
-            if (newUrl !== this.m3u8Url) {
-                this.m3u8Url = newUrl;
-                console.log(`[${this.videoId}] ✅ URL HLS atualizada (spawn)`);
-            }
-            const isPlaylistAdvancing = await this.checkPlaylistProgress(this.m3u8Url);
-            if (!isPlaylistAdvancing) {
-                console.log(`[${this.videoId}] ⚠️ Playlist não avança`);
-                const stillLive = (metadata.live_status === 'is_live' || metadata.is_live === true);
-                if (stillLive) {
-                    console.log(`[${this.videoId}] ⚠️ Playlist parada, mas YouTube confirma live ativa. Mantendo DEGRADED.`);
-                    this.updateHealthComponent('playlist', ComponentStatus.WARNING, 'Playlist congelada temporariamente');
+
+        console.log(`[${this.videoId}] 🔍 Ciclo de verificação (spawn)...`);
+        const metadataResult = await this.getLiveMetadata();
+        if (!metadataResult.success) {
+            if (metadataResult.isLiveEnded) {
+                if (!this._liveEndedFirstDetection) {
+                    this._liveEndedFirstDetection = Date.now();
+                    console.log(`[${this.videoId}] ⏳ Live possivelmente encerrada. Aguardando 10min para confirmar...`);
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Live possivelmente encerrada (aguardando confirmação 10min)');
                     this.liveState = LiveState.DEGRADED;
-                    this.applyDerivedState();
                     return;
                 }
-                this.segmentFails++;
-                if (this.segmentFails >= this.maxFails) this.updateHealthComponent('playlist', ComponentStatus.ERROR, `${this.segmentFails} falhas consecutivas`);
+                const minutesWaiting = (Date.now() - this._liveEndedFirstDetection) / 60000;
+                if (minutesWaiting < 10) {
+                    console.log(`[${this.videoId}] ⏳ Confirmando encerramento... (${minutesWaiting.toFixed(1)}/10 min)`);
+                    if (this.m3u8Url) {
+                        await this._forceRenew().catch(() => {});
+                    }
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Confirmando encerramento (${minutesWaiting.toFixed(1)}/10min)`);
+                    this.liveState = LiveState.DEGRADED;
+                    return;
+                }
+                console.log(`[${this.videoId}] 🛑 Live encerrada confirmada após 10min. Parando monitor.`);
+                this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada (confirmado)');
                 this.applyDerivedState();
                 return;
             }
-            this.segmentFails = 0;
-            this.consecutiveUnknownFails = 0;
+            this._liveEndedFirstDetection = null;
+            if (metadataResult.errorType !== 'network') this.updateNetworkHealth(true);
             this.applyDerivedState();
-            if (this.liveState === LiveState.ONLINE) {
-                this._stableCycles++;
-                if (this._stableCycles > 3) {
-                    // 🔥 CORREÇÃO: limite máximo de 45 segundos (em vez de 90s)
-                    const newInterval = Math.min(45000, this.intervalMs + 5000);
-                    if (newInterval !== this._currentIntervalMs) {
-                        this._currentIntervalMs = newInterval;
-                        console.log(`[${this.videoId}] 📈 Live estável, aumentando intervalo para ${(newInterval/1000).toFixed(0)}s`);
-                        if (this._scheduler) this._scheduler.intervalMs = this._currentIntervalMs;
-                    }
-                }
+            return;
+        }
+        
+        this._liveEndedFirstDetection = null;
+        this.updateNetworkHealth(true);
+        
+        const metadata = metadataResult.metadata;
+        const isValid = this.validateMetadata(metadata);
+        if (isValid === false) {
+            this.applyDerivedState();
+            return;
+        }
+        // Passa o maxHeight atual para a extração
+        const newUrl = this.extractHlsUrl(metadata, this._currentMaxHeight);
+        if (!newUrl) {
+            console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada`);
+            this.urlFails++;
+            this.updateHealthComponent('playlist', ComponentStatus.WARNING, 'URL não encontrada');
+            if (this.urlFails >= this.maxFails) this.updateHealthComponent('playlist', ComponentStatus.ERROR, `${this.urlFails} falhas consecutivas`);
+            this.applyDerivedState();
+            return;
+        }
+        this.urlFails = 0;
+        if (newUrl !== this.m3u8Url) {
+            this.m3u8Url = newUrl;
+            console.log(`[${this.videoId}] ✅ URL HLS atualizada (spawn)`);
+        }
+        const isPlaylistAdvancing = await this.checkPlaylistProgress(this.m3u8Url);
+        if (!isPlaylistAdvancing) {
+            console.log(`[${this.videoId}] ⚠️ Playlist não avança`);
+            const stillLive = (metadata.live_status === 'is_live' || metadata.is_live === true);
+            if (stillLive) {
+                console.log(`[${this.videoId}] ⚠️ Playlist parada, mas YouTube confirma live ativa. Mantendo DEGRADED.`);
+                this.updateHealthComponent('playlist', ComponentStatus.WARNING, 'Playlist congelada temporariamente');
+                this.liveState = LiveState.DEGRADED;
+                this.applyDerivedState();
+                return;
+            }
+            this.segmentFails++;
+            if (this.segmentFails >= this.maxFails) this.updateHealthComponent('playlist', ComponentStatus.ERROR, `${this.segmentFails} falhas consecutivas`);
+            this.applyDerivedState();
+            return;
+        }
+        this.segmentFails = 0;
+        this.consecutiveUnknownFails = 0;
+        this.applyDerivedState();
+        
+        if (this.stalledCount >= this.maxSegmentRepeats) {
+            console.log(`[${this.videoId}] 🔄 Playlist parada por ${this.stalledCount} ciclos, forçando renovação da URL...`);
+            await this._forceRenew();
+            const newSeq = await this.extractMediaSequence(this.m3u8Url);
+            if (newSeq !== null && (this.lastMediaSequence === null || newSeq > this.lastMediaSequence)) {
+                this.lastMediaSequence = newSeq;
+                this.stalledCount = 0;
+                this.updateHealthComponent('playlist', ComponentStatus.OK, 'Recuperado após renovação forçada');
+                console.log(`[${this.videoId}] ✅ Playlist recuperada após renovação (nova seq: ${newSeq})`);
             } else {
-                if (this._stableCycles > 0) {
-                    this._stableCycles = 0;
-                    this._currentIntervalMs = this.intervalMs;
-                    console.log(`[${this.videoId}] 🔄 Live instável, resetando intervalo para ${(this.intervalMs/1000).toFixed(0)}s`);
-                    if (this._scheduler) this._scheduler.intervalMs = this._currentIntervalMs;
+                console.log(`[${this.videoId}] ⚠️ Mesmo após renovação, playlist não avançou.`);
+                this.updateHealthComponent('playlist', ComponentStatus.WARNING, 'Playlist congelada mesmo após renovação');
+                this.liveState = LiveState.DEGRADED;
+            }
+        }
+
+        if (this.liveState === LiveState.ONLINE) {
+            this._stableCycles++;
+            if (this._stableCycles > 3) {
+                const newInterval = Math.min(45000, this.intervalMs + 5000);
+                if (newInterval !== this._currentIntervalMs) {
+                    this._currentIntervalMs = newInterval;
+                    console.log(`[${this.videoId}] 📈 Live estável, aumentando intervalo para ${(newInterval/1000).toFixed(0)}s`);
                 }
             }
-            this.lastError = null;
-            this.lastSuccessTime = new Date();
-            if (systemState) systemState.registerSuccess();
-            this.checkCookieRedundancy();
-            console.log(`[${this.videoId}] ✅ Estado: ${this.liveState} | Health:`, {
-                network: this.health.network.status,
-                metadata: this.health.metadata.status,
-                playlist: this.health.playlist.status,
-                cookies: this.health.cookies.status
-            });
-        } finally {
-            this._running = false;
+        } else {
+            if (this._stableCycles > 0) {
+                this._stableCycles = 0;
+                this._currentIntervalMs = this.intervalMs;
+                console.log(`[${this.videoId}] 🔄 Live instável, resetando intervalo para ${(this.intervalMs/1000).toFixed(0)}s`);
+            }
         }
+        this.lastError = null;
+        this.lastSuccessTime = new Date();
+        if (systemState) systemState.registerSuccess();
+        this.checkCookieRedundancy();
+        console.log(`[${this.videoId}] ✅ Estado: ${this.liveState} | Health:`, {
+            network: this.health.network.status,
+            metadata: this.health.metadata.status,
+            playlist: this.health.playlist.status,
+            cookies: this.health.cookies.status
+        });
     }
 
     checkCookieRedundancy() {

@@ -13,7 +13,7 @@
         .logo h1 { font-size: 32px; font-weight: 700; color: #e0e0e0; }
         .logo h1 span { color: #2ecc71; }
         .logo .subtitle { font-size: 12px; color: #7a8aa0; text-transform: uppercase; letter-spacing: 2px; }
-        .total-lives-header { display: flex; align-items: center; justify-content: center; gap: 20px; background: rgba(46,204,113,0.08); padding: 10px 24px; border-radius: 48px; border: 1px solid rgba(46,204,113,0.15); }
+        .total-lives-header { display: flex; align-items: center; justify-content: center; gap: 20px; background: rgba(46,204,113,0.08); padding: 10px 24px; border-radius: 48px; border: 1px solid rgba(46,204,113,0.15); flex-wrap: wrap; }
         .total-lives-item { display: flex; align-items: baseline; gap: 8px; }
         .total-lives-label { font-size: 13px; color: #7a8aa0; font-weight: 500; letter-spacing: 0.5px; }
         .total-lives-value { font-size: 24px; font-weight: 700; color: #2ecc71; font-family: monospace; }
@@ -101,6 +101,16 @@
             .two-columns { grid-template-columns: 1fr; }
             .search-filters { width: 100%; }
             .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+            .total-lives-header { padding: 8px 16px; gap: 12px; flex-wrap: wrap; }
+            .total-lives-label { font-size: 11px; }
+            .total-lives-value { font-size: 18px; }
+        }
+        @media (max-width: 600px) {
+            .stats-grid { grid-template-columns: 1fr; }
+            .header { flex-direction: column; align-items: stretch; text-align: center; }
+            .total-lives-header { flex-direction: column; align-items: stretch; gap: 8px; border-radius: 16px; }
+            .header-divider { display: none; }
+            .monitor-table td, .monitor-table th { font-size: 11px; padding: 8px 4px; }
         }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/tippy.js@6/dist/tippy-bundle.umd.js"></script>
@@ -118,6 +128,11 @@
             <div class="total-lives-item">
                 <span class="total-lives-label">📋 TOTAL LIVES CADASTRADAS</span>
                 <span class="total-lives-value" id="totalLivesHeader">0</span>
+            </div>
+            <div class="header-divider"></div>
+            <div class="total-lives-item">
+                <span class="total-lives-label">👥 DISPOSITIVOS CONECTADOS</span>
+                <span class="total-lives-value" id="totalViewersHeader">0</span>
             </div>
             <div class="header-divider"></div>
             <div class="header-clock" id="liveClock">--:--:--</div>
@@ -170,7 +185,6 @@
         </div>
     </div>
 
-    <!-- Card de GERENCIAMENTO com botão SAIR -->
     <div class="card">
         <div class="card-header">
             <h2>⚙️ GERENCIAMENTO</h2>
@@ -285,7 +299,7 @@
             container.innerHTML = '<div class="empty-state">🔍 Nenhum monitor encontrado<br>Altere os filtros ou a busca</div>';
             return;
         }
-        let html = '<table class="monitor-table"><thead><tr><th>LIVE ID</th><th>STATUS</th><th>SAÚDE</th><th>ÚLTIMA RENOVAÇÃO</th><tr></thead><tbody>';
+        let html = '<table class="monitor-table"><thead><tr><th>LIVE ID</th><th>STATUS</th><th>SAÚDE</th><th>VIEWERS</th><th>ÚLTIMA RENOVAÇÃO</th></tr></thead><tbody>';
         filtered.forEach(m => {
             const score = computeHealthScore(m.health);
             const statusDisp = getStatusDisplay(m.status, m.health);
@@ -301,10 +315,11 @@
                         ${mainCause ? `<div style="font-size: 0.7rem; opacity: 0.8; margin-top: 2px;">[${mainCause}]</div>` : ''}
                      </td>`;
             html += `<td><div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>${score}%</td>`;
+            html += `<td style="color:#5dade2; font-weight:600; font-family:monospace;">${m.viewers ?? 0}</td>`;
             html += `<td>${lastRenew}</td>`;
             html += `</tr>`;
             
-            html += `<tr class="details-row" id="details-${m.videoId.replace(/[^a-zA-Z0-9]/g, '_')}"><td colspan="4"><div class="details-grid">`;
+            html += `<tr class="details-row" id="details-${m.videoId.replace(/[^a-zA-Z0-9]/g, '_')}"><td colspan="5"><div class="details-grid">`;
             html += `<div>🕒 Última renovação: ${lastRenew}</div>`;
             html += `<div>🍪 Cookie: ${m.health?.cookies?.message || 'N/A'}</div>`;
             html += `<div>🎬 Media Sequence: ${m.lastMediaSequence || 'N/A'}</div>`;
@@ -432,6 +447,7 @@
             const liveCount = monitors.monitors?.length || 0;
             const activeCount = monitors.monitors?.filter(m => m.status === 'online' || m.status === 'degraded').length || 0;
             document.getElementById('totalLivesHeader').innerHTML = liveCount;
+            document.getElementById('totalViewersHeader').innerHTML = monitors.totalViewers ?? 0;
             document.getElementById('activeLivesCard').innerHTML = activeCount;
             allMonitorsData = monitors.monitors || [];
             filterAndDisplayMonitors();
