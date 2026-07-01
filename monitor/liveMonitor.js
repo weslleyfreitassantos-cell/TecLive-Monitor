@@ -48,7 +48,7 @@ const ComponentStatus = {
 };
 
 class LiveMonitor {
-    constructor(youtubeUrl, emailAlerts, activeMonitorsMap = null, scheduler = null, cookieRotator = null) {
+    constructor(youtubeUrl, emailAlerts, activeMonitorsMap = null, scheduler = null, cookieRotator = null, onEnd = null) {
         this.youtubeUrl = youtubeUrl;
         this.emailAlerts = emailAlerts;
         this.videoId = this.extractVideoId(youtubeUrl);
@@ -60,6 +60,7 @@ class LiveMonitor {
         this._activeMonitors = activeMonitorsMap;
         this._scheduler = scheduler;
         this._cookieRotator = cookieRotator;
+        this._onEnd = onEnd; // callback quando a live terminar
         
         this.metadataFails = 0;
         this.segmentFails = 0;
@@ -137,39 +138,150 @@ class LiveMonitor {
         return this._cookieRotator.getFallbackCookiePath();
     }
 
+    // ============================================================
+    // ✅ _runYtdlp CORRIGIDA COM NOTIFICAÇÃO DE FALHA
+    // ============================================================
     _runYtdlp(args, timeout = YTDLP_TIMEOUT) {
-        return new Promise((resolve, reject) => {
+        return new Promise(async (resolve, reject) => {
+            // Remove qualquer -f ou --format
+            const filteredArgs = args.filter((arg, index) => {
+                if (arg === '-f' || arg === '--format') return false;
+                if (index > 0 && (args[index-1] === '-f' || args[index-1] === '--format')) return false;
+                return true;
+            });
+
+            const isMetadataCall = filteredArgs.includes('--dump-json') && 
+                                  filteredArgs.some(a => a.includes('youtube.com/watch') || a.includes('youtube.com/live'));
+            let finalArgs = [...filteredArgs];
+            if (isMetadataCall) {
+                if (!finalArgs.includes('--flat-playlist')) finalArgs.push('--flat-playlist');
+                if (!finalArgs.includes('--playlist-end')) finalArgs.push('--playlist-end', '1');
+            }
+
+            // Identifica cookie atual
+            let cookieIndex = finalArgs.indexOf('--cookies');
+            let cookiePath = null;
+            if (cookieIndex !== -1 && finalArgs.length > cookieIndex + 1) {
+                cookiePath = finalArgs[cookieIndex + 1];
+            }
+            if (!cookiePath) {
+                const defaultCookie = path.join(this.cookiesDir, 'cookie1.txt');
+                if (fs.existsSync(defaultCookie)) {
+                    finalArgs.unshift('--cookies', defaultCookie);
+                    cookiePath = defaultCookie;
+                }
+            }
+
+            console.log(`🔧 _runYtdlp args: ${finalArgs.join(' ')}`);
+
             const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
-            const child = spawn(ytCmd, args);
-            let stdout = '';
-            let stderr = '';
-            let timedOut = false;
-            let killTimeoutId = null;
-            const timeoutId = setTimeout(() => {
-                timedOut = true;
-                child.kill('SIGTERM');
-                killTimeoutId = setTimeout(() => {
-                    if (!child.killed) {
-                        console.warn(`⚠️ yt-dlp (pid ${child.pid}) não respondeu a SIGTERM, forçando SIGKILL`);
-                        try { child.kill('SIGKILL'); } catch (e) { /* processo já pode ter morrido */ }
+            const cookieName = cookiePath ? path.basename(cookiePath) : null;
+
+            // Função que executa com um cookie específico e notifica falha
+            const execWithCookie = (cookieFile) => {
+                return new Promise((resolveExec, rejectExec) => {
+                    const argsWithCookie = [...finalArgs];
+                    const idx = argsWithCookie.indexOf('--cookies');
+                    if (idx !== -1) argsWithCookie.splice(idx, 2);
+                    argsWithCookie.unshift('--cookies', cookieFile);
+
+                    const child = spawn(ytCmd, argsWithCookie);
+                    let stdout = '', stderr = '';
+                    let timedOut = false;
+                    let killTimeoutId = null;
+                    const timeoutId = setTimeout(() => {
+                        timedOut = true;
+                        child.kill('SIGTERM');
+                        killTimeoutId = setTimeout(() => {
+                            if (!child.killed) {
+                                console.warn(`⚠️ yt-dlp (pid ${child.pid}) não respondeu a SIGTERM, forçando SIGKILL`);
+                                try { child.kill('SIGKILL'); } catch (e) {}
+                            }
+                        }, 5000);
+                        rejectExec(new Error(`Timeout após ${timeout}ms`));
+                    }, timeout);
+
+                    child.stdout.on('data', (data) => { stdout += data.toString(); });
+                    child.stderr.on('data', (data) => { stderr += data.toString(); });
+                    child.on('close', (code) => {
+                        clearTimeout(timeoutId);
+                        if (killTimeoutId) clearTimeout(killTimeoutId);
+                        if (timedOut) return;
+                        if (code === 0) {
+                            resolveExec({ stdout: stdout.trim(), stderr: stderr.trim() });
+                        } else {
+                            const errorMsg = stderr.trim() || `Código de saída: ${code}`;
+                            rejectExec(new Error(errorMsg));
+                        }
+                    });
+                    child.on('error', (err) => {
+                        clearTimeout(timeoutId);
+                        if (killTimeoutId) clearTimeout(killTimeoutId);
+                        rejectExec(err);
+                    });
+                });
+            };
+
+            // Tenta com o cookie atual
+            try {
+                const result = await execWithCookie(cookiePath);
+                // Sucesso – marca sucesso no cookie
+                if (this._cookieRotator && cookieName) {
+                    this._cookieRotator.markSuccess(cookieName);
+                }
+                resolve(result.stdout);
+            } catch (err) {
+                const errorMsg = err.message || '';
+                const isNoFormats = errorMsg.includes('No video formats found');
+                const isAuth = errorMsg.includes('403') || errorMsg.includes('401') || errorMsg.includes('sign in') || errorMsg.includes('cookies');
+
+                // Se falhou com este cookie, marca falha (se for erro de formato ou autenticação)
+                if ((isNoFormats || isAuth) && this._cookieRotator && cookieName) {
+                    console.log(`🔴 Marcando falha para ${cookieName}: ${errorMsg.slice(0, 100)}`);
+                    this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId);
+                }
+
+                // Se for "No video formats found", tenta os outros cookies
+                if (isNoFormats) {
+                    console.log(`⚠️ Falha com cookie ${cookieName}, tentando alternativos...`);
+                    const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
+                    let tried = false;
+                    for (const file of cookieFiles) {
+                        const fullPath = path.join(this.cookiesDir, file);
+                        if (fullPath === cookiePath || !fs.existsSync(fullPath)) continue;
+                        try {
+                            console.log(`🔄 Tentando com ${file}...`);
+                            const result = await execWithCookie(fullPath);
+                            console.log(`✅ Sucesso com ${file}`);
+                            // Marca sucesso para o novo cookie
+                            if (this._cookieRotator) {
+                                this._cookieRotator.markSuccess(file);
+                            }
+                            resolve(result.stdout);
+                            tried = true;
+                            break;
+                        } catch (innerErr) {
+                            const innerMsg = innerErr.message || '';
+                            const isInnerNoFormats = innerMsg.includes('No video formats found');
+                            if (isInnerNoFormats || innerMsg.includes('403') || innerMsg.includes('401')) {
+                                console.log(`❌ ${file} também falhou.`);
+                                if (this._cookieRotator) {
+                                    this._cookieRotator.markFailure(file, innerMsg, this.videoId);
+                                }
+                            } else {
+                                // Outro tipo de erro, propaga
+                                throw innerErr;
+                            }
+                        }
                     }
-                }, 5000);
-                reject(new Error(`Timeout após ${timeout}ms`));
-            }, timeout);
-            child.stdout.on('data', (data) => { stdout += data.toString(); });
-            child.stderr.on('data', (data) => { stderr += data.toString(); });
-            child.on('close', (code) => {
-                clearTimeout(timeoutId);
-                if (killTimeoutId) clearTimeout(killTimeoutId);
-                if (timedOut) return;
-                if (code === 0) resolve(stdout.trim());
-                else reject(new Error(stderr.trim() || `Código de saída: ${code}`));
-            });
-            child.on('error', (err) => {
-                clearTimeout(timeoutId);
-                if (killTimeoutId) clearTimeout(killTimeoutId);
-                reject(err);
-            });
+                    if (!tried) {
+                        reject(new Error('Todos os cookies falharam com No video formats found'));
+                    }
+                } else {
+                    // Outro erro, propaga
+                    reject(err);
+                }
+            }
         });
     }
 
@@ -181,7 +293,8 @@ class LiveMonitor {
         }
         try {
             const cookiePath = this.getCookiePath();
-            const args = ['--dump-json', this.youtubeUrl];
+            // ✅ SEM -f, com --flat-playlist e --playlist-end 1
+            const args = ['--dump-json', '--flat-playlist', '--playlist-end', '1', this.youtubeUrl];
             if (cookiePath) args.unshift('--cookies', cookiePath);
             const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
             const metadata = JSON.parse(stdout);
@@ -565,6 +678,10 @@ class LiveMonitor {
                 console.log(`[${this.videoId}] 🛑 Live encerrada confirmada após 10min. Parando monitor.`);
                 this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada (confirmado)');
                 this.applyDerivedState();
+                // 👇 NOVO: chama o callback de encerramento
+                if (this._onEnd) {
+                    this._onEnd(this.videoId, this.owner);
+                }
                 return;
             }
             this._liveEndedFirstDetection = null;
@@ -579,7 +696,14 @@ class LiveMonitor {
         const metadata = metadataResult.metadata;
         const isValid = this.validateMetadata(metadata);
         if (isValid === false) {
+            // Se o metadata indicar que não é live, podemos disparar o encerramento imediato?
+            // Mas já tratamos no validateMetadata como CRITICAL, que leva a ENDED.
+            // O applyDerivedState abaixo vai mudar o estado para ENDED.
             this.applyDerivedState();
+            // Se o estado for ENDED, chamamos o callback
+            if (this.liveState === LiveState.ENDED && this._onEnd) {
+                this._onEnd(this.videoId, this.owner);
+            }
             return;
         }
         // Passa o maxHeight atual para a extração

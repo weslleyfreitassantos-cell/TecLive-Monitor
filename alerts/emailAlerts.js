@@ -15,15 +15,14 @@ class EmailAlerts {
         
         this.adminEmail = process.env.ADMIN_EMAIL || 'weslleyfreitassantos@gmail.com';
         this.cookieRotator = null;
-        
-        // Para controle de alertas periódicos (máximo 1x a cada 4h)
+        this._lastAlert = {};
         this._lastOkAlert = null;
         this._lastFailureAlert = null;
+        this._lastInvalidTime = {};
         
         console.log(`📧 EmailAlerts configurado. Admin: ${this.adminEmail}`);
     }
 
-    // Injeta o CookieRotator e registra callbacks
     setCookieRotator(rotator) {
         console.log('🔄 [DIAG] setCookieRotator chamado');
         this.cookieRotator = rotator;
@@ -33,13 +32,10 @@ class EmailAlerts {
         }
         
         console.log('📎 [DIAG] Registrando callbacks no CookieRotator...');
-        
-        // Salva referência aos métodos originais
         const originalMarkFailure = rotator.markFailure.bind(rotator);
         const originalMarkSuccess = rotator.markSuccess.bind(rotator);
         const self = this;
 
-        // Sobrescreve markFailure para disparar alertas
         rotator.markFailure = async function(cookieName, errorMsg, videoId) {
             console.log(`🔍 [DIAG] markFailure interceptado: cookie=${cookieName}, erro=${errorMsg?.slice(0, 50)}...`);
             const wasValid = rotator.status[cookieName]?.state === 'valid';
@@ -47,6 +43,7 @@ class EmailAlerts {
             const nowState = rotator.status[cookieName]?.state;
             console.log(`🔍 [DIAG] Estado após markFailure: wasValid=${wasValid}, nowState=${nowState}, failCount=${rotator.status[cookieName]?.failCount}`);
             if (wasValid && nowState === 'invalid') {
+                self._lastInvalidTime[cookieName] = Date.now();
                 console.log(`🔴 [DIAG] Disparando alerta de cookie inválido para ${cookieName}`);
                 self.sendCookieInvalidAlert(cookieName, errorMsg);
             } else if (wasValid && nowState === 'suspect') {
@@ -58,14 +55,21 @@ class EmailAlerts {
             return result;
         };
 
-        // Sobrescreve markSuccess para disparar alerta de recuperação
         rotator.markSuccess = function(cookieName) {
             console.log(`🔍 [DIAG] markSuccess interceptado: cookie=${cookieName}`);
-            const wasInvalid = rotator.status[cookieName]?.state === 'invalid';
+            const status = rotator.status[cookieName];
+            const wasInvalid = status?.state === 'invalid' || status?.state === 'suspect';
+            const lastInvalid = self._lastInvalidTime[cookieName] || 0;
+            const isRecent = (Date.now() - lastInvalid) < 120000;
+
             const result = originalMarkSuccess(cookieName);
-            if (wasInvalid) {
-                console.log(`🟢 [DIAG] Disparando alerta de recuperação para ${cookieName}`);
+            
+            if (wasInvalid && isRecent) {
+                console.log(`🟢 [DIAG] Disparando alerta de recuperação para ${cookieName} (revalidado recentemente)`);
                 self.sendCookieRecoveredAlert(cookieName);
+                delete self._lastInvalidTime[cookieName];
+            } else if (wasInvalid && !isRecent) {
+                console.log(`ℹ️ [DIAG] Cookie ${cookieName} estava inválido mas não foi revalidado recentemente, ignorando alerta de recuperação.`);
             } else {
                 console.log(`ℹ️ [DIAG] Recuperação não necessária para ${cookieName}`);
             }
@@ -73,11 +77,8 @@ class EmailAlerts {
         };
         
         console.log('✅ [DIAG] Callbacks registrados com sucesso');
-        // Inicia verificação periódica com a nova função
-        this.checkCookiesHealthAlert();
     }
     
-    // ========== NOVA VERIFICAÇÃO PERIÓDICA ==========
     checkCookiesHealthAlert() {
         if (!this.cookieRotator) {
             console.warn('⚠️ [DIAG] checkCookiesHealthAlert: cookieRotator não disponível');
@@ -103,7 +104,7 @@ class EmailAlerts {
             } else {
                 console.log(`ℹ️ [DIAG] Alerta OK já enviado há menos de 4h, aguardando.`);
             }
-            this._lastFailureAlert = null; // reset para quando houver falha futura
+            this._lastFailureAlert = null;
         } else if (!hasValid) {
             console.log('🔴 [DIAG] Nenhum cookie válido detectado.');
             if (!this._lastFailureAlert || (now - this._lastFailureAlert) >= fourHours) {
@@ -122,12 +123,11 @@ class EmailAlerts {
             }
         }
 
-        const nextCheck = 600000; // 10 minutos
+        const nextCheck = 600000;
         console.log(`⏱️ [DIAG] Próxima verificação em ${nextCheck/1000} segundos`);
         setTimeout(() => this.checkCookiesHealthAlert(), nextCheck);
     }
 
-    // ========== NOVOS MÉTODOS DE ALERTA PERIÓDICO ==========
     sendCookiesOkAlert(entries) {
         console.log(`🟢 [ENVIO] sendCookiesOkAlert: todos os cookies válidos`);
         const subject = `🟢 Cookies verificados e OK - NeoNews Monitor`;
@@ -144,26 +144,43 @@ class EmailAlerts {
         this.sendEmailAlert(subject, message, 'cookie_failure_summary');
     }
 
-    // ========== ALERTAS INDIVIDUAIS (eventos em tempo real) ==========
     sendCookieWarningAlert(cookieName, errorMsg, failCount) {
+        const key = `warning_${cookieName}`;
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
+            console.log(`⏳ [DIAG] Alerta de warning para ${cookieName} suprimido (1h)`);
+            return;
+        }
         console.log(`⚠️ [ENVIO] sendCookieWarningAlert: cookie=${cookieName}, falhas=${failCount}`);
         const subject = `⚠️ Cookie ${cookieName} suspeito - ${failCount}/3 falhas`;
         const message = `O cookie ${cookieName} apresentou falha de autenticação.\n\nErro: ${errorMsg}\n\nFalhas consecutivas: ${failCount}/3\n\nSe atingir 3 falhas, será invalidado e removido da rotação.`;
         this.sendEmailAlert(subject, message, 'cookie_warning');
+        this._lastAlert[key] = Date.now();
     }
 
     sendCookieInvalidAlert(cookieName, errorMsg) {
+        const key = `invalid_${cookieName}`;
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
+            console.log(`⏳ [DIAG] Alerta de inválido para ${cookieName} suprimido (1h)`);
+            return;
+        }
         console.log(`🔴 [ENVIO] sendCookieInvalidAlert: cookie=${cookieName}`);
         const subject = `🔴 Cookie ${cookieName} inválido - NeoNews Monitor`;
         const message = `O cookie ${cookieName} foi invalidado após 3 falhas consecutivas.\n\nÚltimo erro: ${errorMsg}\n\nAcesse o dashboard e substitua apenas este cookie.`;
         this.sendEmailAlert(subject, message, 'cookie_invalid');
+        this._lastAlert[key] = Date.now();
     }
 
     sendCookieRecoveredAlert(cookieName) {
+        const key = `recovered_${cookieName}`;
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
+            console.log(`⏳ [DIAG] Alerta de recuperação para ${cookieName} suprimido (1h)`);
+            return;
+        }
         console.log(`🟢 [ENVIO] sendCookieRecoveredAlert: cookie=${cookieName}`);
         const subject = `🟢 Cookie ${cookieName} recuperado - NeoNews Monitor`;
         const message = `O cookie ${cookieName} voltou a funcionar e foi reinserido na rotação.\n\nRedundância restaurada.`;
         this.sendEmailAlert(subject, message, 'cookie_recovered');
+        this._lastAlert[key] = Date.now();
     }
     
     sendNoCookieAlert() {
@@ -173,7 +190,6 @@ class EmailAlerts {
         this.sendEmailAlert(subject, message, 'no_cookie');
     }
 
-    // ========== MÉTODO BASE DE ENVIO ==========
     sendEmailAlert(subject, message, type) {
         console.log(`📧 [EMAIL] Enviando e-mail tipo=${type}: "${subject}"`);
         const mailOptions = {
@@ -192,38 +208,17 @@ class EmailAlerts {
         });
     }
 
-    // ========== MÉTODOS LEGACY (mantidos para compatibilidade) ==========
-    evaluateAndAlert(liveCount) {
-        console.log(`📊 [DIAG] evaluateAndAlert chamado (legacy, liveCount=${liveCount}) - ignorado`);
-    }
-    getCookieStatus() { 
-        console.log(`📊 [DIAG] getCookieStatus chamado (legacy)`);
-        return { cookie1Valid: false, cookie2Valid: false, cookie3Valid: false }; 
-    }
-    liveDown(videoId, youtubeUrl, duration) {
-        console.log(`📉 [DIAG] liveDown chamado (legacy): ${videoId}`);
-    }
-    liveUp(videoId, youtubeUrl) {
-        console.log(`📈 [DIAG] liveUp chamado (legacy): ${videoId}`);
-    }
-    monitorFailed(videoId, error) {
-        console.log(`❌ [DIAG] monitorFailed chamado (legacy): ${videoId} - ${error?.message}`);
-    }
-    sistemaSemCookie(youtubeUrl) {
-        console.log(`🍪 [DIAG] sistemaSemCookie chamado (legacy): ${youtubeUrl}`);
-    }
-    sendFailoverAlert(liveCount) {
-        console.log(`🔄 [DIAG] sendFailoverAlert chamado (legacy), liveCount=${liveCount}`);
-    }
-    sendBackupExpiredAlert(liveCount) {
-        console.log(`⏰ [DIAG] sendBackupExpiredAlert chamado (legacy), liveCount=${liveCount}`);
-    }
-    sendCriticalAlert(liveCount) {
-        console.log(`🔴 [DIAG] sendCriticalAlert chamado (legacy), liveCount=${liveCount}`);
-    }
-    sendRecoveryAlert(liveCount, downtimeMinutes) {
-        console.log(`🟢 [DIAG] sendRecoveryAlert chamado (legacy), liveCount=${liveCount}, downtime=${downtimeMinutes}min`);
-    }
+    // Métodos legacy mantidos
+    evaluateAndAlert(liveCount) { console.log(`📊 [DIAG] evaluateAndAlert chamado (legacy, liveCount=${liveCount}) - ignorado`); }
+    getCookieStatus() { console.log(`📊 [DIAG] getCookieStatus chamado (legacy)`); return { cookie1Valid: false, cookie2Valid: false, cookie3Valid: false }; }
+    liveDown(videoId, youtubeUrl, duration) { console.log(`📉 [DIAG] liveDown chamado (legacy): ${videoId}`); }
+    liveUp(videoId, youtubeUrl) { console.log(`📈 [DIAG] liveUp chamado (legacy): ${videoId}`); }
+    monitorFailed(videoId, error) { console.log(`❌ [DIAG] monitorFailed chamado (legacy): ${videoId} - ${error?.message}`); }
+    sistemaSemCookie(youtubeUrl) { console.log(`🍪 [DIAG] sistemaSemCookie chamado (legacy): ${youtubeUrl}`); }
+    sendFailoverAlert(liveCount) { console.log(`🔄 [DIAG] sendFailoverAlert chamado (legacy), liveCount=${liveCount}`); }
+    sendBackupExpiredAlert(liveCount) { console.log(`⏰ [DIAG] sendBackupExpiredAlert chamado (legacy), liveCount=${liveCount}`); }
+    sendCriticalAlert(liveCount) { console.log(`🔴 [DIAG] sendCriticalAlert chamado (legacy), liveCount=${liveCount}`); }
+    sendRecoveryAlert(liveCount, downtimeMinutes) { console.log(`🟢 [DIAG] sendRecoveryAlert chamado (legacy), liveCount=${liveCount}, downtime=${downtimeMinutes}min`); }
 }
 
 module.exports = EmailAlerts;

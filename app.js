@@ -4,16 +4,17 @@ const fs = require('fs');
 const multer = require('multer');
 const { spawn } = require('child_process');
 const session = require('express-session');
+const crypto = require('crypto');
 require('dotenv').config();
 
 // ============================================================
-// ✅ FORÇAR IPv4 (evita fallback lento do Node.js)
+// ✅ FORÇAR IPv4
 // ============================================================
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
 // ============================================================
-// ✅ AGENTES HTTP COM KEEPALIVE E MAX SOCKETS ALTO
+// ✅ AGENTES HTTP COM KEEPALIVE
 // ============================================================
 const http = require('http');
 const https = require('https');
@@ -41,7 +42,10 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'neonews-super-secret-change-this',
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 8 * 60 * 60 * 1000 }
+    cookie: { 
+        secure: false, 
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 DIAS
+    }
 }));
 
 app.use(express.urlencoded({ extended: true }));
@@ -50,6 +54,338 @@ app.use(express.static('public'));
 
 const cookiesDir = path.join(__dirname, 'cookies');
 if (!fs.existsSync(cookiesDir)) fs.mkdirSync(cookiesDir, { recursive: true });
+
+// ========== ARQUIVO DE CLIENTES ==========
+const clientesFile = path.join(cookiesDir, 'clientes.json');
+function getClientes() {
+    try {
+        return JSON.parse(fs.readFileSync(clientesFile, 'utf8'));
+    } catch (e) {
+        return [];
+    }
+}
+function salvarClientes(clientes) {
+    fs.writeFileSync(clientesFile, JSON.stringify(clientes, null, 2));
+}
+
+// ========== PERSISTÊNCIA DE TOKENS ==========
+const tokensFile = path.join(cookiesDir, 'tokens.json');
+
+function loadTokens() {
+    try {
+        const data = JSON.parse(fs.readFileSync(tokensFile, 'utf8'));
+        return data;
+    } catch (e) {
+        return {};
+    }
+}
+
+function saveTokens(tokens) {
+    fs.writeFileSync(tokensFile, JSON.stringify(tokens, null, 2));
+}
+
+let tokenMap = loadTokens(); // token -> { videoId, owner }
+
+function getOrCreateToken(videoId, owner) {
+    const key = owner ? `${videoId}:${owner}` : videoId;
+    for (const [token, value] of Object.entries(tokenMap)) {
+        if (value.videoId === videoId && value.owner === owner) {
+            return token;
+        }
+    }
+    const token = crypto.randomBytes(16).toString('hex');
+    tokenMap[token] = { videoId, owner };
+    saveTokens(tokenMap);
+    return token;
+}
+
+function revokeToken(token) {
+    if (tokenMap[token]) {
+        delete tokenMap[token];
+        saveTokens(tokenMap);
+        return true;
+    }
+    return false;
+}
+
+function getTokenInfo(token) {
+    return tokenMap[token] || null;
+}
+
+// ========== PERSISTÊNCIA DE DISPOSITIVOS ATIVOS ==========
+const ownerViewersFile = path.join(cookiesDir, 'ownerViewers.json');
+
+function loadOwnerViewers() {
+    try {
+        const data = JSON.parse(fs.readFileSync(ownerViewersFile, 'utf8'));
+        const map = new Map();
+        for (const [key, viewers] of Object.entries(data)) {
+            const innerMap = new Map();
+            for (const [ip, timestamp] of Object.entries(viewers)) {
+                innerMap.set(ip, timestamp);
+            }
+            map.set(key, innerMap);
+        }
+        console.log(`📱 Carregados ${map.size} chaves (owner:videoId) com dispositivos ativos.`);
+        return map;
+    } catch (e) {
+        console.log('ℹ️ Nenhum arquivo de dispositivos persistidos encontrado ou vazio.');
+        return new Map();
+    }
+}
+
+function saveOwnerViewers(viewersMap) {
+    try {
+        const data = {};
+        for (const [key, innerMap] of viewersMap.entries()) {
+            data[key] = Object.fromEntries(innerMap);
+        }
+        fs.writeFileSync(ownerViewersFile, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.warn('Erro ao salvar dispositivos ativos:', e.message);
+    }
+}
+
+// ========== PERSISTÊNCIA DO VIEWER ACCESS ==========
+const viewerAccessFile = path.join(cookiesDir, 'viewerAccess.json');
+
+function loadViewerAccess() {
+    try {
+        const data = JSON.parse(fs.readFileSync(viewerAccessFile, 'utf8'));
+        const map = new Map();
+        for (const [key, ips] of Object.entries(data)) {
+            const innerMap = new Map();
+            for (const [ip, timestamp] of Object.entries(ips)) {
+                innerMap.set(ip, timestamp);
+            }
+            map.set(key, innerMap);
+        }
+        console.log(`📡 Carregados ${map.size} chaves com viewerAccess.`);
+        return map;
+    } catch (e) {
+        console.log('ℹ️ Nenhum arquivo de viewerAccess encontrado ou vazio.');
+        return new Map();
+    }
+}
+
+function saveViewerAccess(viewerMap) {
+    try {
+        const data = {};
+        for (const [key, innerMap] of viewerMap.entries()) {
+            data[key] = Object.fromEntries(innerMap);
+        }
+        fs.writeFileSync(viewerAccessFile, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.warn('Erro ao salvar viewerAccess:', e.message);
+    }
+}
+
+// ========== MAPA DE VIEWERS ==========
+let ownerViewers = loadOwnerViewers();
+let viewerAccess = loadViewerAccess();
+
+function isLocalIp(ip) {
+    if (!ip) return true;
+    if (ip === '127.0.0.1' || ip === 'localhost') return true;
+    if (ip === '::1' || ip === '0:0:0:0:0:0:0:1') return true;
+    if (ip === '::ffff:127.0.0.1') return true;
+    return false;
+}
+
+// ============================================================
+// RASTREAMENTO DE VIEWERS
+// ============================================================
+const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 86400000; // 24h
+
+function normalizeIp(ip) {
+    if (!ip) return 'unknown';
+    if (typeof ip === 'string' && ip.includes('::ffff:')) {
+        return ip.replace('::ffff:', '');
+    }
+    if (ip === '::1' || ip === '0:0:0:0:0:0:0:1') return '127.0.0.1';
+    return ip;
+}
+
+function trackViewer(owner, videoId, ip) {
+    const now = Date.now();
+    const key = owner ? `${owner}:${videoId}` : videoId;
+    if (!viewerAccess.has(key)) viewerAccess.set(key, new Map());
+    const viewers = viewerAccess.get(key);
+    viewers.set(ip, now);
+    for (const [viewerIp, timestamp] of viewers.entries()) {
+        if (now - timestamp > 172800000) viewers.delete(viewerIp);
+    }
+    saveViewerAccess(viewerAccess);
+}
+
+function trackViewerByOwner(owner, ip, videoId) {
+    if (!owner || !videoId) {
+        console.warn('[WARN] trackViewerByOwner chamado com owner ou videoId nulo');
+        return;
+    }
+    if (isLocalIp(ip)) return; // ignora IPs locais
+    const key = `${owner}:${videoId}`;
+    const now = Date.now();
+    if (!ownerViewers.has(key)) ownerViewers.set(key, new Map());
+    const viewers = ownerViewers.get(key);
+    viewers.set(ip, now);
+    let removed = 0;
+    for (const [viewerIp, timestamp] of viewers.entries()) {
+        if (now - timestamp > VIEWER_WINDOW_MS) {
+            viewers.delete(viewerIp);
+            removed++;
+        }
+    }
+    if (removed > 0) {
+        console.log(`[${key}] 🗑️ ${removed} IP(s) removido(s) por expiração`);
+    }
+    saveOwnerViewers(ownerViewers);
+}
+
+function renewViewersForMonitor(owner, videoId) {
+    if (!owner || !videoId) return;
+    const key = `${owner}:${videoId}`;
+    const viewers = ownerViewers.get(key);
+    if (!viewers || viewers.size === 0) return;
+
+    const now = Date.now();
+    const ACTIVITY_TIMEOUT = parseInt(process.env.VIEWER_WINDOW_MS) || 86400000;
+    const activityKey = `${owner}:${videoId}`;
+    const activityMap = viewerAccess.get(activityKey);
+    let renewed = 0, removed = 0;
+
+    for (const [ip, timestamp] of viewers.entries()) {
+        const lastAccess = activityMap ? (activityMap.get(ip) || 0) : 0;
+        const hasRecentActivity = (now - lastAccess) <= ACTIVITY_TIMEOUT;
+
+        if (hasRecentActivity) {
+            viewers.set(ip, now);
+            renewed++;
+        } else if ((now - timestamp) > VIEWER_WINDOW_MS) {
+            viewers.delete(ip);
+            removed++;
+            console.log(`[${key}] 🔌 IP ${ip} removido por inatividade`);
+        }
+    }
+
+    if (renewed > 0 || removed > 0) {
+        console.log(`[${key}] 🔄 Renovação: ${renewed} ativo(s), ${removed} expirado(s)`);
+        saveOwnerViewers(ownerViewers);
+    }
+}
+
+function getActiveDevicesForOwnerAndVideo(owner, videoId) {
+    const key = `${owner}:${videoId}`;
+    const viewers = ownerViewers.get(key);
+    if (!viewers) return 0;
+    const now = Date.now();
+    let count = 0;
+    for (const [ip, timestamp] of viewers.entries()) {
+        if (now - timestamp <= VIEWER_WINDOW_MS) count++;
+    }
+    return count;
+}
+
+function getActiveViewerIPsForOwnerAndVideo(owner, videoId) {
+    const key = `${owner}:${videoId}`;
+    const viewers = ownerViewers.get(key);
+    if (!viewers) return [];
+    const now = Date.now();
+    const ips = [];
+    for (const [ip, timestamp] of viewers.entries()) {
+        if (now - timestamp <= VIEWER_WINDOW_MS) ips.push(ip);
+    }
+    return ips;
+}
+
+function isIpActiveForOwnerAndVideo(owner, videoId, ip) {
+    if (!owner || !videoId || isLocalIp(ip)) return true;
+    const key = `${owner}:${videoId}`;
+    const viewers = ownerViewers.get(key);
+    if (!viewers) return false;
+    return viewers.has(ip);
+}
+
+function getDeviceLimitForOwner(owner) {
+    const clientes = getClientes();
+    const cliente = clientes.find(c => c.login === owner);
+    return cliente ? cliente.dispositivos : 0;
+}
+
+function getTotalViewers() {
+    const now = Date.now();
+    const uniqueIps = new Set();
+    for (const viewers of ownerViewers.values()) {
+        for (const [ip, timestamp] of viewers.entries()) {
+            if (now - timestamp <= VIEWER_WINDOW_MS) uniqueIps.add(ip);
+        }
+    }
+    return uniqueIps.size;
+}
+
+// ============================================================
+// FILTRO DE QUALIDADE DO MANIFESTO MASTER
+// ============================================================
+function filterMasterByMaxHeight(masterContent, maxHeight) {
+    if (!masterContent || !maxHeight) return masterContent;
+
+    const lines = masterContent.split('\n');
+    const filtered = [];
+    let skipNext = false;
+    let lastKeptResolution = null;
+    let allResolutions = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('#EXT-X-STREAM-INF')) {
+            const resMatch = line.match(/RESOLUTION=\d+x(\d+)/i);
+            if (resMatch) {
+                allResolutions.push(parseInt(resMatch[1], 10));
+            }
+        }
+    }
+
+    const validResolutions = allResolutions.filter(h => h <= maxHeight);
+    const effectiveMax = validResolutions.length > 0
+        ? maxHeight
+        : Math.min(...allResolutions);
+
+    if (effectiveMax !== maxHeight) {
+        console.log(`[filterMaster] Nenhuma qualidade <= ${maxHeight}p, usando fallback ${effectiveMax}p`);
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+
+        if (line.startsWith('#EXT-X-STREAM-INF')) {
+            const resMatch = line.match(/RESOLUTION=\d+x(\d+)/i);
+            if (resMatch) {
+                const height = parseInt(resMatch[1], 10);
+                if (height <= effectiveMax) {
+                    filtered.push(lines[i]);
+                    lastKeptResolution = height;
+                    skipNext = false;
+                } else {
+                    skipNext = true;
+                }
+            } else {
+                filtered.push(lines[i]);
+                skipNext = false;
+            }
+        } else if (skipNext && line !== '' && !line.startsWith('#')) {
+            skipNext = false;
+        } else {
+            filtered.push(lines[i]);
+            if (skipNext && line === '') skipNext = false;
+        }
+    }
+
+    const result = filtered.join('\n');
+    console.log(`[filterMaster] Qualidades mantidas até ${effectiveMax}p (última: ${lastKeptResolution}p)`);
+    return result;
+}
+
+// ============================================================
 
 let uploadInProgress = false;
 let lastCookieValidation = null;
@@ -74,39 +410,136 @@ app.use((err, req, res, next) => {
 
 let converter = null;
 
+// ============================================================
+// FUNÇÃO runYtdlp CORRIGIDA (com fallback de cookie e parâmetros forçados)
+// ============================================================
 function runYtdlp(args, timeout = 30000) {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
+        // Remove qualquer seleção de formato (-f) para evitar warnings
+        const filteredArgs = args.filter((arg, index) => {
+            if (arg === '-f' || arg === '--format') return false;
+            if (index > 0 && (args[index-1] === '-f' || args[index-1] === '--format')) return false;
+            return true;
+        });
+
+        // Detecta se é uma chamada para obter metadados
+        const isMetadataCall = filteredArgs.includes('--dump-json') && 
+                              filteredArgs.some(a => a.includes('youtube.com/watch'));
+
+        let finalArgs = [...filteredArgs];
+
+        if (isMetadataCall) {
+            if (!finalArgs.includes('--flat-playlist')) {
+                finalArgs.push('--flat-playlist');
+            }
+            if (!finalArgs.includes('--playlist-end')) {
+                finalArgs.push('--playlist-end', '1');
+            }
+        }
+
+        // Identifica qual cookie está sendo usado
+        let cookieIndex = finalArgs.indexOf('--cookies');
+        let cookiePath = null;
+        if (cookieIndex !== -1 && finalArgs.length > cookieIndex + 1) {
+            cookiePath = finalArgs[cookieIndex + 1];
+        }
+
+        // Se não houver cookie, tenta usar o cookie1.txt como padrão
+        if (!cookiePath) {
+            const defaultCookie = path.join(cookiesDir, 'cookie1.txt');
+            if (fs.existsSync(defaultCookie)) {
+                finalArgs.unshift('--cookies', defaultCookie);
+                cookiePath = defaultCookie;
+            }
+        }
+
+        console.log(`🔧 runYtdlp args: ${finalArgs.join(' ')}`);
+
         const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
-        const child = spawn(ytCmd, args);
-        let stdout = '';
-        let stderr = '';
-        let timedOut = false;
-        let killTimeoutId = null;
-        const timeoutId = setTimeout(() => {
-            timedOut = true;
-            child.kill('SIGTERM');
-            killTimeoutId = setTimeout(() => {
-                if (!child.killed) {
-                    console.warn(`⚠️ yt-dlp (pid ${child.pid}) não respondeu a SIGTERM, forçando SIGKILL`);
-                    try { child.kill('SIGKILL'); } catch (e) {}
+
+        const execWithCookie = (cookieFile) => {
+            return new Promise((resolveExec, rejectExec) => {
+                const argsWithCookie = [...finalArgs];
+                const idx = argsWithCookie.indexOf('--cookies');
+                if (idx !== -1) {
+                    argsWithCookie.splice(idx, 2);
                 }
-            }, 5000);
-            reject(new Error(`Timeout após ${timeout}ms`));
-        }, timeout);
-        child.stdout.on('data', (data) => { stdout += data.toString(); });
-        child.stderr.on('data', (data) => { stderr += data.toString(); });
-        child.on('close', (code) => {
-            clearTimeout(timeoutId);
-            if (killTimeoutId) clearTimeout(killTimeoutId);
-            if (timedOut) return;
-            if (code === 0) resolve(stdout.trim());
-            else reject(new Error(stderr.trim() || `Código de saída: ${code}`));
-        });
-        child.on('error', (err) => {
-            clearTimeout(timeoutId);
-            if (killTimeoutId) clearTimeout(killTimeoutId);
-            reject(err);
-        });
+                argsWithCookie.unshift('--cookies', cookieFile);
+
+                const child = spawn(ytCmd, argsWithCookie);
+                let stdout = '', stderr = '';
+                let timedOut = false;
+                let killTimeoutId = null;
+                const timeoutId = setTimeout(() => {
+                    timedOut = true;
+                    child.kill('SIGTERM');
+                    killTimeoutId = setTimeout(() => {
+                        if (!child.killed) {
+                            console.warn(`⚠️ yt-dlp (pid ${child.pid}) não respondeu a SIGTERM, forçando SIGKILL`);
+                            try { child.kill('SIGKILL'); } catch (e) {}
+                        }
+                    }, 5000);
+                    rejectExec(new Error(`Timeout após ${timeout}ms`));
+                }, timeout);
+
+                child.stdout.on('data', (data) => { stdout += data.toString(); });
+                child.stderr.on('data', (data) => { stderr += data.toString(); });
+                child.on('close', (code) => {
+                    clearTimeout(timeoutId);
+                    if (killTimeoutId) clearTimeout(killTimeoutId);
+                    if (timedOut) return;
+                    if (code === 0) {
+                        resolveExec({ stdout: stdout.trim(), stderr: stderr.trim() });
+                    } else {
+                        const errorMsg = stderr.trim() || `Código de saída: ${code}`;
+                        if (errorMsg.includes('No video formats found')) {
+                            rejectExec(new Error(`No video formats found (cookie: ${path.basename(cookieFile)})`));
+                        } else {
+                            rejectExec(new Error(errorMsg));
+                        }
+                    }
+                });
+                child.on('error', (err) => {
+                    clearTimeout(timeoutId);
+                    if (killTimeoutId) clearTimeout(killTimeoutId);
+                    rejectExec(err);
+                });
+            });
+        };
+
+        try {
+            const result = await execWithCookie(cookiePath);
+            resolve(result.stdout);
+        } catch (err) {
+            if (err.message.includes('No video formats found')) {
+                console.log(`⚠️ Falha com cookie ${path.basename(cookiePath)}, tentando alternativos...`);
+                const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
+                let tried = false;
+                for (const file of cookieFiles) {
+                    const fullPath = path.join(cookiesDir, file);
+                    if (fullPath === cookiePath || !fs.existsSync(fullPath)) continue;
+                    try {
+                        console.log(`🔄 Tentando com ${file}...`);
+                        const result = await execWithCookie(fullPath);
+                        console.log(`✅ Sucesso com ${file}`);
+                        resolve(result.stdout);
+                        tried = true;
+                        break;
+                    } catch (innerErr) {
+                        if (innerErr.message.includes('No video formats found')) {
+                            console.log(`❌ ${file} também falhou.`);
+                        } else {
+                            throw innerErr;
+                        }
+                    }
+                }
+                if (!tried) {
+                    reject(new Error('Todos os cookies falharam com No video formats found'));
+                }
+            } else {
+                reject(err);
+            }
+        }
     });
 }
 
@@ -134,35 +567,36 @@ async function validateCookieSimple(cookiePath) {
     }
 }
 
-// ========== PERSISTÊNCIA ==========
+// ========== PERSISTÊNCIA DE MONITORES ==========
 const mappingFile = path.join(cookiesDir, 'monitors.json');
 
-function getPersistedUrl(videoId) {
+function getPersistedEntry(videoId, owner) {
     try {
         const map = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
-        return map[videoId] || null;
+        const key = owner ? `${videoId}:${owner}` : videoId;
+        return map[key] || null;
     } catch (e) { return null; }
 }
 
-function removePersistedMapping(videoId) {
+function removePersistedMapping(videoId, owner) {
     try {
         const map = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
-        delete map[videoId];
+        const key = owner ? `${videoId}:${owner}` : videoId;
+        delete map[key];
         fs.writeFileSync(mappingFile, JSON.stringify(map, null, 2));
-        console.log(`🗑️ Removido monitor persistido: ${videoId}`);
+        console.log(`🗑️ Removido monitor persistido: ${key}`);
     } catch (e) { /* ignora se não existir */ }
 }
 
-// ========== CACHE COM PROMISE DEDUPLICADA ==========
-const m3u8CachePromises = new Map(); // videoId -> Promise
-const m3u8CacheContent = new Map(); // videoId -> { content, fetchedAt, sourceUrl }
+// ========== CACHE ==========
+const m3u8CachePromises = new Map();
+const m3u8CacheContent = new Map();
 const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 5000;
 
 const REFRESH_WAIT_MS = 10000;
-
 const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000;
 
-const lastGoodM3u8 = new Map(); // videoId -> { content, fetchedAt, sequence }
+const lastGoodM3u8 = new Map();
 
 function rememberGoodM3u8(videoId, content) {
     const seq = parseM3u8Info(content).sequence;
@@ -286,128 +720,89 @@ function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, st
 }
 
 // ============================================================
-// ✅ RASTREAMENTO DE VIEWERS POR IP ÚNICO
+// CONTROLE DE VERBOSIDADE DOS LOGS (rate limiting)
 // ============================================================
-const viewerAccess = new Map(); // videoId -> Map(ip -> timestamp)
-const VIEWER_WINDOW_MS = 30000;
+let requestLogCount = 0;
+let lastLogTime = 0;
+const LOG_INTERVAL_MS = 5000;
 
-function normalizeIp(ip) {
-    if (!ip) return 'unknown';
-    if (ip.startsWith('::ffff:')) return ip.replace('::ffff:', '');
-    return ip;
-}
-
-function trackViewer(videoId, ip) {
+function logRequestSummary(videoId, ip, owner) {
+    requestLogCount++;
     const now = Date.now();
-    if (!viewerAccess.has(videoId)) viewerAccess.set(videoId, new Map());
-    const viewers = viewerAccess.get(videoId);
-    viewers.set(ip, now);
-    for (const [viewerIp, timestamp] of viewers.entries()) {
-        if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(viewerIp);
+    if (now - lastLogTime > LOG_INTERVAL_MS) {
+        console.log(`[${videoId}] 📡 ${requestLogCount} requisições (último IP: ${ip}, owner: ${owner})`);
+        requestLogCount = 0;
+        lastLogTime = now;
     }
 }
 
-function getActiveViewers(videoId) {
-    const now = Date.now();
-    const viewers = viewerAccess.get(videoId);
-    if (!viewers) return 0;
-    for (const [ip, timestamp] of viewers.entries()) {
-        if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(ip);
-    }
-    return viewers.size;
-}
-
-function getTotalViewers() {
-    const now = Date.now();
-    let total = 0;
-    for (const viewers of viewerAccess.values()) {
-        for (const [ip, timestamp] of viewers.entries()) {
-            if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(ip);
-        }
-        total += viewers.size;
-    }
-    return total;
-}
-
-// ========== ROTAS ==========
-app.get('/converter.html', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public/converter.html'));
-});
-
-app.post('/api/convert', async (req, res) => {
-    const { youtubeUrl } = req.body;
-    if (!youtubeUrl) return res.status(400).json({ success: false, error: 'URL obrigatoria' });
-    const baseUrl = process.env.BASE_URL || 'http://localhost:' + PORT;
-    const result = await converter.convert(youtubeUrl, baseUrl);
-    res.json(result);
-});
-
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        version: '3.0.0',
-        uptime: process.uptime(),
-        activeMonitors: converter?.activeMonitors?.size || 0
-    });
-});
-
-app.get('/stats', (req, res) => {
-    res.json(converter.getLiveStats());
-});
-
-app.get('/metrics', (req, res) => {
-    if (!converter) return res.status(503).send('Service unavailable');
-    const stats = converter.scheduler?.getStats() || {};
-    res.set('Content-Type', 'text/plain');
-    res.send(`
-# HELP neonews_active_monitors Número de monitores ativos
-# TYPE neonews_active_monitors gauge
-neonews_active_monitors ${stats.activeMonitors || 0}
-# HELP neonews_pool_running Workers em execução
-# TYPE neonews_pool_running gauge
-neonews_pool_running ${stats.pool?.running || 0}
-# HELP neonews_pool_queued Workers na fila
-# TYPE neonews_pool_queued gauge
-neonews_pool_queued ${stats.pool?.queued || 0}
-`);
-});
-
-// ========== PROXY HLS (COM SUPORTE A PARÂMETRO max E MASTER ARTIFICIAL) ==========
-app.get('/neonews/:videoId.m3u8', async (req, res) => {
-    const videoId = req.params.videoId;
+// ============================================================
+// HANDLER DO PROXY M3U8 (com logs reduzidos)
+// ============================================================
+async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     const reqStart = Date.now();
-    
-    // ============================================
-    // ✅ HIERARQUIA DE QUALIDADE MÁXIMA
-    // 1. ?max=XXX na URL (se válido)
-    // 2. VIDEO_MAX_HEIGHT do .env
-    // 3. 1080 (fallback)
-    // ============================================
+    const queryOwner = owner || req.query.owner || null;
+
+    logRequestSummary(videoId, req.ip, queryOwner);
+
     const allowedHeights = [144, 240, 360, 480, 720, 1080];
     const envMaxHeight = parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
     const urlMaxHeight = parseInt(req.query.max, 10);
-    
-    let maxHeight = envMaxHeight;
+    let finalMaxHeight = maxHeight || envMaxHeight;
     if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
-        maxHeight = urlMaxHeight;
-        console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${maxHeight}p`);
-    } else if (req.query.max) {
-        console.log(`[${videoId}] ⚠️ Valor inválido para 'max': ${req.query.max}. Usando padrão (${envMaxHeight}p).`);
+        finalMaxHeight = urlMaxHeight;
+        console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${finalMaxHeight}p`);
     }
 
-    let monitor = converter?.activeMonitors?.get(videoId);
+    let monitor = null;
+    let keyFound = null;
+    let actualOwner = null;
+
+    if (queryOwner) {
+        const key = `${videoId}:${queryOwner}`;
+        if (converter.activeMonitors.has(key)) {
+            monitor = converter.activeMonitors.get(key);
+            actualOwner = queryOwner;
+            keyFound = key;
+        }
+    }
 
     if (!monitor) {
-        const youtubeUrl = getPersistedUrl(videoId);
-        if (youtubeUrl) {
-            console.log(`[${videoId}] Monitor ausente, recriando a partir do persistido...`);
-            const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
-            try {
-                await converter.convert(youtubeUrl, baseUrl);
-                monitor = converter.activeMonitors.get(videoId);
-            } catch (err) {
-                console.error(`[${videoId}] Falha ao recriar monitor:`, err.message);
+        for (const [key, mon] of converter.activeMonitors.entries()) {
+            if (key.startsWith(videoId + ':')) {
+                monitor = mon;
+                actualOwner = key.split(':')[1] || null;
+                keyFound = key;
+                break;
             }
+        }
+    }
+
+    if (!monitor) {
+        try {
+            const map = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+            const keysToTry = queryOwner
+                ? [`${videoId}:${queryOwner}`]
+                : Object.keys(map).filter(k => k.startsWith(videoId + ':') || k === videoId);
+
+            for (const key of keysToTry) {
+                const entry = map[key];
+                if (entry && entry.youtubeUrl) {
+                    const savedOwner = key.includes(':') ? key.split(':')[1] : null;
+                    console.log(`[${videoId}] Monitor ausente, recriando a partir do persistido... (owner: ${savedOwner})`);
+                    const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
+                    await converter.convert(entry.youtubeUrl, baseUrl, savedOwner);
+                    const newKey = savedOwner ? `${videoId}:${savedOwner}` : videoId;
+                    if (converter.activeMonitors.has(newKey)) {
+                        monitor = converter.activeMonitors.get(newKey);
+                        actualOwner = savedOwner;
+                        keyFound = newKey;
+                        break;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn(`[${videoId}] Erro ao buscar persistido:`, e.message);
         }
     }
 
@@ -416,42 +811,67 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
         return res.status(404).send('Stream not found');
     }
 
-    // Repassa o maxHeight para o monitor (para uso na geração do master ou fixo)
-    monitor._currentMaxHeight = maxHeight;
+    const trackingOwner = queryOwner || actualOwner;
+
+    if (trackingOwner) {
+        const rawIp = req.ip || req.socket.remoteAddress;
+        const clientIp = normalizeIp(
+            req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+            rawIp
+        );
+
+        if (!isLocalIp(clientIp)) {
+            const isAuthorized = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp);
+            if (!isAuthorized) {
+                const activeDevices = getActiveDevicesForOwnerAndVideo(trackingOwner, videoId);
+                const deviceLimit = getDeviceLimitForOwner(trackingOwner);
+                if (deviceLimit > 0 && activeDevices >= deviceLimit) {
+                    console.log(`[${trackingOwner}:${videoId}] 🚫 Dispositivo bloqueado: ${activeDevices} ativos, IP ${clientIp} excederia limite ${deviceLimit}`);
+                    return res.status(429).json({
+                        error: 'Limite de dispositivos excedido',
+                        message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
+                    });
+                }
+                console.log(`[${trackingOwner}:${videoId}] ➕ Adicionando novo IP ${clientIp}`);
+                trackViewerByOwner(trackingOwner, clientIp, videoId);
+            } else {
+                trackViewerByOwner(trackingOwner, clientIp, videoId);
+            }
+        }
+    } else {
+        console.warn(`[${videoId}] Acesso sem owner definido - dispositivo não será rastreado.`);
+    }
+
+    const rawIpActivity = req.ip || req.socket.remoteAddress;
+    const clientIpActivity = normalizeIp(
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        rawIpActivity
+    );
+    trackViewer(trackingOwner, videoId, clientIpActivity);
+
+    monitor._currentMaxHeight = finalMaxHeight;
     monitor.lastAccess = Date.now();
 
-    // ============================================
-    // ✅ RASTREAMENTO DE VIEWER (IP ÚNICO)
-    // ============================================
-    const clientIp = normalizeIp(
-        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-        req.socket.remoteAddress ||
-        req.ip
-    );
-    trackViewer(videoId, clientIp);
-
-    // ============================================
-    // VERIFICA SE O MONITOR TEM UM MASTER ARTIFICIAL
-    // ============================================
     if (monitor._masterContent && monitor._masterContent.isMaster) {
-        console.log(`[${videoId}] 📦 Servindo master artificial (ABR) com maxHeight=${maxHeight}.`);
-        const content = monitor._masterContent.content;
+        const rawContent = monitor._masterContent.content;
+        const filteredContent = filterMasterByMaxHeight(rawContent, finalMaxHeight);
+        console.log(`[${videoId}] 📦 Servindo master artificial filtrado até ${finalMaxHeight}p`);
         res.writeHead(200, {
             'Content-Type': 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-cache',
-            'X-Master': 'true'
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'X-Master': 'true',
+            'X-Max-Height': String(finalMaxHeight)
         });
-        res.end(content);
+        res.end(filteredContent);
         return;
     }
 
     try {
         const result = await fetchM3u8WithCache(videoId, monitor.m3u8Url);
 
-        // ============================================
-        // TRATAMENTO DO MASTER ARTIFICIAL (via cache)
-        // ============================================
         let contentToServe = result.content;
         let isMaster = false;
 
@@ -468,7 +888,10 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
             });
         }
 
-        if (!isMaster) {
+        if (isMaster) {
+            contentToServe = filterMasterByMaxHeight(contentToServe, finalMaxHeight);
+            console.log(`[${videoId}] 📦 Servindo manifesto master filtrado até ${finalMaxHeight}p`);
+        } else {
             const parsed = parseM3u8Info(contentToServe);
             if (parsed.sequence !== null) {
                 if (monitor.lastMediaSequence === null || parsed.sequence > monitor.lastMediaSequence) {
@@ -479,8 +902,6 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
             } else {
                 rememberGoodM3u8(videoId, contentToServe);
             }
-        } else {
-            console.log(`[${videoId}] 📦 Servindo manifesto master (ABR) via cache.`);
         }
 
         const monitorSeq = monitor.lastMediaSequence;
@@ -495,9 +916,12 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
         res.writeHead(200, {
             'Content-Type': 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
             'X-Cache': result.fromCache ? 'HIT' : 'MISS',
-            'X-Master': isMaster ? 'true' : 'false'
+            'X-Master': isMaster ? 'true' : 'false',
+            'X-Max-Height': isMaster ? String(finalMaxHeight) : 'N/A'
         });
         res.end(contentToServe);
 
@@ -537,7 +961,9 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
                             sourceUrl: monitor.m3u8Url
                         });
                     }
-                    if (!isRenewedMaster) {
+                    if (isRenewedMaster) {
+                        renewedContent = filterMasterByMaxHeight(renewedContent, finalMaxHeight);
+                    } else {
                         rememberGoodM3u8(videoId, renewedContent);
                     }
                     logProxyAccess(videoId, {
@@ -550,8 +976,11 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
                     res.writeHead(200, {
                         'Content-Type': 'application/vnd.apple.mpegurl',
                         'Access-Control-Allow-Origin': '*',
-                        'Cache-Control': 'no-cache',
-                        'X-Master': isRenewedMaster ? 'true' : 'false'
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Pragma': 'no-cache',
+                        'Expires': '0',
+                        'X-Master': isRenewedMaster ? 'true' : 'false',
+                        'X-Max-Height': isRenewedMaster ? String(finalMaxHeight) : 'N/A'
                     });
                     return res.end(renewedContent);
                 } catch (renewErr) {
@@ -573,7 +1002,9 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
                     res.writeHead(200, {
                         'Content-Type': 'application/vnd.apple.mpegurl',
                         'Access-Control-Allow-Origin': '*',
-                        'Cache-Control': 'no-cache',
+                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Pragma': 'no-cache',
+                        'Expires': '0',
                         'X-Stale': 'true'
                     });
                     return res.end(stale.content);
@@ -592,6 +1023,278 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
             res.status(500).send('Proxy error');
         }
     }
+}
+
+// ============================================================
+// ROTAS
+// ============================================================
+app.get('/converter.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public/converter.html'));
+});
+
+app.post('/api/convert', async (req, res) => {
+    const { youtubeUrl, owner } = req.body;
+    if (!youtubeUrl) return res.status(400).json({ success: false, error: 'URL obrigatoria' });
+    const baseUrl = process.env.BASE_URL || 'http://localhost:' + PORT;
+    const result = await converter.convert(youtubeUrl, baseUrl, owner);
+    if (result.success && result.videoId) {
+        const token = getOrCreateToken(result.videoId, owner);
+        result.token = token;
+        result.serverUrl = `${baseUrl}/neonews/t/${token}.m3u8`;
+    }
+    res.json(result);
+});
+
+app.get('/api/public/device-status/:owner', (req, res) => {
+    const owner = req.params.owner;
+    if (!owner) {
+        return res.status(400).json({ error: 'Owner não informado' });
+    }
+
+    const uniqueIps = new Set();
+    const now = Date.now();
+
+    for (const [key, viewers] of ownerViewers.entries()) {
+        if (key.startsWith(owner + ':')) {
+            for (const [ip, timestamp] of viewers.entries()) {
+                if (now - timestamp <= VIEWER_WINDOW_MS) {
+                    uniqueIps.add(ip);
+                }
+            }
+        }
+    }
+
+    const allIps = Array.from(uniqueIps);
+    const limit = getDeviceLimitForOwner(owner);
+    const remaining = Math.max(0, limit - allIps.length);
+
+    res.json({
+        owner,
+        limit,
+        active: allIps.length,
+        remaining,
+        ips: allIps
+    });
+});
+
+app.post('/api/device/remove', (req, res) => {
+    const { owner, ip, videoId } = req.body;
+    if (!owner || !ip) {
+        return res.status(400).json({ error: 'Owner e IP são obrigatórios' });
+    }
+    if (videoId) {
+        const key = `${owner}:${videoId}`;
+        const viewers = ownerViewers.get(key);
+        if (!viewers) return res.status(404).json({ error: 'Nenhum dispositivo ativo para esta live' });
+        if (viewers.has(ip)) {
+            viewers.delete(ip);
+            console.log(`[${key}] 📱 IP ${ip} removido manualmente`);
+            saveOwnerViewers(ownerViewers);
+            const accessKey = `${owner}:${videoId}`;
+            const accessMap = viewerAccess.get(accessKey);
+            if (accessMap) {
+                accessMap.delete(ip);
+                saveViewerAccess(viewerAccess);
+            }
+            m3u8CacheContent.delete(videoId);
+            m3u8CachePromises.delete(videoId);
+            lastGoodM3u8.delete(videoId);
+            return res.json({ success: true, message: 'IP removido e cache invalidado' });
+        } else {
+            return res.status(404).json({ error: 'IP não encontrado na lista de ativos' });
+        }
+    } else {
+        let removed = false;
+        for (const [key, viewers] of ownerViewers.entries()) {
+            if (key.startsWith(owner + ':')) {
+                if (viewers.has(ip)) {
+                    viewers.delete(ip);
+                    removed = true;
+                    const vid = key.split(':')[1];
+                    const accessKey = `${owner}:${vid}`;
+                    const accessMap = viewerAccess.get(accessKey);
+                    if (accessMap) {
+                        accessMap.delete(ip);
+                        saveViewerAccess(viewerAccess);
+                    }
+                    m3u8CacheContent.delete(vid);
+                    m3u8CachePromises.delete(vid);
+                    lastGoodM3u8.delete(vid);
+                }
+            }
+        }
+        if (removed) {
+            saveOwnerViewers(ownerViewers);
+            console.log(`[${owner}] 📱 IP ${ip} removido de todas as lives`);
+            return res.json({ success: true, message: 'IP removido de todas as lives' });
+        } else {
+            return res.status(404).json({ error: 'IP não encontrado' });
+        }
+    }
+});
+
+app.post('/api/device/release-all', (req, res) => {
+    const { owner } = req.body;
+    if (!owner) {
+        return res.status(400).json({ error: 'Owner não informado' });
+    }
+    let removed = false;
+    for (const [key, viewers] of ownerViewers.entries()) {
+        if (key.startsWith(owner + ':')) {
+            const videoId = key.split(':')[1];
+            ownerViewers.delete(key);
+            removed = true;
+            if (videoId) {
+                const accessKey = `${owner}:${videoId}`;
+                viewerAccess.delete(accessKey);
+                saveViewerAccess(viewerAccess);
+            }
+            m3u8CacheContent.delete(videoId);
+            m3u8CachePromises.delete(videoId);
+            lastGoodM3u8.delete(videoId);
+        }
+    }
+    if (removed) {
+        saveOwnerViewers(ownerViewers);
+        console.log(`[${owner}] 📱 Todos os dispositivos liberados manualmente (todas as lives)`);
+        return res.json({ success: true, message: 'Todos os dispositivos liberados e cache invalidado' });
+    } else {
+        return res.json({ success: true, message: 'Nenhum dispositivo ativo para liberar' });
+    }
+});
+
+app.get('/api/public/device-status-all', (req, res) => {
+    const clientes = getClientes();
+    const result = {};
+    const now = Date.now();
+
+    for (const cliente of clientes) {
+        const owner = cliente.login;
+        const uniqueIps = new Set();
+
+        for (const [key, viewers] of ownerViewers.entries()) {
+            if (key.startsWith(owner + ':')) {
+                for (const [ip, timestamp] of viewers.entries()) {
+                    if (now - timestamp <= VIEWER_WINDOW_MS) uniqueIps.add(ip);
+                }
+            }
+        }
+
+        result[owner] = { active: uniqueIps.size, limit: cliente.dispositivos };
+    }
+    res.json(result);
+});
+
+app.get('/api/public/monitors', (req, res) => {
+    const monitors = [];
+    if (converter && converter.activeMonitors) {
+        for (const [key, monitor] of converter.activeMonitors.entries()) {
+            const [videoId, owner] = key.split(':');
+            const token = getOrCreateToken(videoId, owner || null);
+            monitors.push({
+                videoId,
+                owner: owner || null,
+                token,
+                status: monitor.liveState || (monitor.isLive ? 'online' : 'offline'),
+                lastUpdate: monitor.lastUpdate || monitor.lastAccess,
+                title: monitor.metadata?.title || null,
+                channel: monitor.metadata?.channel || null
+            });
+        }
+    }
+    res.json({ monitors });
+});
+
+app.get('/api/clientes', (req, res) => {
+    const clientes = getClientes();
+    res.json(clientes);
+});
+
+app.post('/api/client/sync', (req, res) => {
+    const { clientes } = req.body;
+    if (!Array.isArray(clientes)) {
+        return res.status(400).json({ success: false, message: 'Formato inválido' });
+    }
+    salvarClientes(clientes);
+    console.log(`🔄 Clientes sincronizados: ${clientes.length}`);
+    res.json({ success: true, message: 'Clientes sincronizados' });
+});
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        version: '3.0.0',
+        uptime: process.uptime(),
+        activeMonitors: converter?.activeMonitors?.size || 0
+    });
+});
+
+app.get('/stats', (req, res) => {
+    res.json(converter.getLiveStats());
+});
+
+app.get('/metrics', (req, res) => {
+    if (!converter) return res.status(503).send('Service unavailable');
+    const stats = converter.scheduler?.getStats() || {};
+    res.set('Content-Type', 'text/plain');
+    res.send(`
+# HELP neonews_active_monitors Número de monitores ativos
+# TYPE neonews_active_monitors gauge
+neonews_active_monitors ${stats.activeMonitors || 0}
+# HELP neonews_pool_running Workers em execução
+# TYPE neonews_pool_running gauge
+neonews_pool_running ${stats.pool?.running || 0}
+# HELP neonews_pool_queued Workers na fila
+# TYPE neonews_pool_queued gauge
+neonews_pool_queued ${stats.pool?.queued || 0}
+`);
+});
+
+app.get('/api/keepalive', (req, res) => {
+    const { owner, videoId } = req.query;
+    const rawIp = req.ip || req.socket.remoteAddress;
+    const ip = normalizeIp(
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        rawIp
+    );
+    if (owner && videoId && !isLocalIp(ip)) {
+        console.log(`[KEEPALIVE] ${owner}:${videoId} -> ${ip}`);
+        trackViewerByOwner(owner, ip, videoId);
+        return res.send('ok');
+    }
+    res.status(400).send('invalid');
+});
+
+// ========== PROXY HLS (rota com videoId) - compatibilidade ==========
+app.get('/neonews/:videoId.m3u8', async (req, res) => {
+    const videoId = req.params.videoId;
+    const queryOwner = req.query.owner || null;
+    const allowedHeights = [144, 240, 360, 480, 720, 1080];
+    const envMaxHeight = parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
+    const urlMaxHeight = parseInt(req.query.max, 10);
+    let maxHeight = envMaxHeight;
+    if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
+        maxHeight = urlMaxHeight;
+    }
+    await handleM3u8Proxy(videoId, queryOwner, req, res, maxHeight);
+});
+
+// ========== PROXY HLS (rota com token) ==========
+app.get('/neonews/t/:token.m3u8', async (req, res) => {
+    const token = req.params.token;
+    const info = getTokenInfo(token);
+    if (!info) {
+        return res.status(404).send('Token inválido ou expirado');
+    }
+    const { videoId, owner } = info;
+    const allowedHeights = [144, 240, 360, 480, 720, 1080];
+    const envMaxHeight = parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
+    const urlMaxHeight = parseInt(req.query.max, 10);
+    let maxHeight = envMaxHeight;
+    if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
+        maxHeight = urlMaxHeight;
+    }
+    await handleM3u8Proxy(videoId, owner, req, res, maxHeight);
 });
 
 // ========== AUTENTICAÇÃO E DASHBOARD ==========
@@ -632,14 +1335,19 @@ app.get('/api/cookie/functional-status', isAuthenticated, (req, res) => {
     res.json({ functional, timestamp: new Date().toISOString() });
 });
 
-// ========== ROTA /api/monitors (COM VIEWERS) ==========
 app.get('/api/monitors', isAuthenticated, (req, res) => {
     const monitors = [];
     if (converter && converter.activeMonitors) {
-        for (const [videoId, monitor] of converter.activeMonitors.entries()) {
+        for (const [key, monitor] of converter.activeMonitors.entries()) {
+            const [videoId, owner] = key.split(':');
+            const activeDevices = owner ? getActiveDevicesForOwnerAndVideo(owner, videoId) : 0;
+            const deviceIPs = owner ? getActiveViewerIPsForOwnerAndVideo(owner, videoId) : [];
+            const token = getOrCreateToken(videoId, owner || null);
             monitors.push({
                 videoId,
                 youtubeUrl: monitor.youtubeUrl,
+                owner: owner || null,
+                token,
                 status: monitor.liveState || (monitor.isLive ? 'online' : 'offline'),
                 isLive: monitor.liveState === 'online',
                 failCount: monitor.failCount || 0,
@@ -647,7 +1355,10 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
                 health: monitor.health,
                 stalledCount: monitor.stalledCount,
                 lastMediaSequence: monitor.lastMediaSequence,
-                viewers: getActiveViewers(videoId)
+                viewers: activeDevices,
+                viewerIPs: deviceIPs,
+                title: monitor.metadata?.title || null,
+                channel: monitor.metadata?.channel || null
             });
         }
     }
@@ -708,6 +1419,9 @@ app.get('/api/cookie/status', isAuthenticated, (req, res) => {
     });
 });
 
+// ============================================================
+// 🔧 ROTA UPLOAD COOKIE (COM RESET DO ALERTA)
+// ============================================================
 app.post('/api/cookie/upload', isAuthenticated, upload.single('cookie'), async (req, res) => {
     const startTime = Date.now();
     if (uploadInProgress) {
@@ -740,6 +1454,7 @@ app.post('/api/cookie/upload', isAuthenticated, upload.single('cookie'), async (
         if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
         fs.renameSync(tempPath, targetPath);
 
+        // 🔧 SUBSTITUIÇÃO REALIZADA AQUI
         if (!isLegacy && converter && converter.cookieRotator) {
             const cookieKey = `cookie${targetType}.txt`;
             converter.cookieRotator.status[cookieKey] = {
@@ -747,10 +1462,11 @@ app.post('/api/cookie/upload', isAuthenticated, upload.single('cookie'), async (
                 failCount: 0,
                 lastFailure: null,
                 lastSuccess: new Date().toISOString(),
-                reason: null
+                reason: null,
+                alertActive: false   // <-- ADICIONADO: desliga o alerta só aqui, na troca manual
             };
             converter.cookieRotator.saveStatus();
-            console.log(`🔄 CookieRotator: ${cookieKey} marcado como 'valid' após upload`);
+            console.log(`🔄 CookieRotator: ${cookieKey} marcado como 'valid' após upload (alerta desligado)`);
         }
 
         if (!isLegacy && targetType === '1') {
@@ -799,11 +1515,195 @@ app.get('/api/scheduler/stats', isAuthenticated, (req, res) => {
     }
 });
 
+// ============================================================
+// ROTA PARA FINALIZAR MONITOR
+// ============================================================
+app.post('/api/monitor/stop/:videoId', async (req, res) => {
+    const videoId = req.params.videoId;
+    const { owner } = req.body;
+
+    try {
+        let monitorFound = null;
+        let keyFound = null;
+        let actualOwner = null;
+
+        if (owner) {
+            const key = `${videoId}:${owner}`;
+            if (converter.activeMonitors.has(key)) {
+                monitorFound = converter.activeMonitors.get(key);
+                keyFound = key;
+                actualOwner = owner;
+            }
+        }
+
+        if (!monitorFound && !owner) {
+            for (const [key, mon] of converter.activeMonitors.entries()) {
+                if (key.startsWith(videoId + ':')) {
+                    monitorFound = mon;
+                    keyFound = key;
+                    actualOwner = key.split(':')[1];
+                    break;
+                }
+            }
+            if (!monitorFound && converter.activeMonitors.has(videoId)) {
+                monitorFound = converter.activeMonitors.get(videoId);
+                keyFound = videoId;
+                actualOwner = null;
+            }
+        }
+
+        if (!monitorFound) {
+            return res.status(404).json({ success: false, message: 'Monitor não encontrado' });
+        }
+
+        if (actualOwner && actualOwner !== owner) {
+            return res.status(403).json({ success: false, message: 'Você não tem permissão para parar esta live' });
+        }
+
+        monitorFound.stopMonitoring();
+        converter.activeMonitors.delete(keyFound);
+        removePersistedMapping(videoId, actualOwner);
+
+        if (actualOwner) {
+            const key = `${actualOwner}:${videoId}`;
+            ownerViewers.delete(key);
+            saveOwnerViewers(ownerViewers);
+            viewerAccess.delete(`${actualOwner}:${videoId}`);
+            saveViewerAccess(viewerAccess);
+        } else {
+            viewerAccess.delete(videoId);
+            saveViewerAccess(viewerAccess);
+        }
+
+        m3u8CacheContent.delete(videoId);
+        m3u8CachePromises.delete(videoId);
+        lastGoodM3u8.delete(videoId);
+        lastServedSequence.delete(videoId);
+
+        for (const [token, info] of Object.entries(tokenMap)) {
+            if (info.videoId === videoId && info.owner === actualOwner) {
+                revokeToken(token);
+                console.log(`🗑️ Token ${token} revogado para ${videoId}:${actualOwner}`);
+                break;
+            }
+        }
+
+        console.log(`✅ Monitor finalizado manualmente: ${keyFound}`);
+        res.json({ success: true, message: 'Live finalizada com sucesso' });
+    } catch (error) {
+        console.error(`❌ Erro ao finalizar monitor ${videoId}:`, error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// ============================================================
+// ATUALIZAÇÃO AUTOMÁTICA DO YT-DLP
+// ============================================================
+async function runCommand(cmd, args, timeoutMs = 30000) {
+    return new Promise((resolve) => {
+        const child = spawn(cmd, args);
+        let stdout = '', stderr = '';
+        const timeoutId = setTimeout(() => {
+            child.kill('SIGTERM');
+            resolve({ success: false, error: 'Timeout' });
+        }, timeoutMs);
+
+        child.stdout.on('data', (data) => { stdout += data.toString(); });
+        child.stderr.on('data', (data) => { stderr += data.toString(); });
+
+        child.on('close', (code) => {
+            clearTimeout(timeoutId);
+            if (code === 0) {
+                resolve({ success: true, output: stdout, cmd: cmd });
+            } else {
+                resolve({ success: false, error: stderr || stdout || `Código ${code}` });
+            }
+        });
+
+        child.on('error', (err) => {
+            clearTimeout(timeoutId);
+            resolve({ success: false, error: err.message });
+        });
+    });
+}
+
+async function updateYtDlp() {
+    const isWin = process.platform === 'win32';
+    const commands = [];
+    if (isWin) {
+        commands.push({ cmd: '.\\yt-dlp.exe', args: ['-U'] });
+    } else {
+        commands.push(
+            { cmd: 'yt-dlp', args: ['-U'] },
+            { cmd: 'pip', args: ['install', '-U', 'yt-dlp'] },
+            { cmd: 'python3', args: ['-m', 'pip', 'install', '-U', 'yt-dlp'] }
+        );
+    }
+
+    for (const entry of commands) {
+        try {
+            console.log(`🔄 Tentando: ${entry.cmd} ${entry.args.join(' ')}`);
+            const result = await runCommand(entry.cmd, entry.args, 30000);
+            if (result.success) {
+                console.log(`✅ Atualização bem-sucedida com: ${entry.cmd}`);
+                return result;
+            }
+        } catch (err) {
+            console.warn(`⚠️ Falha com ${entry.cmd}: ${err.message}`);
+        }
+    }
+
+    return { success: false, error: 'Todos os métodos de atualização falharam.' };
+}
+
+const AUTO_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+setInterval(async () => {
+    console.log('🔄 [AGENDADO] Iniciando atualização automática do yt-dlp...');
+    const result = await updateYtDlp();
+    if (result.success) {
+        console.log('✅ yt-dlp foi atualizado para a versão mais recente.');
+        if (converter && converter.activeMonitors) {
+            console.log('🔄 Forçando renovação dos monitores para usar nova versão...');
+            for (const [key, monitor] of converter.activeMonitors.entries()) {
+                monitor.requestRefresh().catch(e => console.warn(`Falha ao renovar ${key}:`, e.message));
+            }
+        }
+    } else {
+        console.log(`ℹ️ Nenhuma atualização disponível ou erro: ${result.error}`);
+    }
+}, AUTO_UPDATE_INTERVAL_MS);
+
+app.get('/admin/update-ytdlp', isAuthenticated, async (req, res) => {
+    try {
+        const result = await updateYtDlp();
+        if (result.success) {
+            res.json({ success: true, message: 'yt-dlp atualizado com sucesso!', output: result.output });
+        } else {
+            res.status(500).json({ success: false, message: 'Falha na atualização', error: result.error });
+        }
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // ========== INICIALIZAÇÃO ==========
 const EmailAlerts = require('./alerts/emailAlerts');
 const ConvertAPI = require('./api/convert');
 const emailAlerts = new EmailAlerts();
-converter = new ConvertAPI(emailAlerts);
+
+// 👇 Função que revoga o token associado a um videoId+owner
+const revokeTokenFn = (videoId, owner) => {
+    for (const [token, info] of Object.entries(tokenMap)) {
+        if (info.videoId === videoId && info.owner === owner) {
+            revokeToken(token);
+            console.log(`🗑️ Token revogado para ${videoId}:${owner}`);
+            break;
+        }
+    }
+};
+
+converter = new ConvertAPI(emailAlerts, null, revokeTokenFn);
 
 if (emailAlerts && converter.cookieRotator) {
     emailAlerts.setCookieRotator(converter.cookieRotator);
@@ -812,29 +1712,123 @@ if (emailAlerts && converter.cookieRotator) {
     console.log('⚠️ Não foi possível injetar CookieRotator no EmailAlerts');
 }
 
-// ========== CARREGAR MONITORES PERSISTIDOS ==========
-(async function loadPersistedMonitors() {
-    try {
-        const map = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
-        const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
-        console.log(`♻️ Carregando ${Object.keys(map).length} monitores persistidos...`);
-        for (const [videoId, youtubeUrl] of Object.entries(map)) {
-            if (!converter.activeMonitors.has(videoId)) {
-                console.log(`♻️ Recriando monitor persistido: ${videoId}`);
-                try {
-                    await converter.convert(youtubeUrl, baseUrl);
-                } catch (err) {
-                    console.error(`❌ Falha ao recriar monitor ${videoId}:`, err.message);
-                }
+// ============================================================
+// ✅ VALIDAÇÃO ATIVA DOS COOKIES NA INICIALIZAÇÃO (usando LIVE CONTÍNUA)
+// ============================================================
+(async function validateCookiesOnStartup() {
+    if (!converter || !converter.cookieRotator) return;
+    console.log('🔍 Validando cookies na inicialização (teste com live contínua)...');
+    const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
+    // Usar uma live que fica 24/7 no ar para capturar o erro "No video formats found"
+    const TEST_URL = 'https://www.youtube.com/watch?v=aSXLerQStXA'; // live atual
+    let anyInvalid = false;
+    const invalidList = [];
+    for (const file of cookieFiles) {
+        const fullPath = path.join(cookiesDir, file);
+        if (!fs.existsSync(fullPath)) {
+            console.log(`⚠️ ${file} não encontrado, ignorando.`);
+            continue;
+        }
+        try {
+            console.log(`🔍 Testando ${file} com live contínua...`);
+            await runYtdlp([
+                '--cookies', fullPath,
+                '--flat-playlist',
+                '--playlist-end', '1',
+                '--dump-json',
+                TEST_URL
+            ], 20000);
+            // Se não lançou erro, está válido
+            const cookieKey = file;
+            if (converter.cookieRotator.status[cookieKey]) {
+                converter.cookieRotator.status[cookieKey].state = 'valid';
+                converter.cookieRotator.status[cookieKey].failCount = 0;
+                converter.cookieRotator.status[cookieKey].lastFailure = null;
+                converter.cookieRotator.status[cookieKey].reason = null;
+                converter.cookieRotator.status[cookieKey].alertActive = false;
+                converter.cookieRotator.saveStatus();
+            }
+            console.log(`✅ ${file} válido (live teste OK)`);
+        } catch (err) {
+            console.log(`❌ ${file} inválido: ${err.message}`);
+            anyInvalid = true;
+            const cookieKey = file;
+            if (converter.cookieRotator.status[cookieKey]) {
+                converter.cookieRotator.status[cookieKey].state = 'invalid';
+                converter.cookieRotator.status[cookieKey].failCount = (converter.cookieRotator.status[cookieKey].failCount || 0) + 1;
+                converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
+                converter.cookieRotator.status[cookieKey].reason = err.message;
+                converter.cookieRotator.status[cookieKey].alertActive = true;
+                converter.cookieRotator.saveStatus();
+            }
+            invalidList.push({ file, error: err.message });
+        }
+    }
+
+    // Se houver algum cookie inválido, envia um e-mail de resumo imediatamente
+    if (anyInvalid) {
+        console.log('📧 Enviando alerta de inicialização com cookies inválidos...');
+        if (emailAlerts) {
+            const invalidOnes = Object.entries(converter.cookieRotator.status)
+                .filter(([, v]) => v.state !== 'valid')
+                .map(([name, v]) => [name, v]);
+            if (invalidOnes.length > 0) {
+                emailAlerts.sendCookieFailureSummaryAlert(invalidOnes);
             }
         }
-        console.log(`✅ ${converter.activeMonitors.size} monitores ativos após boot.`);
-    } catch (e) {
-        console.log('ℹ️ Nenhum arquivo de persistência encontrado ou vazio.');
+    } else {
+        console.log('✅ Todos os cookies válidos na inicialização.');
+    }
+
+    // 🔥 INICIAR A VERIFICAÇÃO PERIÓDICA APENAS AGORA, DEPOIS DA VALIDAÇÃO
+    if (emailAlerts && emailAlerts.checkCookiesHealthAlert) {
+        setTimeout(() => {
+            console.log('🔄 Iniciando verificação periódica de cookies após validação...');
+            emailAlerts.checkCookiesHealthAlert();
+        }, 1000);
     }
 })();
 
-// Verificação periódica de cookies
+// ============================================================
+// RENOVAÇÃO E LIMPEZA PERIÓDICA
+// ============================================================
+setInterval(() => {
+    let modified = false;
+    const now = Date.now();
+    for (const [key, viewers] of ownerViewers.entries()) {
+        for (const [ip, timestamp] of viewers.entries()) {
+            if (now - timestamp > VIEWER_WINDOW_MS) {
+                viewers.delete(ip);
+                modified = true;
+                console.log(`[${key}] 🧹 IP ${ip} expirado (inatividade > ${VIEWER_WINDOW_MS / 3600000}h)`);
+            }
+        }
+        if (viewers.size === 0) {
+            ownerViewers.delete(key);
+        }
+    }
+    if (modified) {
+        saveOwnerViewers(ownerViewers);
+        console.log(`🧹 Limpeza periódica: IPs expirados removidos.`);
+    }
+}, 7200000);
+
+setInterval(() => {
+    if (!converter?.activeMonitors) return;
+    console.log(`🔁 [RENOVAÇÃO] Executando ciclo de renovação...`);
+    for (const [key, monitor] of converter.activeMonitors.entries()) {
+        const parts = key.split(':');
+        const videoId = parts[0];
+        const owner = parts[1];
+        if (owner && videoId) {
+            renewViewersForMonitor(owner, videoId);
+        }
+    }
+}, 180000);
+
+// ============================================================
+// VERIFICAÇÃO DE COOKIES (a cada 30 min)
+// ============================================================
 setInterval(async () => {
     if (!converter?.cookieRotator) return;
     const hasValid = converter.cookieRotator.hasValidCookies();
@@ -850,35 +1844,18 @@ setInterval(async () => {
     }
 }, 30 * 60 * 1000);
 
-// ========== COLETOR DE LIXO ==========
-setInterval(() => {
-    if (!converter?.activeMonitors) return;
-    const now = Date.now();
-    for (const [videoId, monitor] of converter.activeMonitors.entries()) {
-        if (monitor.liveState === 'ended' && (now - (monitor._liveEndedAt || monitor.lastAccess || 0)) > 3600000) {
-            console.log(`🧹 Removendo monitor da live encerrada: ${videoId}`);
-            monitor.stopMonitoring();
-            converter.activeMonitors.delete(videoId);
-            removePersistedMapping(videoId);
-            m3u8CacheContent.delete(videoId);
-            m3u8CachePromises.delete(videoId);
-            lastGoodM3u8.delete(videoId);
-            lastServedSequence.delete(videoId);
-        }
-    }
-}, 600000);
-
 app.get('/', (req, res) => {
     res.redirect('/converter.html');
 });
 
 app.listen(PORT, () => {
     console.log('========================================');
-    console.log('NeoNews Live Converter V3 - SSOT + GlobalScheduler');
+    console.log('NeoNews Live Converter V3 - SSOT + GlobalScheduler + Tokens');
     console.log('========================================');
     console.log(`Conversor público: http://localhost:${PORT}/converter.html`);
     console.log(`Dashboard protegido: http://localhost:${PORT}/dashboard`);
     console.log(`API Health: http://localhost:${PORT}/health`);
     console.log(`Métricas: http://localhost:${PORT}/metrics`);
+    console.log(`Timeout de dispositivos: ${VIEWER_WINDOW_MS}ms (${VIEWER_WINDOW_MS / 3600000}h)`);
     console.log('========================================\n');
 });

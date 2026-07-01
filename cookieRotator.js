@@ -7,24 +7,24 @@ class CookieRotator {
         this.statusFilePath = statusFilePath || path.join(cookiesDir, 'cookieStatus.json');
         this.cookies = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
         this.currentIndex = 0;
-        this.emailAlerts = null; // Será injetado posteriormente
-        
-        // Carrega estado persistido ou inicializa novo
+        this.emailAlerts = null;
+
         this.loadStatus();
     }
 
-    // Injeta o sistema de e-mail (para evitar dependência circular)
     setEmailAlerts(emailAlerts) {
         this.emailAlerts = emailAlerts;
     }
 
-    // Carrega o estado do arquivo JSON
     loadStatus() {
         try {
             if (fs.existsSync(this.statusFilePath)) {
                 const data = fs.readFileSync(this.statusFilePath, 'utf8');
                 const parsed = JSON.parse(data);
                 this.status = parsed;
+                for (const cookie of this.cookies) {
+                    this._ensureAlertField(cookie);
+                }
                 console.log('📁 Estado dos cookies carregado de', this.statusFilePath);
             } else {
                 this.initDefaultStatus();
@@ -35,22 +35,27 @@ class CookieRotator {
         }
     }
 
-    // Inicializa estado padrão (todos válidos)
     initDefaultStatus() {
         this.status = {};
         for (const cookie of this.cookies) {
             this.status[cookie] = {
-                state: 'valid',     // valid, suspect, invalid
+                state: 'valid',
                 failCount: 0,
                 lastFailure: null,
                 lastSuccess: Date.now(),
-                reason: null
+                reason: null,
+                alertActive: false
             };
         }
         this.saveStatus();
     }
 
-    // Salva estado no arquivo JSON
+    _ensureAlertField(cookieName) {
+        if (this.status[cookieName] && this.status[cookieName].alertActive === undefined) {
+            this.status[cookieName].alertActive = false;
+        }
+    }
+
     saveStatus() {
         try {
             fs.writeFileSync(this.statusFilePath, JSON.stringify(this.status, null, 2), 'utf8');
@@ -59,19 +64,19 @@ class CookieRotator {
         }
     }
 
-    // Marca falha para um cookie
     markFailure(cookieName, errorMsg, videoId = null) {
         if (!this.status[cookieName]) return;
+        this._ensureAlertField(cookieName);
 
         const cookie = this.status[cookieName];
         cookie.failCount++;
         cookie.lastFailure = new Date().toISOString();
         cookie.reason = errorMsg;
+        cookie.alertActive = true;
 
-        // Se atingiu 3 falhas consecutivas e ainda está válido ou suspeito, invalida
         if (cookie.failCount >= 3 && (cookie.state === 'valid' || cookie.state === 'suspect')) {
             cookie.state = 'invalid';
-            cookie.failCount = 0; // reseta contagem (já está inválido)
+            cookie.failCount = 0;
             this.sendInvalidAlert(cookieName, errorMsg);
             console.log(`❌ Cookie ${cookieName} invalidado após 3 falhas.`);
         } else if (cookie.failCount >= 1 && cookie.failCount < 3 && cookie.state === 'valid') {
@@ -81,30 +86,33 @@ class CookieRotator {
         this.saveStatus();
     }
 
-    // Marca sucesso (cookie funcionou)
+    // 🔧 CORREÇÃO: ao recuperar, desliga o alerta automaticamente e limpa o histórico
     markSuccess(cookieName) {
         if (!this.status[cookieName]) return;
+        this._ensureAlertField(cookieName);
 
         const cookie = this.status[cookieName];
-        if (cookie.state === 'invalid') {
+        const wasProblem = cookie.state === 'invalid' || cookie.state === 'suspect';
+
+        if (wasProblem) {
             cookie.state = 'valid';
             cookie.failCount = 0;
-            cookie.lastFailure = null;
             cookie.reason = null;
+            cookie.lastFailure = null;
+            cookie.alertActive = false;  // 🔥 DESLIGA O ALERTA AUTOMATICAMENTE
             this.sendRecoveryAlert(cookieName);
-            console.log(`✅ Cookie ${cookieName} recuperado (voltou a funcionar).`);
-        } else if (cookie.state === 'suspect') {
-            cookie.state = 'valid';
-            cookie.failCount = 0;
-            cookie.lastFailure = null;
+            console.log(`✅ Cookie ${cookieName} recuperado e alerta desligado.`);
+        } else {
+            // Se já estava válido, apenas garante que o alerta esteja desligado
+            cookie.alertActive = false;
             cookie.reason = null;
-            console.log(`✅ Cookie ${cookieName} estabilizou (falhas resolvidas).`);
+            cookie.lastFailure = null;
+            console.log(`✅ Cookie ${cookieName} já estava válido. Alerta mantido desligado.`);
         }
         cookie.lastSuccess = new Date().toISOString();
         this.saveStatus();
     }
 
-    // Envia e-mail de cookie inválido
     sendInvalidAlert(cookieName, errorMsg) {
         if (!this.emailAlerts) return;
         const subject = `🔴 Cookie ${cookieName} inválido - NeoNews Monitor`;
@@ -112,15 +120,13 @@ class CookieRotator {
         this.emailAlerts.sendEmailAlert(subject, message, 'cookie_invalid');
     }
 
-    // Envia e-mail de recuperação
     sendRecoveryAlert(cookieName) {
         if (!this.emailAlerts) return;
         const subject = `🟢 Cookie ${cookieName} recuperado - NeoNews Monitor`;
-        const message = `O cookie ${cookieName} voltou a funcionar e foi reinserido na rotação.\n\nRedundância restaurada.`;
+        const message = `O cookie ${cookieName} voltou a funcionar e o alerta foi removido automaticamente.`;
         this.emailAlerts.sendEmailAlert(subject, message, 'cookie_recovered');
     }
 
-    // Obtém o próximo cookie funcional (apenas válidos)
     getNextCookiePath() {
         const validCookies = this.cookies.filter(cookie => {
             const cookiePath = path.join(this.cookiesDir, cookie);
@@ -154,8 +160,8 @@ class CookieRotator {
     hasValidCookies() {
         for (const cookie of this.cookies) {
             const cookiePath = path.join(this.cookiesDir, cookie);
-            if (this.status[cookie]?.state === 'valid' && 
-                fs.existsSync(cookiePath) && 
+            if (this.status[cookie]?.state === 'valid' &&
+                fs.existsSync(cookiePath) &&
                 fs.statSync(cookiePath).size > 5000) {
                 return true;
             }
@@ -172,20 +178,27 @@ class CookieRotator {
             failCount: 0,
             lastFailure: null,
             lastSuccess: Date.now(),
-            reason: null
+            reason: null,
+            alertActive: false
         };
         this.saveStatus();
-        console.log(`🔄 Cookie ${cookieName} substituído e marcado como válido.`);
+        console.log(`🔄 Cookie ${cookieName} substituído e marcado como válido. Alerta desligado.`);
     }
 
-    // ========== MÉTODO CORRIGIDO ==========
-    // Remove a extensão .txt das chaves retornadas para compatibilidade com o dashboard
+    clearAlert(cookieName) {
+        if (!this.status[cookieName]) return;
+        this.status[cookieName].alertActive = false;
+        this.saveStatus();
+        console.log(`🔕 Alerta de ${cookieName} desligado manualmente.`);
+    }
+
     getFunctionalStatus() {
         const result = {};
         for (const cookie of this.cookies) {
-            const key = cookie.replace('.txt', ''); // "cookie1.txt" -> "cookie1"
+            const key = cookie.replace('.txt', '');
             const cookiePath = path.join(this.cookiesDir, cookie);
             const fileExists = fs.existsSync(cookiePath) && fs.statSync(cookiePath).size > 5000;
+            this._ensureAlertField(cookie);
             result[key] = {
                 state: this.status[cookie]?.state || 'unknown',
                 valid: this.status[cookie]?.state === 'valid' && fileExists,
@@ -193,7 +206,8 @@ class CookieRotator {
                 lastFailure: this.status[cookie]?.lastFailure,
                 lastSuccess: this.status[cookie]?.lastSuccess,
                 reason: this.status[cookie]?.reason,
-                fileExists
+                fileExists,
+                alertActive: this.status[cookie]?.alertActive || false
             };
         }
         return result;

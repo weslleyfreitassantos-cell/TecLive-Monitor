@@ -3,228 +3,1106 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Converter</title>
+    <title>TecLive Converter</title>
     <style>
+        /* Mantido o mesmo estilo do seu arquivo original */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 20px;
-            padding: 40px;
-            max-width: 600px;
-            width: 100%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }
-        h1 { color: #333; margin-bottom: 10px; }
-        .subtitle { color: #666; margin-bottom: 30px; }
-        input {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #ddd;
-            border-radius: 10px;
-            font-size: 14px;
-            margin-bottom: 20px;
-        }
-        input:focus { outline: none; border-color: #667eea; }
-        button {
-            width: 100%;
-            padding: 15px;
-            background: #667eea;
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 16px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-        button:hover { background: #5a67d8; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .result {
-            margin-top: 30px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 10px;
-            display: none;
-        }
-        .result.show { display: block; }
-        .link-box {
-            display: flex;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        .link-box input {
-            flex: 1;
-            margin-bottom: 0;
-            background: white;
-        }
-        .copy-btn {
-            width: auto;
-            padding: 15px 20px;
-            background: #28a745;
-            margin-top: 0;
-        }
-        .copy-btn:hover { background: #218838; }
-        .loading {
-            display: none;
-            text-align: center;
-            margin-top: 20px;
-            color: #667eea;
-        }
-        .loading.show { display: block; }
-        .error {
-            display: none;
-            background: #f8d7da;
-            color: #721c24;
-            padding: 10px;
-            border-radius: 10px;
-            margin-top: 20px;
-        }
-        .error.show { display: block; }
-        .success {
-            display: none;
-            background: #d4edda;
-            color: #155724;
-            padding: 10px;
-            border-radius: 10px;
-            margin-top: 20px;
-        }
-        .success.show { display: block; }
-        .info {
-            margin-top: 10px;
-            font-size: 12px;
-            color: #666;
-        }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0e1a; color: #e0e0e0; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 24px; font-size: 18px; }
+        .container { background: #0f1322; border: 1px solid rgba(46,204,113,0.12); border-radius: 24px; padding: 30px 32px; max-width: 480px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.6); transition: all 0.3s; }
+        .container.expanded { max-width: 900px; padding: 36px 44px; }
+        .login-area { display: block; }
+        .login-area h1 { font-size: 24px; font-weight: 700; color: #2ecc71; margin-bottom: 4px; }
+        .login-area .sub { color: #7a8aa0; font-size: 13px; margin-bottom: 24px; }
+        .login-form label { display: block; font-size: 13px; font-weight: 500; color: #7a8aa0; margin-bottom: 4px; }
+        .login-form input { width: 100%; padding: 10px 14px; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.2); border-radius: 10px; color: #e0e0e0; font-size: 14px; margin-bottom: 14px; outline: none; transition: border 0.2s; }
+        .login-form input:focus { border-color: #2ecc71; box-shadow: 0 0 0 3px rgba(46,204,113,0.1); }
+        .login-form .btn-login { width: 100%; padding: 12px; background: #2ecc71; color: #0a0e1a; border: none; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; transition: background 0.2s; }
+        .login-form .btn-login:hover { background: #27ae60; }
+        .login-error { color: #e74c3c; font-size: 14px; margin-top: -8px; margin-bottom: 12px; display: none; }
+        .login-error.show { display: block; }
+        .converter-area { display: none; }
+        .converter-area.active { display: block; }
+        .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+        .top-bar h1 { font-size: 28px; font-weight: 700; color: #2ecc71; }
+        .top-bar .sub { color: #7a8aa0; font-size: 13px; margin-top: -2px; }
+        .user-card { background: rgba(0,0,0,0.25); border-radius: 14px; padding: 18px 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 28px; border: 1px solid rgba(46,204,113,0.08); }
+        .user-card .info { display: flex; flex-direction: column; gap: 8px; }
+        .user-card .info .name { font-size: 20px; font-weight: 600; color: #e0e0e0; margin-bottom: 4px; }
+        .user-card .info .name span { color: #2ecc71; }
+        .user-card .stats { display: flex; gap: 28px; font-size: 15px; color: #7a8aa0; }
+        .user-card .stats strong { color: #2ecc71; font-weight: 600; }
+        .user-card .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .user-card .btn-sair { background: rgba(231,76,60,0.12); color: #e74c3c; border: 1px solid rgba(231,76,60,0.25); padding: 6px 18px; border-radius: 8px; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s; }
+        .user-card .btn-sair:hover { background: rgba(231,76,60,0.2); }
+        .converter-box { display: flex; flex-direction: column; gap: 14px; margin-bottom: 20px; }
+        .converter-box input { width: 100%; padding: 14px 18px; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.2); border-radius: 10px; color: #e0e0e0; font-size: 16px; outline: none; transition: border 0.2s; }
+        .converter-box input:focus { border-color: #2ecc71; box-shadow: 0 0 0 3px rgba(46,204,113,0.1); }
+        .converter-box .btn-gerar { padding: 15px; background: #2ecc71; color: #0a0e1a; border: none; border-radius: 10px; font-size: 18px; font-weight: 700; cursor: pointer; transition: background 0.2s; }
+        .converter-box .btn-gerar:hover { background: #27ae60; }
+        .converter-box .btn-gerar:disabled { opacity: 0.4; cursor: not-allowed; }
+        .feedback { display: none; padding: 12px 16px; border-radius: 10px; margin-top: 12px; text-align: center; font-weight: 500; }
+        .feedback.loading { color: #5dade2; background: rgba(93,173,226,0.08); border: 1px solid rgba(93,173,226,0.15); }
+        .feedback.error { color: #e74c3c; background: rgba(231,76,60,0.08); border: 1px solid rgba(231,76,60,0.15); }
+        .feedback.success { color: #2ecc71; background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.15); }
+        .feedback.show { display: block; }
+        .result-box { display: none !important; }
+        .lives-section { margin-top: 28px; border-top: 1px solid rgba(46,204,113,0.08); padding-top: 20px; }
+        .lives-section h3 { font-size: 16px; text-transform: uppercase; letter-spacing: 1px; color: #7a8aa0; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
+        .lives-section .ver-mais-btn { background: rgba(46,204,113,0.12); color: #2ecc71; border: 1px solid rgba(46,204,113,0.25); padding: 4px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: none; }
+        .lives-section .ver-mais-btn:hover { background: rgba(46,204,113,0.2); }
+        .lives-section .empty { color: #7a8aa0; text-align: center; padding: 16px; font-size: 15px; }
+        .live-item { background: rgba(0,0,0,0.2); border-radius: 10px; padding: 12px 16px; margin-bottom: 10px; border-left: 4px solid #2ecc71; display: flex; flex-direction: column; gap: 6px; }
+        .live-item .live-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .live-item .title { font-size: 15px; color: #e0e0e0; font-weight: 500; word-break: break-word; flex: 1; min-width: 120px; }
+        .live-item .channel { font-size: 12px; color: #5dade2; font-weight: 400; margin-left: 8px; }
+        .live-item .id { font-family: monospace; font-size: 12px; color: #7a8aa0; }
+        .live-item .status-badge { font-weight: 600; font-size: 12px; padding: 2px 10px; border-radius: 12px; background: rgba(0,0,0,0.25); }
+        .status-online { color: #2ecc71; }
+        .status-offline, .status-ended { color: #e74c3c; }
+        .status-degraded { color: #f1c40f; }
+        .live-item .btn-stop, .live-item .btn-stop-modal { background: rgba(231,76,60,0.15); color: #e74c3c; border: 1px solid rgba(231,76,60,0.3); padding: 3px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        .live-item .btn-stop:hover, .live-item .btn-stop-modal:hover { background: rgba(231,76,60,0.25); }
+        .live-item .btn-copy-link, .live-item .btn-copy-modal { background: rgba(46,204,113,0.15); color: #2ecc71; border: 1px solid rgba(46,204,113,0.3); padding: 3px 12px; border-radius: 6px; font-weight: 600; font-size: 12px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+        .live-item .btn-copy-link:hover, .live-item .btn-copy-modal:hover { background: rgba(46,204,113,0.25); }
+        .live-item .live-link-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .live-item .live-link-row input { flex: 1; min-width: 150px; padding: 4px 8px; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.15); border-radius: 4px; color: #e0e0e0; font-size: 11px; font-family: monospace; }
+        .live-item .dica-link { font-size: 14px; color: #a0b0c0; margin-top: 6px; padding: 4px 12px; border-radius: 6px; background: rgba(46,204,113,0.03); border: 1px solid rgba(46,204,113,0.05); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+        .live-item .dica-link .click-here { color: #2ecc71; font-weight: 600; cursor: pointer; text-decoration: underline dotted rgba(46,204,113,0.4); transition: color 0.2s, text-decoration-color 0.2s; }
+        .live-item .dica-link .click-here:hover { color: #58d68d; text-decoration-color: #2ecc71; }
+        .modal-link-box .modal-box { max-width: 550px; padding: 16px 20px; }
+        .modal-link-box .modal-body { padding: 4px 0 8px 0; }
+        .modal-link-box .modal-header { margin-bottom: 6px; padding-bottom: 0; border-bottom: none; justify-content: flex-end; }
+        .modal-link-box .modal-header .modal-close { font-size: 26px; }
+        .modal-link-box .modal-body .info-text { font-size: 13px; color: #7a8aa0; margin-bottom: 10px; line-height: 1.4; }
+        .modal-link-box .modal-body .info-text code { background: rgba(0,0,0,0.25); padding: 0 6px; border-radius: 3px; color: #5dade2; font-size: 12px; }
+        .modal-link-box .modal-body .link-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .modal-link-box .modal-body .link-row input { flex: 1; padding: 8px 12px; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.2); border-radius: 6px; color: #e0e0e0; font-size: 13px; font-family: monospace; outline: none; min-width: 160px; }
+        .modal-link-box .modal-body .link-row .btn-copy-modal-link { background: rgba(46,204,113,0.18); border: 1px solid rgba(46,204,113,0.4); color: #2ecc71; padding: 6px 18px; border-radius: 6px; font-weight: 700; font-size: 14px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+        .modal-link-box .modal-body .link-row .btn-copy-modal-link:hover { background: rgba(46,204,113,0.35); transform: scale(1.02); }
+        .devices-section { margin-top: 24px; border-top: 1px solid rgba(46,204,113,0.08); padding-top: 16px; }
+        .devices-section .devices-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .devices-section h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #7a8aa0; }
+        .devices-section .ver-mais-devices-btn { background: rgba(46,204,113,0.12); color: #2ecc71; border: 1px solid rgba(46,204,113,0.25); padding: 2px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: none; }
+        .devices-section .ver-mais-devices-btn:hover { background: rgba(46,204,113,0.2); }
+        .device-item { background: rgba(0,0,0,0.2); border-radius: 6px; padding: 8px 14px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid #5dade2; }
+        .device-item .ip { font-family: monospace; font-size: 13px; color: #5dade2; }
+        .device-item .btn-remove-ip { background: rgba(231,76,60,0.12); color: #e74c3c; border: 1px solid rgba(231,76,60,0.25); padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        .device-item .btn-remove-ip:hover { background: rgba(231,76,60,0.2); }
+        .devices-empty { color: #7a8aa0; text-align: center; padding: 8px; font-size: 13px; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 999; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; }
+        .modal-box { background: #0f1322; border: 1px solid rgba(46,204,113,0.3); border-radius: 16px; padding: 32px 36px; max-width: 900px; width: 94%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.7); }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-shrink: 0; }
+        .modal-header h3 { color: #2ecc71; font-size: 24px; }
+        .modal-close { background: transparent; border: none; color: #7a8aa0; font-size: 32px; cursor: pointer; transition: all 0.2s; }
+        .modal-close:hover { color: #e74c3c; transform: rotate(90deg); }
+        .modal-search { display: flex; align-items: center; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.2); border-radius: 8px; padding: 6px 14px; margin-bottom: 16px; flex-shrink: 0; }
+        .modal-search input { background: transparent; border: none; color: #e0e0e0; padding: 10px 12px; font-size: 17px; outline: none; width: 100%; }
+        .modal-search input::placeholder { color: #7a8aa0; }
+        .modal-search span { color: #7a8aa0; font-size: 20px; margin-right: 10px; }
+        .modal-list { overflow-y: auto; flex: 1; padding-right: 8px; }
+        .modal-list::-webkit-scrollbar { width: 8px; }
+        .modal-list::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
+        .modal-list::-webkit-scrollbar-thumb { background: rgba(46,204,113,0.3); border-radius: 4px; }
+        .modal-list .live-item { margin-bottom: 12px; padding: 16px 20px; }
+        .modal-list .live-item .title { font-size: 18px; }
+        .modal-list .live-item .channel { font-size: 15px; }
+        .modal-list .live-item .id { font-size: 14px; }
+        .modal-list .live-item .status-badge { font-size: 14px; padding: 3px 14px; }
+        .modal-list .live-item .btn-stop, .modal-list .live-item .btn-stop-modal { font-size: 14px; padding: 4px 16px; }
+        .modal-list .live-item .btn-copy-link, .modal-list .live-item .btn-copy-modal { font-size: 14px; padding: 4px 16px; }
+        .modal-list .live-item .live-link-row input { font-size: 14px; padding: 6px 12px; min-width: 200px; }
+        .modal-list .live-item .dica-link { font-size: 15px; padding: 6px 14px; }
+        .modal-list .live-item .dica-link .click-here { font-size: 15px; }
+        .modal-dispositivos .modal-box { max-width: 700px; }
+        .modal-dispositivos .device-item { padding: 10px 16px; margin-bottom: 8px; }
+        .modal-dispositivos .device-item .ip { font-size: 16px; }
+        .modal-dispositivos .device-item .btn-remove-ip-modal, .modal-dispositivos .device-item .btn-remove-ip { font-size: 14px; padding: 4px 14px; }
+        .modal-dispositivos .empty { font-size: 16px; padding: 20px; }
+        .modal-dispositivos .modal-search input { font-size: 16px; }
+        @media (max-width: 600px) { .container { padding: 20px; max-width: 100%; } .container.expanded { padding: 20px; } .user-card { flex-direction: column; align-items: stretch; text-align: center; } .user-card .stats { justify-content: center; gap: 16px; } .user-card .actions { justify-content: center; } .live-item .live-link-row input { min-width: 100px; width: 100%; } .modal-box { padding: 16px; max-width: 98%; max-height: 92vh; } .modal-list .live-item { padding: 12px 14px; } .modal-list .live-item .title { font-size: 16px; } .modal-header h3 { font-size: 20px; } .modal-search input { font-size: 15px; } .devices-section .devices-header { flex-wrap: wrap; gap: 8px; } .live-item .dica-link { font-size: 13px; } .modal-link-box .modal-box { max-width: 98%; padding: 12px 14px; } .modal-link-box .modal-body .link-row input { font-size: 12px; min-width: 120px; } }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🎬 TecLive Converter</h1>
-        <div class="subtitle">Converta qualquer live do YouTube</div>
 
-        <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=...">
-
-        <button id="generateBtn">GERAR LINK</button>
-
-        <div class="loading" id="loading">⏳ Processando...</div>
-        <div class="error" id="error"></div>
-        <div class="success" id="success"></div>
-
-        <div class="result" id="result">
-            <label>🔗  (cole o link no player de reprodução)</label>
-            <div class="link-box">
-                <input type="text" id="linkOutput" readonly>
-                <button class="copy-btn" id="copyBtn">📋 COPIAR</button>
-            </div>
-            <div class="info" id="info"></div>
-        </div>
+<div class="container" id="app">
+    <!-- ===== LOGIN ===== -->
+    <div class="login-area" id="loginArea">
+        <h1>TecLive</h1>
+        <div class="sub">Faça login para acessar seu conversor</div>
+        <form class="login-form" id="loginForm">
+            <label for="loginUser">Login</label>
+            <input type="text" id="loginUser" placeholder="Seu login" required>
+            <label for="loginPass">Senha</label>
+            <input type="password" id="loginPass" placeholder="Sua senha" required>
+            <div class="login-error" id="loginError">Login ou senha inválidos</div>
+            <button type="submit" class="btn-login">ENTRAR</button>
+        </form>
     </div>
 
-    <script>
-        const urlInput = document.getElementById('urlInput');
-        const generateBtn = document.getElementById('generateBtn');
-        const loading = document.getElementById('loading');
-        const errorDiv = document.getElementById('error');
-        const successDiv = document.getElementById('success');
-        const resultDiv = document.getElementById('result');
-        const linkOutput = document.getElementById('linkOutput');
-        const copyBtn = document.getElementById('copyBtn');
-        const infoDiv = document.getElementById('info');
+    <!-- ===== CONVERSOR ===== -->
+    <div class="converter-area" id="converterArea">
+        <div class="top-bar">
+            <div>
+                <h1>TecLive</h1>
+                <div class="sub">Converta e gerencie suas lives</div>
+            </div>
+        </div>
 
-        generateBtn.addEventListener('click', async () => {
-            const youtubeUrl = urlInput.value.trim();
+        <div class="user-card">
+            <div class="info">
+                <div class="name"><span id="userName">Usuário</span></div>
+                <div class="stats">
+                    <span>lives restantes <strong id="userLives">0</strong></span>
+                    <span>dispositivos restantes <strong id="userDevices">0</strong></span>
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn-sair" id="logoutBtn">Sair</button>
+            </div>
+        </div>
 
-            if (!youtubeUrl) {
-                showError('Por favor, insira uma URL do YouTube');
+        <div class="converter-box">
+            <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=...">
+            <button class="btn-gerar" id="generateBtn">GERAR LINK</button>
+        </div>
+
+        <div class="feedback loading" id="loading">Processando...</div>
+        <div class="feedback error" id="error"></div>
+        <div class="feedback success" id="success"></div>
+
+        <!-- ===== LISTA DE LIVES (compacta) ===== -->
+        <div class="lives-section">
+            <h3>
+                <span>Minhas Lives</span>
+                <button class="ver-mais-btn" id="verMaisBtn">Ver mais</button>
+            </h3>
+            <div id="livesContainer">
+                <div class="empty">Nenhuma live gerada ainda.</div>
+            </div>
+        </div>
+
+        <!-- ===== DISPOSITIVOS ATIVOS (compacto) ===== -->
+        <div class="devices-section" id="devicesSection" style="display:none;">
+            <div class="devices-header">
+                <h3>Dispositivos Ativos</h3>
+                <button class="ver-mais-devices-btn" id="verMaisDevicesBtn">Ver mais</button>
+            </div>
+            <div id="devicesContainer"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== MODAL POPUP LIVES ===== -->
+<div class="modal-overlay" id="modalLives">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3>Todas as Lives</h3>
+            <button class="modal-close" id="modalClose">&times;</button>
+        </div>
+        <div class="modal-search">
+            <span>🔍</span>
+            <input type="text" id="modalSearch" placeholder="Buscar por ID, título ou canal...">
+        </div>
+        <div class="modal-list" id="modalListContainer">
+            <div id="modalList"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== MODAL POPUP DISPOSITIVOS ===== -->
+<div class="modal-overlay modal-dispositivos" id="modalDispositivos">
+    <div class="modal-box">
+        <div class="modal-header">
+            <h3>Todos os Dispositivos</h3>
+            <button class="modal-close" id="modalDevicesClose">&times;</button>
+        </div>
+        <div class="modal-search">
+            <span>🔍</span>
+            <input type="text" id="modalDevicesSearch" placeholder="Buscar por IP...">
+        </div>
+        <div class="modal-list" id="modalDevicesListContainer">
+            <div id="modalDevicesList"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== MODAL LINK COMPATÍVEL ===== -->
+<div class="modal-overlay modal-link-box" id="modalLinkCompativel">
+    <div class="modal-box">
+        <div class="modal-header">
+            <button class="modal-close" id="modalLinkCompativelClose">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="info-text">Link gerado com o parâmetro <code>&max=480</code> para reduzir a qualidade e melhorar a estabilidade.</div>
+            <div class="link-row">
+                <input type="text" id="compativelLinkInput" readonly />
+                <button class="btn-copy-modal-link" id="btnCopyCompativel">Copiar</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ============================================================
+    // CHAVES
+    // ============================================================
+    const STORAGE_CLIENTES = 'tecLiveClientes';
+    const STORAGE_LIVES = 'tecLiveClientLives';
+
+    // ============================================================
+    // ELEMENTOS
+    // ============================================================
+    const loginArea = document.getElementById('loginArea');
+    const converterArea = document.getElementById('converterArea');
+    const loginForm = document.getElementById('loginForm');
+    const loginUser = document.getElementById('loginUser');
+    const loginPass = document.getElementById('loginPass');
+    const loginError = document.getElementById('loginError');
+
+    const userName = document.getElementById('userName');
+    const userLives = document.getElementById('userLives');
+    const userDevices = document.getElementById('userDevices');
+    const logoutBtn = document.getElementById('logoutBtn');
+
+    const urlInput = document.getElementById('urlInput');
+    const generateBtn = document.getElementById('generateBtn');
+    const loading = document.getElementById('loading');
+    const error = document.getElementById('error');
+    const success = document.getElementById('success');
+    const livesContainer = document.getElementById('livesContainer');
+    const devicesContainer = document.getElementById('devicesContainer');
+    const devicesSection = document.getElementById('devicesSection');
+
+    const verMaisBtn = document.getElementById('verMaisBtn');
+    const modalLives = document.getElementById('modalLives');
+    const modalClose = document.getElementById('modalClose');
+    const modalSearch = document.getElementById('modalSearch');
+    const modalList = document.getElementById('modalList');
+
+    const verMaisDevicesBtn = document.getElementById('verMaisDevicesBtn');
+    const modalDispositivos = document.getElementById('modalDispositivos');
+    const modalDevicesClose = document.getElementById('modalDevicesClose');
+    const modalDevicesSearch = document.getElementById('modalDevicesSearch');
+    const modalDevicesList = document.getElementById('modalDevicesList');
+
+    const modalLinkCompativel = document.getElementById('modalLinkCompativel');
+    const modalLinkCompativelClose = document.getElementById('modalLinkCompativelClose');
+    const compativelLinkInput = document.getElementById('compativelLinkInput');
+    const btnCopyCompativel = document.getElementById('btnCopyCompativel');
+
+    const container = document.getElementById('app');
+
+    let currentUser = null;
+    let monitorStatusMap = {};
+    let deviceRemaining = 0;
+    let activeIPs = [];
+
+    // ============================================================
+    // FUNÇÕES DE CLIENTES
+    // ============================================================
+    function getClientes() {
+        return JSON.parse(localStorage.getItem(STORAGE_CLIENTES) || '[]');
+    }
+    function salvarClientes(clientes) {
+        localStorage.setItem(STORAGE_CLIENTES, JSON.stringify(clientes));
+    }
+    function getLives(login) {
+        const all = JSON.parse(localStorage.getItem(STORAGE_LIVES) || '{}');
+        return all[login] || [];
+    }
+    function salvarLives(login, lives) {
+        const all = JSON.parse(localStorage.getItem(STORAGE_LIVES) || '{}');
+        all[login] = lives;
+        localStorage.setItem(STORAGE_LIVES, JSON.stringify(all));
+    }
+
+    function ordenarLives(lives) {
+        return lives.slice().sort((a, b) => {
+            const timeA = a.createdAt || 0;
+            const timeB = b.createdAt || 0;
+            return timeB - timeA;
+        });
+    }
+
+    function formatarData(timestamp) {
+        if (!timestamp || isNaN(timestamp)) return 'Data indisponível';
+        try {
+            return new Date(timestamp).toLocaleString('pt-BR');
+        } catch (e) {
+            return 'Data indisponível';
+        }
+    }
+
+    // ============================================================
+    // REMOVER IP
+    // ============================================================
+    async function removerIp(ip) {
+        if (!currentUser) return;
+        if (!confirm(`Remover IP ${ip} da lista de dispositivos ativos?`)) return;
+        try {
+            const resp = await fetch('/api/device/remove', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ owner: currentUser, ip })
+            });
+            const data = await resp.json();
+            if (data.success) {
+                mostrarFeedback('success', `IP ${ip} removido!`);
+                await fetchDeviceStatus();
+                atualizarLivesRestantes();
+                setTimeout(() => esconderFeedback(), 3000);
+            } else {
+                mostrarFeedback('error', data.message || 'Erro ao remover IP');
+            }
+        } catch (err) {
+            mostrarFeedback('error', 'Erro ao remover IP');
+        }
+    }
+
+    // ============================================================
+    // SINCRONIZAR CLIENTES
+    // ============================================================
+    async function sincronizarClientesBackend() {
+        try {
+            const resp = await fetch('/api/clientes');
+            const clientes = await resp.json();
+            if (Array.isArray(clientes)) {
+                salvarClientes(clientes);
+                console.log('Clientes sincronizados do backend:', clientes.length);
+                if (currentUser) {
+                    atualizarLivesRestantes();
+                    await fetchDeviceStatus();
+                    renderizarLives();
+                }
+                return clientes;
+            }
+        } catch (err) {
+            console.warn('Erro ao sincronizar clientes:', err);
+        }
+        return null;
+    }
+
+    // ============================================================
+    // BUSCAR STATUS DOS DISPOSITIVOS
+    // ============================================================
+    async function fetchDeviceStatus() {
+        if (!currentUser) return;
+        try {
+            const resp = await fetch(`/api/public/device-status/${encodeURIComponent(currentUser)}`);
+            const data = await resp.json();
+            if (data.remaining !== undefined) {
+                deviceRemaining = data.remaining;
+                userDevices.textContent = deviceRemaining;
+                activeIPs = data.ips || [];
+                console.log('Dispositivos restantes:', deviceRemaining, 'IPs:', activeIPs);
+                renderizarDispositivos(activeIPs);
+            }
+        } catch (err) {
+            console.warn('Erro ao buscar status dos dispositivos:', err);
+        }
+    }
+
+    // ============================================================
+    // RENDERIZAR DISPOSITIVOS (compacto)
+    // ============================================================
+    function renderizarDispositivos(ips) {
+        if (!ips || ips.length === 0) {
+            devicesSection.style.display = 'none';
+            verMaisDevicesBtn.style.display = 'none';
+            return;
+        }
+        devicesSection.style.display = 'block';
+
+        const mostrar = ips.slice(0, 2);
+        const temMais = ips.length > 2;
+
+        let html = '';
+        mostrar.forEach(ip => {
+            html += `
+                <div class="device-item">
+                    <span class="ip">${ip}</span>
+                    <button class="btn-remove-ip" data-ip="${ip}">Remover</button>
+                </div>
+            `;
+        });
+        devicesContainer.innerHTML = html;
+
+        verMaisDevicesBtn.style.display = temMais ? 'inline-block' : 'none';
+
+        devicesContainer.querySelectorAll('.btn-remove-ip').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const ip = this.getAttribute('data-ip');
+                removerIp(ip);
+            });
+        });
+
+        if (modalDispositivos.classList.contains('active')) {
+            carregarModalDispositivos();
+        }
+    }
+
+    // ============================================================
+    // CARREGAR MODAL DE DISPOSITIVOS
+    // ============================================================
+    function carregarModalDispositivos() {
+        const termo = modalDevicesSearch.value.toLowerCase().trim();
+        let filtrados = activeIPs;
+        if (termo) {
+            filtrados = activeIPs.filter(ip => ip.toLowerCase().includes(termo));
+        }
+        if (filtrados.length === 0) {
+            modalDevicesList.innerHTML = '<div class="empty">Nenhum dispositivo encontrado.</div>';
+            return;
+        }
+        let html = '';
+        filtrados.forEach(ip => {
+            html += `
+                <div class="device-item">
+                    <span class="ip">${ip}</span>
+                    <button class="btn-remove-ip-modal" data-ip="${ip}">Remover</button>
+                </div>
+            `;
+        });
+        modalDevicesList.innerHTML = html;
+        modalDevicesList.querySelectorAll('.btn-remove-ip-modal').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const ip = this.getAttribute('data-ip');
+                removerIp(ip);
+            });
+        });
+    }
+
+    // ============================================================
+    // BUSCAR STATUS DAS LIVES
+    // ============================================================
+    async function fetchMonitorStatus() {
+        try {
+            const resp = await fetch('/api/public/monitors');
+            const data = await resp.json();
+            const map = {};
+            data.monitors.forEach(m => {
+                map[m.videoId] = m.status || 'offline';
+            });
+            monitorStatusMap = map;
+            return map;
+        } catch (err) {
+            console.warn('Erro ao buscar status:', err);
+            return {};
+        }
+    }
+
+    // ============================================================
+    // CALCULAR LIVES RESTANTES
+    // ============================================================
+    function calcularLivesRestantes() {
+        const clientes = getClientes();
+        const cliente = clientes.find(c => c.login === currentUser);
+        if (!cliente) {
+            console.warn('Cliente não encontrado no localStorage');
+            return 0;
+        }
+        const limite = cliente.lives;
+        const lives = getLives(currentUser);
+        const ativas = lives.filter(live => {
+            const status = monitorStatusMap[live.videoId] || 'offline';
+            return status === 'online' || status === 'degraded';
+        }).length;
+        const restantes = Math.max(0, limite - ativas);
+        console.log('Lives restantes:', restantes, '(limite:', limite, ', ativas:', ativas, ')');
+        return restantes;
+    }
+
+    // ============================================================
+    // ATUALIZAR INTERFACE
+    // ============================================================
+    function atualizarLivesRestantes() {
+        const restantes = calcularLivesRestantes();
+        userLives.textContent = restantes;
+        generateBtn.disabled = restantes <= 0;
+    }
+
+    // ============================================================
+    // LOGIN
+    // ============================================================
+    async function fazerLogin(login, senha) {
+        let clientes = await sincronizarClientesBackend();
+        if (!clientes || clientes.length === 0) {
+            clientes = getClientes();
+        }
+        const cliente = clientes.find(c => c.login === login && c.senha === senha);
+        if (!cliente) {
+            return false;
+        }
+        loginError.classList.remove('show');
+        currentUser = login;
+        container.classList.add('expanded');
+        loginArea.style.display = 'none';
+        converterArea.style.display = 'block';
+        converterArea.classList.add('active');
+
+        await carregarDadosIniciais();
+        iniciarSincronizacao();
+        return true;
+    }
+
+    // ============================================================
+    // LOGOUT
+    // ============================================================
+    function fazerLogout() {
+        currentUser = null;
+        container.classList.remove('expanded');
+        converterArea.style.display = 'none';
+        converterArea.classList.remove('active');
+        loginArea.style.display = 'block';
+        loginArea.classList.add('active');
+        loginUser.value = '';
+        loginPass.value = '';
+        loginError.classList.remove('show');
+        hideFeedback();
+        if (window.syncInterval) {
+            clearInterval(window.syncInterval);
+            window.syncInterval = null;
+        }
+        if (window.statusInterval) {
+            clearInterval(window.statusInterval);
+            window.statusInterval = null;
+        }
+        if (window.deviceInterval) {
+            clearInterval(window.deviceInterval);
+            window.deviceInterval = null;
+        }
+        if (window.clienteInterval) {
+            clearInterval(window.clienteInterval);
+            window.clienteInterval = null;
+        }
+    }
+
+    // ============================================================
+    // CARREGAR DADOS INICIAIS
+    // ============================================================
+    async function carregarDadosIniciais() {
+        const clientes = getClientes();
+        const cliente = clientes.find(c => c.login === currentUser);
+        if (cliente) {
+            userName.textContent = cliente.login;
+        }
+        await sincronizarLivesDoBackend();
+        await fetchDeviceStatus();
+        atualizarLivesRestantes();
+        renderizarLives();
+    }
+
+    // ============================================================
+    // SINCRONIZAR LIVES DO BACKEND (agora com token)
+    // ============================================================
+    async function sincronizarLivesDoBackend() {
+        if (!currentUser) return;
+        try {
+            const resp = await fetch('/api/public/monitors');
+            const data = await resp.json();
+            const monitores = data.monitors || [];
+            const minhasLivesBackend = monitores.filter(m => m.owner === currentUser);
+
+            const map = {};
+            monitores.forEach(m => { map[m.videoId] = m.status || 'offline'; });
+            monitorStatusMap = map;
+
+            let livesLocal = getLives(currentUser);
+            const backendIds = new Set(minhasLivesBackend.map(m => m.videoId));
+
+            // Remover lives locais que não estão mais no backend
+            livesLocal = livesLocal.filter(live => backendIds.has(live.videoId));
+
+            // Atualizar ou adicionar novas
+            for (const monitor of minhasLivesBackend) {
+                const existing = livesLocal.find(l => l.videoId === monitor.videoId);
+                const token = monitor.token;
+                const url = `${window.location.origin}/neonews/t/${token}.m3u8`;
+                if (existing) {
+                    // Atualiza token e url
+                    existing.token = token;
+                    existing.url = url;
+                    existing.title = monitor.title || existing.title || null;
+                    existing.channel = monitor.channel || existing.channel || null;
+                } else {
+                    livesLocal.push({
+                        videoId: monitor.videoId,
+                        token: token,
+                        url: url,
+                        createdAt: Date.now(),
+                        title: monitor.title || null,
+                        channel: monitor.channel || null
+                    });
+                }
+            }
+
+            salvarLives(currentUser, livesLocal);
+            atualizarLivesRestantes();
+            renderizarLives();
+            return true;
+        } catch (err) {
+            console.warn('Erro ao sincronizar lives do backend:', err);
+            return false;
+        }
+    }
+
+    // ============================================================
+    // SINCRONIZAÇÃO PERIÓDICA
+    // ============================================================
+    async function sincronizarLives() {
+        if (!currentUser) return;
+        try {
+            await fetchMonitorStatus();
+            await fetchDeviceStatus();
+            await sincronizarLivesDoBackend();
+            atualizarLivesRestantes();
+            renderizarLives();
+        } catch (err) {
+            console.warn('Erro na sincronização:', err);
+        }
+    }
+
+    async function syncClientesPeriodico() {
+        await sincronizarClientesBackend();
+    }
+
+    let syncInterval = null;
+    let statusInterval = null;
+    let deviceInterval = null;
+    let clienteInterval = null;
+
+    function iniciarSincronizacao() {
+        if (syncInterval) clearInterval(syncInterval);
+        syncInterval = setInterval(sincronizarLives, 10000);
+        sincronizarLives();
+
+        if (statusInterval) clearInterval(statusInterval);
+        statusInterval = setInterval(async () => {
+            await fetchMonitorStatus();
+            renderizarLives();
+            atualizarLivesRestantes();
+        }, 10000);
+
+        if (deviceInterval) clearInterval(deviceInterval);
+        deviceInterval = setInterval(fetchDeviceStatus, 10000);
+
+        if (clienteInterval) clearInterval(clienteInterval);
+        clienteInterval = setInterval(syncClientesPeriodico, 10000);
+    }
+
+    // ============================================================
+    // REMOVER LIVE (local)
+    // ============================================================
+    function removerLive(videoId) {
+        const lives = getLives(currentUser);
+        const idx = lives.findIndex(l => l.videoId === videoId);
+        if (idx === -1) return;
+        lives.splice(idx, 1);
+        salvarLives(currentUser, lives);
+        atualizarLivesRestantes();
+        renderizarLives();
+        if (modalLives.classList.contains('active')) {
+            carregarModalLives();
+        }
+        mostrarFeedback('success', 'Live finalizada!');
+        setTimeout(() => esconderFeedback(), 1500);
+    }
+
+    // ============================================================
+    // FINALIZAR LIVE (com owner no corpo da requisição)
+    // ============================================================
+    async function finalizarLive(videoId) {
+        if (!confirm(`Finalizar live ${videoId}?`)) return;
+        mostrarFeedback('loading', 'Finalizando live...');
+        try {
+            const resp = await fetch(`/api/monitor/stop/${videoId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ owner: currentUser })
+            });
+            const text = await resp.text();
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (e) {
+                console.error('Resposta não é JSON:', text);
+                mostrarFeedback('error', 'Erro: o servidor retornou HTML em vez de JSON. Verifique se a rota /api/monitor/stop existe no backend.');
+                await sincronizarLivesDoBackend();
+                renderizarLives();
                 return;
             }
 
-            resultDiv.classList.remove('show');
-            hideError();
-            hideSuccess();
-            showLoading();
-
-            try {
-                const response = await fetch('/api/convert', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ youtubeUrl })
-                });
-
-                const data = await response.json();
-                hideLoading();
-
-                if (data.success) {
-                    linkOutput.value = data.serverUrl;
-                    infoDiv.innerHTML = `✅ ${data.videoId} | ${data.cached ? '✔️ Cache' : '🆕 Nova live'}`;
-                    resultDiv.classList.add('show');
-                    showSuccess('✅ Link gerado!');
-                } else {
-                    showError(data.error || 'Erro ao gerar link');
-                }
-            } catch (error) {
-                hideLoading();
-                showError('Erro: ' + error.message);
+            if (data.success) {
+                removerLive(videoId);
+                await sincronizarLivesDoBackend();
+                renderizarLives();
+                setTimeout(() => esconderFeedback(), 1500);
+            } else {
+                mostrarFeedback('error', data.message || 'Erro ao finalizar live');
+                await sincronizarLivesDoBackend();
+                renderizarLives();
             }
-        });
+        } catch (err) {
+            console.error('Erro na requisição:', err);
+            mostrarFeedback('error', 'Falha na comunicação com o servidor.');
+            await sincronizarLivesDoBackend();
+            renderizarLives();
+        }
+    }
 
-        copyBtn.addEventListener('click', () => {
-            linkOutput.select();
+    // ============================================================
+    // FUNÇÃO PARA ABRIR MODAL COM LINK COMPATÍVEL (com segurança)
+    // ============================================================
+    function abrirModalLinkCompativel(inputId) {
+        const input = document.getElementById(inputId);
+        if (!input) {
+            console.warn('Input não encontrado:', inputId);
+            return;
+        }
+        const linkOriginal = input.value;
+        let linkCompativel = linkOriginal;
+        if (linkOriginal.includes('?')) {
+            linkCompativel = linkOriginal + '&max=480';
+        } else {
+            linkCompativel = linkOriginal + '?max=480';
+        }
+        compativelLinkInput.value = linkCompativel;
+        modalLinkCompativel.classList.add('active');
+        compativelLinkInput.focus();
+        compativelLinkInput.select();
+    }
+
+    // ============================================================
+    // EVENTOS DO MODAL LINK COMPATÍVEL
+    // ============================================================
+    modalLinkCompativelClose.addEventListener('click', () => {
+        modalLinkCompativel.classList.remove('active');
+    });
+    modalLinkCompativel.addEventListener('click', (e) => {
+        if (e.target === modalLinkCompativel) modalLinkCompativel.classList.remove('active');
+    });
+
+    btnCopyCompativel.addEventListener('click', () => {
+        const link = compativelLinkInput.value;
+        if (!link) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(link).catch(() => {
+                compativelLinkInput.select();
+                document.execCommand('copy');
+            });
+        } else {
+            compativelLinkInput.select();
             document.execCommand('copy');
-            
-            // Limpa o campo de URL e foca para o próximo
-            urlInput.value = '';
-            urlInput.focus();
-            
-            // Esconde o resultado
-            resultDiv.classList.remove('show');
-            
-            showSuccess('📋 Copiado! Pronto para o próximo link');
-            setTimeout(() => hideSuccess(), 2000);
-        });
+        }
+        const originalText = btnCopyCompativel.textContent;
+        btnCopyCompativel.textContent = '✓ Copiado!';
+        btnCopyCompativel.style.background = 'rgba(46,204,113,0.35)';
+        setTimeout(() => {
+            btnCopyCompativel.textContent = originalText;
+            btnCopyCompativel.style.background = '';
+        }, 1200);
+    });
 
-        urlInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                generateBtn.click();
+    // ============================================================
+    // RENDERIZAR LIVES (compacto, com token)
+    // ============================================================
+    function renderizarLives() {
+        const livesRaw = getLives(currentUser);
+        const lives = ordenarLives(livesRaw);
+        const primeira = lives.length > 0 ? lives[0] : null;
+        if (!primeira) {
+            livesContainer.innerHTML = '<div class="empty">Nenhuma live gerada ainda.</div>';
+            verMaisBtn.style.display = 'none';
+            return;
+        }
+        verMaisBtn.style.display = lives.length > 1 ? 'inline-block' : 'none';
+
+        // Usar a URL armazenada (que já contém token)
+        const link = primeira.url || `${window.location.origin}/neonews/t/${primeira.token}.m3u8`;
+
+        const status = monitorStatusMap[primeira.videoId] || 'offline';
+        let statusLabel = '', statusClass = '';
+        switch (status) {
+            case 'online':   statusLabel = 'ONLINE';   statusClass = 'status-online'; break;
+            case 'degraded': statusLabel = 'INSTÁVEL'; statusClass = 'status-degraded'; break;
+            case 'ended':
+            case 'offline':  statusLabel = 'ENCERRADA'; statusClass = 'status-offline'; break;
+            default:         statusLabel = 'DESCONHECIDO'; statusClass = 'status-offline';
+        }
+        const displayTitle = primeira.title || primeira.videoId || 'Sem título';
+        const channelDisplay = primeira.channel ? `<span class="channel">• ${primeira.channel}</span>` : '';
+        livesContainer.innerHTML = `
+            <div class="live-item">
+                <div class="live-header">
+                    <span class="title">${displayTitle} ${channelDisplay}</span>
+                    <span class="id">${primeira.videoId || ''}</span>
+                    <span class="status-badge ${statusClass}">${statusLabel}</span>
+                    <button class="btn-stop" data-video="${primeira.videoId}">Finalizar</button>
+                </div>
+                <div class="live-link-row">
+                    <input type="text" value="${link}" readonly id="liveLink-0" />
+                    <button class="btn-copy-link" data-target="liveLink-0">Copiar</button>
+                </div>
+                <div class="dica-link">
+                    Se você possui tv box antigo e sua internet é instável, <span class="click-here" data-input-id="liveLink-0">clique aqui</span>
+                </div>
+            </div>
+        `;
+
+        // Adiciona eventos com verificação
+        const copyBtn = livesContainer.querySelector('.btn-copy-link');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', function() {
+                const targetId = this.getAttribute('data-target');
+                const input = document.getElementById(targetId);
+                if (input) { input.select(); document.execCommand('copy'); mostrarFeedback('success', 'Link copiado!'); setTimeout(() => esconderFeedback(), 1500); }
+            });
+        }
+
+        const stopBtn = livesContainer.querySelector('.btn-stop');
+        if (stopBtn) {
+            stopBtn.addEventListener('click', function() {
+                const videoId = this.getAttribute('data-video');
+                finalizarLive(videoId);
+            });
+        }
+
+        const clickHere = livesContainer.querySelector('.click-here');
+        if (clickHere) {
+            clickHere.addEventListener('click', function() {
+                const inputId = this.getAttribute('data-input-id');
+                abrirModalLinkCompativel(inputId);
+            });
+        }
+
+        if (modalLives.classList.contains('active')) carregarModalLives();
+    }
+
+    // ============================================================
+    // CARREGAR MODAL DE LIVES (com token)
+    // ============================================================
+    function carregarModalLives() {
+        const livesRaw = getLives(currentUser);
+        const lives = ordenarLives(livesRaw);
+        const termo = modalSearch.value.toLowerCase().trim();
+        let filtradas = lives;
+        if (termo) {
+            filtradas = lives.filter(live => {
+                const idMatch = live.videoId && live.videoId.toLowerCase().includes(termo);
+                const titleMatch = live.title && live.title.toLowerCase().includes(termo);
+                const channelMatch = live.channel && live.channel.toLowerCase().includes(termo);
+                return idMatch || titleMatch || channelMatch;
+            });
+        }
+        if (filtradas.length === 0) {
+            modalList.innerHTML = '<div class="empty">Nenhuma live encontrada.</div>';
+            return;
+        }
+        let html = '';
+        filtradas.forEach((live, idx) => {
+            const link = live.url || `${window.location.origin}/neonews/t/${live.token}.m3u8`;
+            const status = monitorStatusMap[live.videoId] || 'offline';
+            let statusLabel = '', statusClass = '';
+            switch (status) {
+                case 'online':   statusLabel = 'ONLINE';   statusClass = 'status-online'; break;
+                case 'degraded': statusLabel = 'INSTÁVEL'; statusClass = 'status-degraded'; break;
+                case 'ended':
+                case 'offline':  statusLabel = 'ENCERRADA'; statusClass = 'status-offline'; break;
+                default:         statusLabel = 'DESCONHECIDO'; statusClass = 'status-offline';
             }
+            const displayTitle = live.title || live.videoId || 'Sem título';
+            const channelDisplay = live.channel ? `<span class="channel">• ${live.channel}</span>` : '';
+            const dataExibicao = formatarData(live.createdAt);
+            html += `
+                <div class="live-item">
+                    <div class="live-header">
+                        <span class="title">${displayTitle} ${channelDisplay}</span>
+                        <span class="id">${live.videoId || ''}</span>
+                        <span class="status-badge ${statusClass}">${statusLabel}</span>
+                        <button class="btn-stop-modal" data-video="${live.videoId}">Finalizar</button>
+                    </div>
+                    <div style="font-size:12px; color:#7a8aa0; margin:2px 0;">${dataExibicao}</div>
+                    <div class="live-link-row">
+                        <input type="text" value="${link}" readonly id="modalLink-${idx}" />
+                        <button class="btn-copy-modal" data-target="modalLink-${idx}">Copiar</button>
+                    </div>
+                    <div class="dica-link">
+                        Se você possui tv box antigo e sua internet é instável, <span class="click-here" data-input-id="modalLink-${idx}">clique aqui</span>
+                    </div>
+                </div>
+            `;
+        });
+        modalList.innerHTML = html;
+
+        modalList.querySelectorAll('.btn-copy-modal').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const targetId = this.getAttribute('data-target');
+                const input = document.getElementById(targetId);
+                if (input) { input.select(); document.execCommand('copy'); mostrarFeedback('success', 'Link copiado!'); setTimeout(() => esconderFeedback(), 1500); }
+            });
         });
 
-        function showLoading() {
-            loading.classList.add('show');
-            generateBtn.disabled = true;
-        }
+        modalList.querySelectorAll('.btn-stop-modal').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const videoId = this.getAttribute('data-video');
+                finalizarLive(videoId);
+            });
+        });
 
-        function hideLoading() {
-            loading.classList.remove('show');
+        modalList.querySelectorAll('.click-here').forEach(el => {
+            el.addEventListener('click', function() {
+                const inputId = this.getAttribute('data-input-id');
+                abrirModalLinkCompativel(inputId);
+            });
+        });
+    }
+
+    // ============================================================
+    // 🔥 GERAR LINK (CORRIGIDO: sem verificação de cookie no front)
+    // ============================================================
+    generateBtn.addEventListener('click', async () => {
+        const youtubeUrl = urlInput.value.trim();
+        if (!youtubeUrl) { mostrarFeedback('error', 'Por favor, insira uma URL do YouTube.'); return; }
+        const restantes = calcularLivesRestantes();
+        if (restantes <= 0) { mostrarFeedback('error', 'Você não possui lives disponíveis.'); return; }
+
+        esconderFeedback();
+        mostrarFeedback('loading', 'Processando...');
+        generateBtn.disabled = true;
+
+        try {
+            const resp = await fetch('/api/convert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ youtubeUrl, owner: currentUser })
+            });
+            const data = await resp.json();
             generateBtn.disabled = false;
-        }
+            esconderFeedback();
 
-        function showError(message) {
-            errorDiv.textContent = message;
-            errorDiv.classList.add('show');
-            setTimeout(() => hideError(), 4000);
-        }
+            if (data.success) {
+                const lives = getLives(currentUser);
+                const exists = lives.some(l => l.videoId === data.videoId);
+                const token = data.token;
+                const url = data.serverUrl;
+                if (!exists) {
+                    lives.push({
+                        videoId: data.videoId,
+                        token: token,
+                        url: url,
+                        createdAt: Date.now(),
+                        title: data.metadata?.title || null,
+                        channel: data.metadata?.channel || null
+                    });
+                    salvarLives(currentUser, lives);
+                } else {
+                    const existing = lives.find(l => l.videoId === data.videoId);
+                    existing.token = token;
+                    existing.url = url;
+                    existing.title = data.metadata?.title || existing.title;
+                    existing.channel = data.metadata?.channel || existing.channel;
+                    salvarLives(currentUser, lives);
+                }
 
-        function hideError() {
-            errorDiv.classList.remove('show');
-        }
+                await sincronizarClientesBackend();
+                await fetchMonitorStatus();
+                await fetchDeviceStatus();
+                atualizarLivesRestantes();
+                renderizarLives();
 
-        function showSuccess(message) {
-            successDiv.textContent = message;
-            successDiv.classList.add('show');
-            setTimeout(() => hideSuccess(), 2000);
+                mostrarFeedback('success', 'Link gerado com sucesso!');
+                urlInput.value = '';
+                setTimeout(() => esconderFeedback(), 3000);
+            } else {
+                // Mensagem genérica para qualquer erro vindo do backend
+                mostrarFeedback('error', 'Ocorreu um erro ao processar sua solicitação. Tente novamente mais tarde.');
+            }
+        } catch (err) {
+            generateBtn.disabled = false;
+            esconderFeedback();
+            mostrarFeedback('error', 'Ocorreu um erro ao processar sua solicitação. Tente novamente mais tarde.');
         }
+    });
 
-        function hideSuccess() {
-            successDiv.classList.remove('show');
+    // ============================================================
+    // MODAL LIVES CONTROLS
+    // ============================================================
+    verMaisBtn.addEventListener('click', () => {
+        modalLives.classList.add('active');
+        carregarModalLives();
+    });
+    modalClose.addEventListener('click', () => {
+        modalLives.classList.remove('active');
+    });
+    modalLives.addEventListener('click', (e) => {
+        if (e.target === modalLives) modalLives.classList.remove('active');
+    });
+    modalSearch.addEventListener('input', carregarModalLives);
+
+    // ============================================================
+    // MODAL DISPOSITIVOS CONTROLS
+    // ============================================================
+    verMaisDevicesBtn.addEventListener('click', () => {
+        modalDispositivos.classList.add('active');
+        carregarModalDispositivos();
+    });
+    modalDevicesClose.addEventListener('click', () => {
+        modalDispositivos.classList.remove('active');
+    });
+    modalDispositivos.addEventListener('click', (e) => {
+        if (e.target === modalDispositivos) modalDispositivos.classList.remove('active');
+    });
+    modalDevicesSearch.addEventListener('input', carregarModalDispositivos);
+
+    // ============================================================
+    // FEEDBACK
+    // ============================================================
+    function mostrarFeedback(tipo, msg) {
+        const el = tipo === 'loading' ? loading : tipo === 'error' ? error : success;
+        el.textContent = msg;
+        el.classList.add('show');
+        [loading, error, success].forEach(e => { if (e !== el) e.classList.remove('show'); });
+    }
+    function esconderFeedback() {
+        [loading, error, success].forEach(e => e.classList.remove('show'));
+    }
+    function hideFeedback() { esconderFeedback(); }
+
+    // ============================================================
+    // EVENTOS
+    // ============================================================
+    loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const login = loginUser.value.trim();
+        const senha = loginPass.value.trim();
+        if (!login || !senha) {
+            loginError.textContent = 'Preencha todos os campos';
+            loginError.classList.add('show');
+            return;
         }
-    </script>
+        const sucesso = await fazerLogin(login, senha);
+        if (!sucesso) {
+            loginError.textContent = 'Login ou senha inválidos';
+            loginError.classList.add('show');
+        }
+    });
+
+    logoutBtn.addEventListener('click', fazerLogout);
+    urlInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') generateBtn.click();
+    });
+
+    // ============================================================
+    // INICIALIZAÇÃO
+    // ============================================================
+    loginArea.style.display = 'block';
+    loginArea.classList.add('active');
+    converterArea.style.display = 'none';
+    converterArea.classList.remove('active');
+    container.classList.remove('expanded');
+
+    sincronizarClientesBackend();
+</script>
 </body>
 </html>
