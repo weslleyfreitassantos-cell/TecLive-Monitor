@@ -653,9 +653,12 @@
     async function sincronizarLives() {
         if (!currentUser) return;
         try {
+            // Primeiro sincroniza com o backend para saber o que ainda existe
+            await sincronizarLivesDoBackend();
+            // Depois busca os status atualizados
             await fetchMonitorStatus();
             await fetchDeviceStatus();
-            await sincronizarLivesDoBackend();
+            
             atualizarLivesRestantes();
             renderizarLives();
         } catch (err) {

@@ -306,7 +306,7 @@ function renewViewersForMonitor(owner, videoId) {
     if (!viewers || viewers.size === 0) return;
 
     const now = Date.now();
-    const ACTIVITY_TIMEOUT = parseInt(process.env.VIEWER_WINDOW_MS) || 86400000;
+    const ACTIVITY_TIMEOUT = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
     const activityKey = `${owner}:${videoId}`;
     const activityMap = viewerAccess.get(activityKey);
     let renewed = 0, removed = 0;
