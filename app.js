@@ -261,21 +261,41 @@ function trackViewerByOwner(owner, ip, videoId) {
         return;
     }
     if (isLocalIp(ip)) return; // ignora IPs locais
-    const key = `${owner}:${videoId}`;
+    
     const now = Date.now();
-    if (!ownerViewers.has(key)) ownerViewers.set(key, new Map());
-    const viewers = ownerViewers.get(key);
+    const currentKey = `${owner}:${videoId}`;
+
+    // --- LÓGICA DE EXCLUSIVIDADE DE IP POR CLIENTE ---
+    // Se este IP aparecer em QUALQUER OUTRA live deste mesmo owner, removemos imediatamente.
+    // Isso evita que um único dispositivo conte como 2 se o player mudar de canal rápido.
+    let exclusivityRemoved = false;
+    for (const [key, viewers] of ownerViewers.entries()) {
+        if (key.startsWith(`${owner}:`) && key !== currentKey) {
+            if (viewers.has(ip)) {
+                viewers.delete(ip);
+                exclusivityRemoved = true;
+                // Opcional: limpar cache da live antiga para forçar atualização no dashboard
+                const oldVideoId = key.split(':')[1];
+                m3u8CacheContent.delete(oldVideoId);
+            }
+        }
+    }
+
+    if (!ownerViewers.has(currentKey)) ownerViewers.set(currentKey, new Map());
+    const viewers = ownerViewers.get(currentKey);
     viewers.set(ip, now);
-    let removed = 0;
+
+    // Limpeza por expiração normal (fallback)
     for (const [viewerIp, timestamp] of viewers.entries()) {
         if (now - timestamp > VIEWER_WINDOW_MS) {
             viewers.delete(viewerIp);
-            removed++;
         }
     }
-    if (removed > 0) {
-        console.log(`[${key}] 🗑️ ${removed} IP(s) removido(s) por expiração`);
+    
+    if (exclusivityRemoved) {
+        console.log(`[${owner}] 📱 IP ${ip} movido exclusivamente para live ${videoId}`);
     }
+    
     saveOwnerViewers(ownerViewers);
 }
 
