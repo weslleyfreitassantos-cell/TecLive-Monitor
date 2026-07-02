@@ -1139,7 +1139,12 @@
     <div class="modal-box wide">
         <div class="modal-header">
             <h3 id="clientDetailTitle">Detalhes das Lives</h3>
-            <button class="modal-close" id="clientDetailClose">&times;</button>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <div class="search-box" style="margin: 0; padding: 2px 8px;">
+                    <input type="text" id="modalSearchInput" placeholder="Buscar live ou canal..." style="width: 200px; font-size: 14px;">
+                </div>
+                <button class="modal-close" id="clientDetailClose" style="margin-left: 10px;">&times;</button>
+            </div>
         </div>
         <div class="modal-body-scroll" id="clientDetailContent">
             <!-- Tabela preenchida via JS -->
@@ -1519,6 +1524,15 @@
 
         let clientes = JSON.parse(localStorage.getItem('tecLiveClientes') || '[]');
 
+        // --- VALIDAÇÃO DE LOGIN DUPLICADO ---
+        if (editIndex === null) {
+            const loginExists = clientes.some(c => c.login.toLowerCase() === login.toLowerCase());
+            if (loginExists) {
+                alert(`❌ Erro: O login "${login}" já está em uso por outro cliente.`);
+                return;
+            }
+        }
+
         if (editIndex !== null) {
             clientes[editIndex] = { login, email, senha, lives, dispositivos };
             localStorage.setItem('tecLiveClientes', JSON.stringify(clientes));
@@ -1728,13 +1742,11 @@
         }
 
         let html = `<table class="monitor-table"><thead><tr>
-            <th>CLIENTE</th>
-            <th>LIVES ATIVAS</th>
-            <th>STATUS GERAL</th>
-            <th>SAÚDE MÉDIA</th>
-            <th>DISPOSITIVOS</th>
-            <th>ÚLT. RENOVAÇÃO</th>
-            <th>AÇÃO</th>
+            <th style="text-align: left; padding-left: 20px;">CLIENTE</th>
+            <th style="text-align: center;">LIVES ATIVAS</th>
+            <th style="text-align: center;">STATUS GERAL</th>
+            <th style="text-align: center;">SAÚDE MÉDIA</th>
+            <th style="text-align: center;">DISPOSITIVOS</th>
         </tr></thead><tbody>`;
 
         Object.keys(groups).sort().forEach(owner => {
@@ -1761,16 +1773,14 @@
             const healthColor = avgScore >= 80 ? '#2ecc71' : (avgScore >= 50 ? '#f1c40f' : '#e74c3c');
             
             html += `<tr class="client-group-row" style="cursor: pointer;" onclick="openClientDetailModal('${owner.replace(/'/g, "\\'")}')">`;
-            html += `<td class="cliente-cell" style="font-size: 1.1rem; color: #fff;"><strong>${owner}</strong></td>`;
-            html += `<td><span class="badge" style="background: rgba(46,204,113,0.2); color: #2ecc71; padding: 5px 12px; border-radius: 20px;">${totalLives} live(s)</span></td>`;
-            html += `<td class="${statusClass}"><strong>${statusLabel}</strong></td>`;
-            html += `<td>
+            html += `<td class="cliente-cell" style="font-size: 1.1rem; color: #fff; text-align: left; padding-left: 20px;"><strong>${owner}</strong></td>`;
+            html += `<td style="text-align: center;"><span class="badge" style="background: rgba(46,204,113,0.2); color: #2ecc71; padding: 5px 12px; border-radius: 20px; display: inline-block;">${totalLives} live(s)</span></td>`;
+            html += `<td class="${statusClass}" style="text-align: center;"><strong>${statusLabel}</strong></td>`;
+            html += `<td style="text-align: center;">
                         <div class="health-bar-container"><div class="health-bar" style="width: ${avgScore}%; background: ${healthColor};"></div></div>
                         <span class="health-score">${avgScore}%</span>
                      </td>`;
-            html += `<td><span class="device-count">${totalViewers}</span></td>`;
-            html += `<td><span class="renew-time" style="font-size: 16px;">Ver detalhes</span></td>`;
-            html += `<td><button class="filter-btn active" style="margin:0;">DETALHES</button></td>`;
+            html += `<td style="text-align: center;"><span class="device-count">${totalViewers}</span></td>`;
             html += `</tr>`;
         });
 
