@@ -180,6 +180,34 @@ function saveViewerAccess(viewerMap) {
     }
 }
 
+// ========== PERSISTÊNCIA DE MONITORES ATIVOS ==========
+const mappingFile = path.join(cookiesDir, 'monitors.json');
+
+async function restoreMonitorsPersistence() {
+    try {
+        if (!fs.existsSync(mappingFile)) return;
+        const data = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+        const entries = Object.entries(data);
+        console.log(`🚀 Restaurando ${entries.length} monitores da última sessão...`);
+        
+        const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
+        
+        for (const [key, entry] of entries) {
+            try {
+                const owner = key.includes(':') ? key.split(':')[1] : null;
+                if (entry.youtubeUrl) {
+                    await converter.convert(entry.youtubeUrl, baseUrl, owner);
+                    console.log(`✅ Monitor restaurado: ${key}`);
+                }
+            } catch (err) {
+                console.warn(`❌ Falha ao restaurar monitor ${key}:`, err.message);
+            }
+        }
+    } catch (e) {
+        console.warn('Erro ao restaurar persistência de monitores:', e.message);
+    }
+}
+
 // ========== MAPA DE VIEWERS ==========
 let ownerViewers = loadOwnerViewers();
 let viewerAccess = loadViewerAccess();
@@ -243,39 +271,40 @@ setInterval(() => {
     if (accessChanged) saveViewerAccess(viewerAccess);
 }, 30000);
 
-function trackViewer(owner, videoId, ip) {
+function trackViewer(owner, videoId, ip, userAgent = '') {
     const now = Date.now();
     const key = owner ? `${owner}:${videoId}` : videoId;
     if (!viewerAccess.has(key)) viewerAccess.set(key, new Map());
     const viewers = viewerAccess.get(key);
-    viewers.set(ip, now);
-    for (const [viewerIp, timestamp] of viewers.entries()) {
-        if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(viewerIp);
+    
+    // Identificador único = IP + UserAgent (para diferenciar aparelhos na mesma rede)
+    const deviceId = `${ip}|${userAgent}`;
+    viewers.set(deviceId, now);
+    
+    for (const [id, timestamp] of viewers.entries()) {
+        if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(id);
     }
     saveViewerAccess(viewerAccess);
 }
 
-function trackViewerByOwner(owner, ip, videoId) {
-    if (!owner || !videoId) {
-        console.warn('[WARN] trackViewerByOwner chamado com owner ou videoId nulo');
-        return;
-    }
-    if (isLocalIp(ip)) return; // ignora IPs locais
+function trackViewerByOwner(owner, ip, videoId, userAgent = '') {
+    if (!owner || !videoId) return;
+    if (isLocalIp(ip)) return;
     
     const now = Date.now();
     const currentKey = `${owner}:${videoId}`;
+    const deviceId = `${ip}|${userAgent}`;
 
-    // --- LÓGICA DE EXCLUSIVIDADE GLOBAL DE IP ---
-    // Se este IP aparecer em QUALQUER OUTRA live de QUALQUER cliente, removemos imediatamente.
-    // Isso garante que um dispositivo físico (IP) nunca conte em dois lugares ao mesmo tempo.
+    // --- LÓGICA DE EXCLUSIVIDADE POR CLIENTE (REVERTIDA DE GLOBAL) ---
+    // Removemos o IP apenas das outras lives DO MESMO DONO.
+    // Isso permite que o mesmo IP assista lives de donos diferentes simultaneamente.
     let exclusivityRemoved = false;
     for (const [key, viewers] of ownerViewers.entries()) {
-        if (key !== currentKey) {
-            if (viewers.has(ip)) {
-                viewers.delete(ip);
+        if (key.startsWith(`${owner}:`) && key !== currentKey) {
+            if (viewers.has(deviceId)) {
+                viewers.delete(deviceId);
                 exclusivityRemoved = true;
-                // Opcional: limpar cache da live antiga para forçar atualização no dashboard
-                const [oldOwner, oldVideoId] = key.split(':');
+                const oldVideoId = key.split(':')[1];
                 m3u8CacheContent.delete(oldVideoId);
             }
         }
@@ -283,17 +312,14 @@ function trackViewerByOwner(owner, ip, videoId) {
 
     if (!ownerViewers.has(currentKey)) ownerViewers.set(currentKey, new Map());
     const viewers = ownerViewers.get(currentKey);
-    viewers.set(ip, now);
+    viewers.set(deviceId, now);
 
-    // Limpeza por expiração normal (fallback)
-    for (const [viewerIp, timestamp] of viewers.entries()) {
-        if (now - timestamp > VIEWER_WINDOW_MS) {
-            viewers.delete(viewerIp);
-        }
+    for (const [id, timestamp] of viewers.entries()) {
+        if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(id);
     }
     
     if (exclusivityRemoved) {
-        console.log(`[${owner}] 📱 IP ${ip} movido exclusivamente para live ${videoId}`);
+        console.log(`[${owner}] 📱 Dispositivo ${ip} movido para live ${videoId}`);
     }
     
     saveOwnerViewers(ownerViewers);
@@ -876,6 +902,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
             req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
             rawIp
         );
+        const userAgent = req.headers['user-agent'] || '';
 
         if (!isLocalIp(clientIp)) {
             const isAuthorized = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp);
@@ -889,10 +916,9 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                         message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
                     });
                 }
-                console.log(`[${trackingOwner}:${videoId}] ➕ Adicionando novo IP ${clientIp}`);
-                trackViewerByOwner(trackingOwner, clientIp, videoId);
+                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent);
             } else {
-                trackViewerByOwner(trackingOwner, clientIp, videoId);
+                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent);
             }
         }
     } else {
@@ -904,7 +930,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
         rawIpActivity
     );
-    trackViewer(trackingOwner, videoId, clientIpActivity);
+    const userAgentActivity = req.headers['user-agent'] || '';
+    trackViewer(trackingOwner, videoId, clientIpActivity, userAgentActivity);
 
     monitor._currentMaxHeight = finalMaxHeight;
     monitor.lastAccess = Date.now();
@@ -1326,9 +1353,9 @@ app.get('/api/keepalive', (req, res) => {
         req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
         rawIp
     );
+    const userAgent = req.headers['user-agent'] || '';
     if (owner && videoId && !isLocalIp(ip)) {
-        console.log(`[KEEPALIVE] ${owner}:${videoId} -> ${ip}`);
-        trackViewerByOwner(owner, ip, videoId);
+        trackViewerByOwner(owner, ip, videoId, userAgent);
         return res.send('ok');
     }
     res.status(400).send('invalid');
@@ -1865,6 +1892,11 @@ if (emailAlerts && converter.cookieRotator) {
             emailAlerts.checkCookiesHealthAlert();
         }, 1000);
     }
+
+    // 🚀 RESTAURAR MONITORES DA SESSÃO ANTERIOR
+    setTimeout(async () => {
+        await restoreMonitorsPersistence();
+    }, 2000);
 })();
 
 // ============================================================
