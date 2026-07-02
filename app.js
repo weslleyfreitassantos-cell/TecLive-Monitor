@@ -1113,6 +1113,18 @@ app.get('/api/public/device-status/:owner', (req, res) => {
 
     for (const [key, viewers] of ownerViewers.entries()) {
         if (key.startsWith(owner + ':')) {
+            const [ownerName, videoId] = key.split(':');
+            
+            // --- FILTRO DE IPs ÓRFÃOS ---
+            // Só contamos o IP se a live ainda existir no monitor ativo.
+            // Se a live acabou ou foi removida, o IP é ignorado e limpo.
+            const monitorKey = `${videoId}:${ownerName}`;
+            if (!converter.activeMonitors.has(monitorKey)) {
+                // Opcional: Limpa o registro órfão do mapa para economizar memória
+                ownerViewers.delete(key);
+                continue;
+            }
+
             for (const [ip, timestamp] of viewers.entries()) {
                 if (now - timestamp <= VIEWER_WINDOW_MS) {
                     uniqueIps.add(ip);
