@@ -549,6 +549,36 @@
         }
         .modal-overlay.active { display: flex; }
 
+        .modal-box.wide {
+            max-width: 1300px;
+        }
+
+        .modal-body-scroll {
+            max-height: 70vh;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .client-detail-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: auto;
+        }
+
+        .client-detail-table th, .client-detail-table td {
+            padding: 12px 8px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            font-size: 14px;
+        }
+
+        .client-detail-table th {
+            color: #7a8aa0;
+            text-transform: uppercase;
+            font-weight: 700;
+            background: rgba(0,0,0,0.1);
+        }
+
         .modal-box {
             background: #0f1322;
             border: 1px solid rgba(46,204,113,0.2);
@@ -1104,6 +1134,19 @@
     </div>
 </div>
 
+<!-- ===== MODAL DETALHES DO CLIENTE ===== -->
+<div class="modal-overlay" id="clientDetailModal">
+    <div class="modal-box wide">
+        <div class="modal-header">
+            <h3 id="clientDetailTitle">Detalhes das Lives</h3>
+            <button class="modal-close" id="clientDetailClose">&times;</button>
+        </div>
+        <div class="modal-body-scroll" id="clientDetailContent">
+            <!-- Tabela preenchida via JS -->
+        </div>
+    </div>
+</div>
+
 <!-- ===== FOOTER ===== -->
 <div class="footer">
     <div class="footer-left">© TecLive Monitor <span>v3.0</span></div>
@@ -1129,6 +1172,11 @@
     const modalList = document.getElementById('modalIpList');
     const modalClose = document.getElementById('modalClose');
     const ipSearchInput = document.getElementById('ipSearchInput');
+    
+    const clientDetailModal = document.getElementById('clientDetailModal');
+    const clientDetailClose = document.getElementById('clientDetailClose');
+    const clientDetailTitle = document.getElementById('clientDetailTitle');
+    const clientDetailContent = document.getElementById('clientDetailContent');
 
     const emergencyBanner = document.getElementById('emergencyBanner');
     const bannerMessage = document.getElementById('bannerMessage');
@@ -1160,6 +1208,90 @@
         }
         modalList.innerHTML = ips.map(ip => `<div class="modal-ip-item">${ip}</div>`).join('');
     }
+
+    // ============================================================
+    // DETALHES DO CLIENTE (AGRUPAMENTO)
+    // ============================================================
+    window.openClientDetailModal = function(owner) {
+        const monitors = window.currentGroups[owner];
+        if (!monitors) return;
+
+        clientDetailTitle.textContent = `Lives de ${owner} (${monitors.length})`;
+        
+        let html = `<table class="client-detail-table">
+            <thead>
+                <tr>
+                    <th>CANAL</th>
+                    <th>LIVE (ID)</th>
+                    <th>STATUS</th>
+                    <th>SAÚDE</th>
+                    <th>DISPOSITIVOS</th>
+                    <th>IPs</th>
+                    <th>ÚLT. RENOVAÇÃO</th>
+                    <th>AÇÃO</th>
+                </tr>
+            </thead>
+            <tbody>`;
+
+        monitors.forEach(m => {
+            const score = computeHealthScore(m.health);
+            const statusDisp = getStatusDisplay(m.status, m.health);
+            const mainCause = getMainCause(m);
+            const tooltipText = buildTooltipContent(m);
+            const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
+            const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
+
+            let ipHtml = '-';
+            const ips = m.viewerIPs || [];
+            if (ips.length === 1) {
+                ipHtml = `<span class="ip-item">${ips[0]}</span>`;
+            } else if (ips.length > 1) {
+                const first = ips[0];
+                const extra = ips.length - 1;
+                ipHtml = `<span class="ip-item">${first}</span> <button class="ip-extra" onclick="event.stopPropagation(); openModal(${JSON.stringify(ips).replace(/"/g, '&quot;')})">+${extra}</button>`;
+            }
+
+            const liveTitle = m.title || 'Título não disponível';
+
+            html += `<tr class="${statusDisp.class}">
+                <td style="color: #f1c40f; font-weight: 700; text-align: left;" title="${m.channel || ''}">${m.channel || '—'}</td>
+                <td class="video-id" title="${liveTitle.replace(/"/g, '&quot;')}">${m.videoId || 'N/A'}</td>
+                <td class="${statusDisp.class}">
+                    <div>${statusDisp.label}</div>
+                    ${mainCause ? `<div style="font-size: 0.7rem; opacity:0.8;">[${mainCause}]</div>` : ''}
+                </td>
+                <td>
+                    <div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>
+                    <span class="health-score">${score}%</span>
+                </td>
+                <td><span class="device-count" style="font-size: 18px;">${m.viewers ?? 0}</span></td>
+                <td><div class="ip-list">${ipHtml}</div></td>
+                <td><span class="renew-time" style="font-size: 16px;">${lastRenew}</span></td>
+                <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}')">FINALIZAR</button></td>
+            </tr>`;
+        });
+
+        html += `</tbody></table>`;
+        clientDetailContent.innerHTML = html;
+        clientDetailModal.classList.add('active');
+    };
+
+    window.stopMonitor = async function(videoId) {
+        if (!confirm(`Encerrar monitor ${videoId}?`)) return;
+        try {
+            const res = await fetch(`/api/monitor/stop/${videoId}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success) { 
+                alert('Encerrado!'); 
+                clientDetailModal.classList.remove('active');
+                fetchData(); 
+            }
+            else alert(`Erro: ${data.message}`);
+        } catch (err) { alert(`Erro: ${err.message}`); }
+    };
+
+    clientDetailClose.addEventListener('click', () => clientDetailModal.classList.remove('active'));
+    clientDetailModal.addEventListener('click', (e) => { if (e.target === clientDetailModal) clientDetailModal.classList.remove('active'); });
 
     // ============================================================
     // CADASTRO DE CLIENTES
@@ -1580,65 +1712,73 @@
                 return idMatch || ownerMatch || channelMatch;
             });
         }
+
+        // --- LÓGICA DE AGRUPAMENTO POR CLIENTE ---
+        const groups = {};
+        filtered.forEach(m => {
+            const owner = m.owner || 'Sem Cliente';
+            if (!groups[owner]) groups[owner] = [];
+            groups[owner].push(m);
+        });
+
         const container = document.getElementById('monitorsContent');
         if (filtered.length === 0) {
             container.innerHTML = '<div class="empty-state">Nenhum monitor encontrado</div>';
             return;
         }
+
         let html = `<table class="monitor-table"><thead><tr>
             <th>CLIENTE</th>
-            <th>CANAL</th>
-            <th>LIVE</th>
-            <th>STATUS</th>
-            <th>SAÚDE</th>
+            <th>LIVES ATIVAS</th>
+            <th>STATUS GERAL</th>
+            <th>SAÚDE MÉDIA</th>
             <th>DISPOSITIVOS</th>
-            <th>IPs</th>
             <th>ÚLT. RENOVAÇÃO</th>
             <th>AÇÃO</th>
         </tr></thead><tbody>`;
-        filtered.forEach(m => {
-            const score = computeHealthScore(m.health);
-            const statusDisp = getStatusDisplay(m.status, m.health);
-            const mainCause = getMainCause(m);
-            const tooltipText = buildTooltipContent(m);
-            const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
-            const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
 
-            let ipHtml = '-';
-            const ips = m.viewerIPs || [];
-            if (ips.length === 1) {
-                ipHtml = `<span class="ip-item">${ips[0]}</span>`;
-            } else if (ips.length > 1) {
-                const first = ips[0];
-                const extra = ips.length - 1;
-                ipHtml = `
-                    <span class="ip-item">${first}</span>
-                    <button class="ip-extra" data-ips='${JSON.stringify(ips)}'>+${extra}</button>
-                `;
+        Object.keys(groups).sort().forEach(owner => {
+            const clientMonitors = groups[owner];
+            const totalLives = clientMonitors.length;
+            const onlineLives = clientMonitors.filter(m => m.status === 'online').length;
+            const degradedLives = clientMonitors.filter(m => m.status === 'degraded').length;
+            
+            // Cálculos agregados
+            const avgScore = Math.round(clientMonitors.reduce((acc, m) => acc + computeHealthScore(m.health), 0) / totalLives);
+            const totalViewers = clientMonitors.reduce((acc, m) => acc + (m.viewers || 0), 0);
+            
+            // Determinar status visual do grupo
+            let statusLabel = 'ONLINE';
+            let statusClass = 'status-online';
+            if (onlineLives === 0) {
+                statusLabel = 'OFFLINE';
+                statusClass = 'status-offline';
+            } else if (degradedLives > 0) {
+                statusLabel = 'INSTÁVEL';
+                statusClass = 'status-degraded';
             }
 
-            const liveTitle = m.title || 'Título não disponível';
-
-            html += `<tr class="${statusDisp.class}" data-video-id="${m.videoId}">`;
-            html += `<td class="cliente-cell">${m.owner || '—'}</td>`;
-            html += `<td class="canal-cell" title="${m.channel || ''}">${m.channel || '—'}</td>`;
-            html += `<td class="video-id" title="${liveTitle.replace(/"/g, '&quot;')}" data-tippy-content="${liveTitle.replace(/"/g, '&quot;')}">${m.videoId || 'N/A'}</td>`;
-            html += `<td class="${statusDisp.class}" data-tippy-content="${tooltipText.replace(/"/g, '&quot;')}">
-                        <div>${statusDisp.label}</div>
-                        ${mainCause ? `<div style="font-size: 0.75rem; opacity:0.8;">[${mainCause}]</div>` : ''}
-                     </td>`;
+            const healthColor = avgScore >= 80 ? '#2ecc71' : (avgScore >= 50 ? '#f1c40f' : '#e74c3c');
+            
+            html += `<tr class="client-group-row" style="cursor: pointer;" onclick="openClientDetailModal('${owner.replace(/'/g, "\\'")}')">`;
+            html += `<td class="cliente-cell" style="font-size: 1.1rem; color: #fff;"><strong>${owner}</strong></td>`;
+            html += `<td><span class="badge" style="background: rgba(46,204,113,0.2); color: #2ecc71; padding: 5px 12px; border-radius: 20px;">${totalLives} live(s)</span></td>`;
+            html += `<td class="${statusClass}"><strong>${statusLabel}</strong></td>`;
             html += `<td>
-                        <div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>
-                        <span class="health-score">${score}%</span>
+                        <div class="health-bar-container"><div class="health-bar" style="width: ${avgScore}%; background: ${healthColor};"></div></div>
+                        <span class="health-score">${avgScore}%</span>
                      </td>`;
-            html += `<td><span class="device-count">${m.viewers ?? 0}</span></td>`;
-            html += `<td><div class="ip-list">${ipHtml}</div></td>`;
-            html += `<td><span class="renew-time">${lastRenew}</span></td>`;
-            html += `<td><button class="stop-monitor-btn" data-video-id="${m.videoId}">FINALIZAR</button></td>`;
+            html += `<td><span class="device-count">${totalViewers}</span></td>`;
+            html += `<td><span class="renew-time" style="font-size: 16px;">Ver detalhes</span></td>`;
+            html += `<td><button class="filter-btn active" style="margin:0;">DETALHES</button></td>`;
             html += `</tr>`;
         });
+
         html += '</tbody></table>';
         container.innerHTML = html;
+
+        // Salvar os dados agrupados globalmente para o modal acessar
+        window.currentGroups = groups;
 
         if (typeof tippy !== 'undefined') {
             tippy('.video-id[data-tippy-content]', {
