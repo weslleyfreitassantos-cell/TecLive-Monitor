@@ -297,6 +297,12 @@ function trackViewer(owner, videoId, ip, userAgent = '') {
     
     // Identificador único = IP + UserAgent (para diferenciar aparelhos na mesma rede)
     const deviceId = `${ip}|${userAgent}`;
+    
+    // Limpar registro legado apenas com IP se existir
+    if (viewers.has(ip)) {
+        viewers.delete(ip);
+    }
+    
     viewers.set(deviceId, now);
     
     for (const [id, timestamp] of viewers.entries()) {
@@ -330,6 +336,12 @@ function trackViewerByOwner(owner, ip, videoId, userAgent = '') {
 
     if (!ownerViewers.has(currentKey)) ownerViewers.set(currentKey, new Map());
     const viewers = ownerViewers.get(currentKey);
+    
+    // Limpar registro legado apenas com IP se existir (evita duplicidade IP vs IP|userAgent)
+    if (viewers.has(ip)) {
+        viewers.delete(ip);
+    }
+    
     viewers.set(deviceId, now);
 
     for (const [id, timestamp] of viewers.entries()) {
@@ -405,12 +417,18 @@ function getActiveViewerIPsForOwnerAndVideo(owner, videoId) {
     return devices;
 }
 
-function isIpActiveForOwnerAndVideo(owner, videoId, ip) {
+function isIpActiveForOwnerAndVideo(owner, videoId, ip, userAgent = '') {
     if (!owner || !videoId || isLocalIp(ip)) return true;
     const key = `${owner}:${videoId}`;
     const viewers = ownerViewers.get(key);
     if (!viewers) return false;
-    return viewers.has(ip);
+    
+    // Verifica primeiro se o IP exato está registrado (retrocompatibilidade)
+    if (viewers.has(ip)) return true;
+    
+    // Verifica se o deviceId completo (ip|userAgent) está registrado
+    const deviceId = `${ip}|${userAgent}`;
+    return viewers.has(deviceId);
 }
 
 function getDeviceLimitForOwner(owner) {
@@ -929,7 +947,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         const userAgent = req.headers['user-agent'] || '';
 
         if (!isLocalIp(clientIp)) {
-            const isAuthorized = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp);
+            const isAuthorized = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp, userAgent);
             if (!isAuthorized) {
                 const activeDevices = getActiveDevicesForOwnerAndVideo(trackingOwner, videoId);
                 const deviceLimit = getDeviceLimitForOwner(trackingOwner);
@@ -1701,7 +1719,10 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Monitor não encontrado' });
         }
 
-        if (actualOwner && actualOwner !== owner) {
+        // Se for admin autenticado na sessão, ignorar a verificação de owner
+        const isAdmin = req.session && req.session.user === 'admin';
+
+        if (actualOwner && actualOwner !== owner && !isAdmin) {
             return res.status(403).json({ success: false, message: 'Você não tem permissão para parar esta live' });
         }
 
