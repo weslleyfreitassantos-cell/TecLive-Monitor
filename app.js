@@ -289,18 +289,24 @@ setInterval(() => {
     if (accessChanged) saveViewerAccess(viewerAccess);
 }, 30000);
 
-function trackViewer(owner, videoId, ip, userAgent = '') {
+function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
     const now = Date.now();
     const key = owner ? `${owner}:${videoId}` : videoId;
     if (!viewerAccess.has(key)) viewerAccess.set(key, new Map());
     const viewers = viewerAccess.get(key);
     
-    // Identificador único = IP + UserAgent (para diferenciar aparelhos na mesma rede)
-    const deviceId = `${ip}|${userAgent}`;
+    // Identificador único = IP + UserAgent + LocalIp (opcional)
+    const deviceId = localIp ? `${ip}|${userAgent}|${localIp}` : `${ip}|${userAgent}`;
     
     // Limpar registro legado apenas com IP se existir
     if (viewers.has(ip)) {
         viewers.delete(ip);
+    }
+    
+    // Se enviou localIp, limpar também a versão sem localIp para não duplicar
+    const oldDeviceId = `${ip}|${userAgent}`;
+    if (localIp && viewers.has(oldDeviceId)) {
+        viewers.delete(oldDeviceId);
     }
     
     viewers.set(deviceId, now);
@@ -311,13 +317,13 @@ function trackViewer(owner, videoId, ip, userAgent = '') {
     saveViewerAccess(viewerAccess);
 }
 
-function trackViewerByOwner(owner, ip, videoId, userAgent = '') {
+function trackViewerByOwner(owner, ip, videoId, userAgent = '', localIp = null) {
     if (!owner || !videoId) return;
     if (isLocalIp(ip)) return;
     
     const now = Date.now();
     const currentKey = `${owner}:${videoId}`;
-    const deviceId = `${ip}|${userAgent}`;
+    const deviceId = localIp ? `${ip}|${userAgent}|${localIp}` : `${ip}|${userAgent}`;
 
     // --- LÓGICA DE EXCLUSIVIDADE POR CLIENTE (REVERTIDA DE GLOBAL) ---
     // Removemos o IP apenas das outras lives DO MESMO DONO.
@@ -340,6 +346,12 @@ function trackViewerByOwner(owner, ip, videoId, userAgent = '') {
     // Limpar registro legado apenas com IP se existir (evita duplicidade IP vs IP|userAgent)
     if (viewers.has(ip)) {
         viewers.delete(ip);
+    }
+
+    // Se enviou localIp, limpar também a versão sem localIp para não duplicar
+    const oldDeviceId = `${ip}|${userAgent}`;
+    if (localIp && viewers.has(oldDeviceId)) {
+        viewers.delete(oldDeviceId);
     }
     
     viewers.set(deviceId, now);
@@ -407,11 +419,12 @@ function getActiveViewerIPsForOwnerAndVideo(owner, videoId) {
     const devices = [];
     for (const [deviceId, timestamp] of viewers.entries()) {
         if (now - timestamp <= VIEWER_WINDOW_MS) {
-            // deviceId é no formato "ip|userAgent"
-            const pipeIdx = deviceId.indexOf('|');
-            const ip = pipeIdx >= 0 ? deviceId.substring(0, pipeIdx) : deviceId;
-            const userAgent = pipeIdx >= 0 ? deviceId.substring(pipeIdx + 1) : '';
-            devices.push({ deviceId, ip, userAgent });
+            // deviceId pode ser "ip|userAgent" ou "ip|userAgent|localIp"
+            const parts = deviceId.split('|');
+            const ip = parts[0] || 'unknown';
+            const userAgent = parts[1] || '';
+            const localIp = parts[2] || null;
+            devices.push({ deviceId, ip, userAgent, localIp });
         }
     }
     return devices;
@@ -936,7 +949,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         return res.status(404).send('Stream not found');
     }
 
-    const trackingOwner = queryOwner || actualOwner;
+        const trackingOwner = queryOwner || actualOwner;
+    const localIp = req.query.localIp || null;
 
     if (trackingOwner) {
         const rawIp = req.ip || req.socket.remoteAddress;
@@ -958,22 +972,21 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                         message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
                     });
                 }
-                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent);
+                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
             } else {
-                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent);
+                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
             }
         }
     } else {
         console.warn(`[${videoId}] Acesso sem owner definido - dispositivo não será rastreado.`);
     }
-
     const rawIpActivity = req.ip || req.socket.remoteAddress;
     const clientIpActivity = normalizeIp(
         req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
         rawIpActivity
     );
     const userAgentActivity = req.headers['user-agent'] || '';
-    trackViewer(trackingOwner, videoId, clientIpActivity, userAgentActivity);
+    trackViewer(trackingOwner, videoId, clientIpActivity, userAgentActivity, localIp);
 
     monitor._currentMaxHeight = finalMaxHeight;
     monitor.lastAccess = Date.now();
@@ -1173,11 +1186,21 @@ app.post('/api/convert', async (req, res) => {
 
 app.get('/api/public/device-status/:owner', (req, res) => {
     const owner = req.params.owner;
+    const localIp = req.query.localIp || null;
     if (!owner) {
         return res.status(400).json({ error: 'Owner não informado' });
     }
 
-    const uniqueDevices = new Map(); // deviceId -> { deviceId, ip, userAgent }
+    // Se o painel enviou localIp, aproveitamos para registrar/atualizar o dispositivo do painel
+    if (localIp) {
+        const rawIp = req.ip || req.socket.remoteAddress;
+        const ip = normalizeIp(req.headers['x-forwarded-for']?.split(',')[0]?.trim() || rawIp);
+        const userAgent = req.headers['user-agent'] || '';
+        // O painel não tem um videoId específico, mas podemos registrar no viewerAccess global
+        trackViewer(owner, 'panel', ip, userAgent, localIp);
+    }
+
+    const uniqueDevices = new Map(); // deviceId -> { deviceId, ip, userAgent, localIp }
     const now = Date.now();
 
     for (const [key, viewers] of ownerViewers.entries()) {
@@ -1196,11 +1219,12 @@ app.get('/api/public/device-status/:owner', (req, res) => {
 
             for (const [deviceId, timestamp] of viewers.entries()) {
                 if (now - timestamp <= VIEWER_WINDOW_MS) {
-                    // deviceId é no formato "ip|userAgent"
-                    const pipeIdx = deviceId.indexOf('|');
-                    const ip = pipeIdx >= 0 ? deviceId.substring(0, pipeIdx) : deviceId;
-                    const userAgent = pipeIdx >= 0 ? deviceId.substring(pipeIdx + 1) : '';
-                    uniqueDevices.set(deviceId, { deviceId, ip, userAgent });
+                    // deviceId pode ser "ip|userAgent" ou "ip|userAgent|localIp"
+                    const parts = deviceId.split('|');
+                    const ip = parts[0] || 'unknown';
+                    const userAgent = parts[1] || '';
+                    const localIp = parts[2] || null;
+                    uniqueDevices.set(deviceId, { deviceId, ip, userAgent, localIp });
                 }
             }
         }
@@ -1393,7 +1417,7 @@ neonews_pool_queued ${stats.pool?.queued || 0}
 });
 
 app.get('/api/keepalive', (req, res) => {
-    const { owner, videoId } = req.query;
+    const { owner, videoId, localIp } = req.query;
     const rawIp = req.ip || req.socket.remoteAddress;
     const ip = normalizeIp(
         req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
@@ -1401,7 +1425,7 @@ app.get('/api/keepalive', (req, res) => {
     );
     const userAgent = req.headers['user-agent'] || '';
     if (owner && videoId && !isLocalIp(ip)) {
-        trackViewerByOwner(owner, ip, videoId, userAgent);
+        trackViewerByOwner(owner, ip, videoId, userAgent, localIp);
         return res.send('ok');
     }
     res.status(400).send('invalid');
@@ -1720,7 +1744,7 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
         }
 
         // Se for admin autenticado na sessão, ignorar a verificação de owner
-        const isAdmin = req.session && req.session.user === 'admin';
+        const isAdmin = req.session && req.session.admin === true;
 
         if (actualOwner && actualOwner !== owner && !isAdmin) {
             return res.status(403).json({ success: false, message: 'Você não tem permissão para parar esta live' });

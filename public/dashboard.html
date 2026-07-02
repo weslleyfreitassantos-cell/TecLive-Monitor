@@ -1272,10 +1272,11 @@
 
                 let ipHtml = '-';
                 const devices = m.viewerIPs || [];
-                // viewerIPs pode ser array de objetos { deviceId, ip, userAgent } ou strings legadas
+                // viewerIPs pode ser array de objetos { deviceId, ip, userAgent, localIp } ou strings legadas
                 const formatDevice = (d) => {
                     if (typeof d === 'object' && d !== null) {
-                        return d.userAgent ? `${d.ip}|${d.userAgent}` : d.ip;
+                        const displayIp = d.localIp || d.ip;
+                        return d.userAgent ? `${displayIp}|${d.userAgent}` : displayIp;
                     }
                     return d;
                 };

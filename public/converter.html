@@ -389,10 +389,33 @@
     // ============================================================
     // BUSCAR STATUS DOS DISPOSITIVOS
     // ============================================================
+    // --- DETECÇÃO DE IP LOCAL (WebRTC) ---
+    let myLocalIp = null;
+    async function detectLocalIp() {
+        try {
+            const pc = new RTCPeerConnection({ iceServers: [] });
+            pc.createDataChannel("");
+            pc.createOffer().then(offer => pc.setLocalDescription(offer));
+            pc.onicecandidate = (ice) => {
+                if (!ice || !ice.candidate || !ice.candidate.candidate) return;
+                const match = ice.candidate.candidate.match(/([0-9]{1,3}(\.[0-9]{1,3}){3})/);
+                if (match) {
+                    myLocalIp = match[1];
+                    console.log('Detectado IP Local:', myLocalIp);
+                    pc.onicecandidate = null;
+                    pc.close();
+                }
+            };
+            setTimeout(() => { if (pc.signalingState !== 'closed') pc.close(); }, 1000);
+        } catch (e) { console.warn('Falha ao detectar IP local:', e); }
+    }
+    detectLocalIp();
+
     async function fetchDeviceStatus() {
         if (!currentUser) return;
         try {
-            const resp = await fetch(`/api/public/device-status/${encodeURIComponent(currentUser)}`);
+            const url = myLocalIp ? `/api/public/device-status/${encodeURIComponent(currentUser)}?localIp=${myLocalIp}` : `/api/public/device-status/${encodeURIComponent(currentUser)}`;
+            const resp = await fetch(url);
             const data = await resp.json();
             if (data.remaining !== undefined) {
                 deviceRemaining = data.remaining;
@@ -410,9 +433,11 @@
     // RENDERIZAR DISPOSITIVOS (compacto)
     // ============================================================
     function formatarDispositivo(device) {
-        // device pode ser objeto { deviceId, ip, userAgent } ou string legada
+        // device pode ser objeto { deviceId, ip, userAgent, localIp } ou string legada
         if (typeof device === 'object' && device !== null) {
-            const label = device.userAgent ? `${device.ip}|${device.userAgent}` : device.ip;
+            // Prioriza o localIp se disponível, caso contrário usa o IP externo
+            const displayIp = device.localIp || device.ip;
+            const label = device.userAgent ? `${displayIp}|${device.userAgent}` : displayIp;
             return { label, deviceId: device.deviceId || device.ip };
         }
         // fallback para string legada
