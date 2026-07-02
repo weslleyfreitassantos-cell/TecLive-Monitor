@@ -181,7 +181,6 @@ function saveViewerAccess(viewerMap) {
 }
 
 // ========== PERSISTÊNCIA DE MONITORES ATIVOS ==========
-const mappingFile = path.join(cookiesDir, 'monitors.json');
 
 async function restoreMonitorsPersistence() {
     try {
