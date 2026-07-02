@@ -660,22 +660,22 @@ class LiveMonitor {
             if (metadataResult.isLiveEnded) {
                 if (!this._liveEndedFirstDetection) {
                     this._liveEndedFirstDetection = Date.now();
-                    console.log(`[${this.videoId}] ⏳ Live possivelmente encerrada. Aguardando 10min para confirmar...`);
-                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Live possivelmente encerrada (aguardando confirmação 10min)');
+                    console.log(`[${this.videoId}] ⏳ Live possivelmente encerrada. Aguardando 2min para confirmar...`);
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Live possivelmente encerrada (aguardando confirmação 2min)');
                     this.liveState = LiveState.DEGRADED;
                     return;
                 }
                 const minutesWaiting = (Date.now() - this._liveEndedFirstDetection) / 60000;
-                if (minutesWaiting < 10) {
-                    console.log(`[${this.videoId}] ⏳ Confirmando encerramento... (${minutesWaiting.toFixed(1)}/10 min)`);
+                if (minutesWaiting < 2) {
+                    console.log(`[${this.videoId}] ⏳ Confirmando encerramento... (${minutesWaiting.toFixed(1)}/2 min)`);
                     if (this.m3u8Url) {
                         await this._forceRenew().catch(() => {});
                     }
-                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Confirmando encerramento (${minutesWaiting.toFixed(1)}/10min)`);
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Confirmando encerramento (${minutesWaiting.toFixed(1)}/2min)`);
                     this.liveState = LiveState.DEGRADED;
                     return;
                 }
-                console.log(`[${this.videoId}] 🛑 Live encerrada confirmada após 10min. Parando monitor.`);
+                console.log(`[${this.videoId}] 🛑 Live encerrada confirmada após 2min. Parando monitor.`);
                 this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada (confirmado)');
                 this.applyDerivedState();
                 // 👇 NOVO: chama o callback de encerramento

@@ -1397,6 +1397,15 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
     if (converter && converter.activeMonitors) {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             const [videoId, owner] = key.split(':');
+
+            // --- LÓGICA DE REMOÇÃO AUTOMÁTICA DE LIVES ENCERRADAS ---
+            // Se o monitor detectou que a live terminou (ENDED) ou está OFFLINE por muito tempo, removemos.
+            if (monitor.liveState === 'ended' || monitor._liveEnded) {
+                console.log(`[${key}] 🗑️ Removendo monitor de live encerrada detectada na API`);
+                converter.removeMonitor(videoId, owner);
+                continue; // Pula para o próximo, não exibe este
+            }
+
             const activeDevices = owner ? getActiveDevicesForOwnerAndVideo(owner, videoId) : 0;
             const deviceIPs = owner ? getActiveViewerIPsForOwnerAndVideo(owner, videoId) : [];
             const token = getOrCreateToken(videoId, owner || null);
