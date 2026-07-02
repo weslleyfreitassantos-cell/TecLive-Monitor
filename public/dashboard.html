@@ -1217,9 +1217,31 @@
     // ============================================================
     // DETALHES DO CLIENTE (AGRUPAMENTO)
     // ============================================================
+    let currentDetailOwner = null;
+    let modalSearchTerm = '';
+
     window.openClientDetailModal = function(owner) {
-        const monitors = window.currentGroups[owner];
-        if (!monitors) return;
+        currentDetailOwner = owner;
+        modalSearchTerm = '';
+        const modalSearchInput = document.getElementById('modalSearchInput');
+        if (modalSearchInput) modalSearchInput.value = '';
+        renderClientDetailModal();
+        clientDetailModal.classList.add('active');
+    };
+
+    function renderClientDetailModal() {
+        const owner = currentDetailOwner;
+        let monitors = window.currentGroups[owner] || [];
+        
+        // Aplica o filtro de busca do modal
+        if (modalSearchTerm) {
+            const term = modalSearchTerm.toLowerCase();
+            monitors = monitors.filter(m => 
+                (m.channel && m.channel.toLowerCase().includes(term)) ||
+                (m.videoId && m.videoId.toLowerCase().includes(term)) ||
+                (m.title && m.title.toLowerCase().includes(term))
+            );
+        }
 
         clientDetailTitle.textContent = `Lives de ${owner} (${monitors.length})`;
         
@@ -1238,48 +1260,56 @@
             </thead>
             <tbody>`;
 
-        monitors.forEach(m => {
-            const score = computeHealthScore(m.health);
-            const statusDisp = getStatusDisplay(m.status, m.health);
-            const mainCause = getMainCause(m);
-            const tooltipText = buildTooltipContent(m);
-            const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
-            const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
+        if (monitors.length === 0) {
+            html += `<tr><td colspan="8" style="text-align:center; padding:30px; color:#7a8aa0;">Nenhuma live encontrada para este filtro.</td></tr>`;
+        } else {
+            monitors.forEach(m => {
+                const score = computeHealthScore(m.health);
+                const statusDisp = getStatusDisplay(m.status, m.health);
+                const mainCause = getMainCause(m);
+                const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
+                const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
 
-            let ipHtml = '-';
-            const ips = m.viewerIPs || [];
-            if (ips.length === 1) {
-                ipHtml = `<span class="ip-item">${ips[0]}</span>`;
-            } else if (ips.length > 1) {
-                const first = ips[0];
-                const extra = ips.length - 1;
-                ipHtml = `<span class="ip-item">${first}</span> <button class="ip-extra" onclick="event.stopPropagation(); openModal(${JSON.stringify(ips).replace(/"/g, '&quot;')})">+${extra}</button>`;
-            }
+                let ipHtml = '-';
+                const ips = m.viewerIPs || [];
+                if (ips.length === 1) {
+                    ipHtml = `<span class="ip-item">${ips[0]}</span>`;
+                } else if (ips.length > 1) {
+                    const first = ips[0];
+                    const extra = ips.length - 1;
+                    ipHtml = `<span class="ip-item">${first}</span> <button class="ip-extra" onclick="event.stopPropagation(); openModal(${JSON.stringify(ips).replace(/"/g, '&quot;')})">+${extra}</button>`;
+                }
 
-            const liveTitle = m.title || 'Título não disponível';
+                const liveTitle = m.title || 'Título não disponível';
 
-            html += `<tr class="${statusDisp.class}">
-                <td style="color: #f1c40f; font-weight: 700; text-align: left;" title="${m.channel || ''}">${m.channel || '—'}</td>
-                <td class="video-id" title="${liveTitle.replace(/"/g, '&quot;')}">${m.videoId || 'N/A'}</td>
-                <td class="${statusDisp.class}">
-                    <div>${statusDisp.label}</div>
-                    ${mainCause ? `<div style="font-size: 0.7rem; opacity:0.8;">[${mainCause}]</div>` : ''}
-                </td>
-                <td>
-                    <div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>
-                    <span class="health-score">${score}%</span>
-                </td>
-                <td><span class="device-count" style="font-size: 18px;">${m.viewers ?? 0}</span></td>
-                <td><div class="ip-list">${ipHtml}</div></td>
-                <td><span class="renew-time" style="font-size: 16px;">${lastRenew}</span></td>
-                <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}')">FINALIZAR</button></td>
-            </tr>`;
-        });
+                html += `<tr class="${statusDisp.class}">
+                    <td style="color: #f1c40f; font-weight: 700; text-align: left;" title="${m.channel || ''}">${m.channel || '—'}</td>
+                    <td class="video-id" title="${liveTitle.replace(/"/g, '&quot;')}">${m.videoId || 'N/A'}</td>
+                    <td class="${statusDisp.class}">
+                        <div>${statusDisp.label}</div>
+                        ${mainCause ? `<div style="font-size: 0.7rem; opacity:0.8;">[${mainCause}]</div>` : ''}
+                    </td>
+                    <td>
+                        <div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>
+                        <span class="health-score">${score}%</span>
+                    </td>
+                    <td><span class="device-count" style="font-size: 18px;">${m.viewers ?? 0}</span></td>
+                    <td><div class="ip-list">${ipHtml}</div></td>
+                    <td><span class="renew-time" style="font-size: 16px;">${lastRenew}</span></td>
+                    <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}')">FINALIZAR</button></td>
+                </tr>`;
+            });
+        }
 
         html += `</tbody></table>`;
         clientDetailContent.innerHTML = html;
-        clientDetailModal.classList.add('active');
-    };
+    }
+
+    // Listener para a busca no modal
+    document.getElementById('modalSearchInput').addEventListener('input', function(e) {
+        modalSearchTerm = e.target.value.trim();
+        renderClientDetailModal();
+    });
 
     window.stopMonitor = async function(videoId) {
         if (!confirm(`Encerrar monitor ${videoId}?`)) return;
