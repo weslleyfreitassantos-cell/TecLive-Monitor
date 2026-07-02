@@ -1271,13 +1271,21 @@
                 const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
 
                 let ipHtml = '-';
-                const ips = m.viewerIPs || [];
-                if (ips.length === 1) {
-                    ipHtml = `<span class="ip-item">${ips[0]}</span>`;
-                } else if (ips.length > 1) {
-                    const first = ips[0];
-                    const extra = ips.length - 1;
-                    ipHtml = `<span class="ip-item">${first}</span> <button class="ip-extra" onclick="event.stopPropagation(); openModal(${JSON.stringify(ips).replace(/"/g, '&quot;')})">+${extra}</button>`;
+                const devices = m.viewerIPs || [];
+                // viewerIPs pode ser array de objetos { deviceId, ip, userAgent } ou strings legadas
+                const formatDevice = (d) => {
+                    if (typeof d === 'object' && d !== null) {
+                        return d.userAgent ? `${d.ip}|${d.userAgent}` : d.ip;
+                    }
+                    return d;
+                };
+                if (devices.length === 1) {
+                    ipHtml = `<span class="ip-item">${formatDevice(devices[0])}</span>`;
+                } else if (devices.length > 1) {
+                    const firstLabel = formatDevice(devices[0]);
+                    const extra = devices.length - 1;
+                    const allLabels = devices.map(formatDevice);
+                    ipHtml = `<span class="ip-item">${firstLabel}</span> <button class="ip-extra" onclick="event.stopPropagation(); openModal(${JSON.stringify(allLabels).replace(/"/g, '&quot;')})">+${extra}</button>`;
                 }
 
                 const liveTitle = m.title || 'Título não disponível';

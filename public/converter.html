@@ -335,28 +335,31 @@
     }
 
     // ============================================================
-    // REMOVER IP
+    // REMOVER DISPOSITIVO
     // ============================================================
-    async function removerIp(ip) {
+    async function removerIp(deviceId) {
         if (!currentUser) return;
-        if (!confirm(`Remover IP ${ip} da lista de dispositivos ativos?`)) return;
+        // deviceId pode ser "ip|userAgent" ou apenas "ip"
+        const pipeIdx = deviceId.indexOf('|');
+        const ipLabel = pipeIdx >= 0 ? deviceId.substring(0, pipeIdx) : deviceId;
+        if (!confirm(`Remover dispositivo ${ipLabel} da lista de dispositivos ativos?`)) return;
         try {
             const resp = await fetch('/api/device/remove', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ owner: currentUser, ip })
+                body: JSON.stringify({ owner: currentUser, ip: deviceId })
             });
             const data = await resp.json();
             if (data.success) {
-                mostrarFeedback('success', `IP ${ip} removido!`);
+                mostrarFeedback('success', `Dispositivo ${ipLabel} removido!`);
                 await fetchDeviceStatus();
                 atualizarLivesRestantes();
                 setTimeout(() => esconderFeedback(), 3000);
             } else {
-                mostrarFeedback('error', data.message || 'Erro ao remover IP');
+                mostrarFeedback('error', data.message || 'Erro ao remover dispositivo');
             }
         } catch (err) {
-            mostrarFeedback('error', 'Erro ao remover IP');
+            mostrarFeedback('error', 'Erro ao remover dispositivo');
         }
     }
 
@@ -406,6 +409,16 @@
     // ============================================================
     // RENDERIZAR DISPOSITIVOS (compacto)
     // ============================================================
+    function formatarDispositivo(device) {
+        // device pode ser objeto { deviceId, ip, userAgent } ou string legada
+        if (typeof device === 'object' && device !== null) {
+            const label = device.userAgent ? `${device.ip}|${device.userAgent}` : device.ip;
+            return { label, deviceId: device.deviceId || device.ip };
+        }
+        // fallback para string legada
+        return { label: device, deviceId: device };
+    }
+
     function renderizarDispositivos(ips) {
         if (!ips || ips.length === 0) {
             devicesSection.style.display = 'none';
@@ -418,11 +431,13 @@
         const temMais = ips.length > 2;
 
         let html = '';
-        mostrar.forEach(ip => {
+        mostrar.forEach(device => {
+            const { label, deviceId } = formatarDispositivo(device);
+            const escapedDeviceId = deviceId.replace(/"/g, '&quot;');
             html += `
                 <div class="device-item">
-                    <span class="ip">${ip}</span>
-                    <button class="btn-remove-ip" data-ip="${ip}">Remover</button>
+                    <span class="ip">${label}</span>
+                    <button class="btn-remove-ip" data-ip="${escapedDeviceId}">Remover</button>
                 </div>
             `;
         });
@@ -449,18 +464,23 @@
         const termo = modalDevicesSearch.value.toLowerCase().trim();
         let filtrados = activeIPs;
         if (termo) {
-            filtrados = activeIPs.filter(ip => ip.toLowerCase().includes(termo));
+            filtrados = activeIPs.filter(device => {
+                const { label } = formatarDispositivo(device);
+                return label.toLowerCase().includes(termo);
+            });
         }
         if (filtrados.length === 0) {
             modalDevicesList.innerHTML = '<div class="empty">Nenhum dispositivo encontrado.</div>';
             return;
         }
         let html = '';
-        filtrados.forEach(ip => {
+        filtrados.forEach(device => {
+            const { label, deviceId } = formatarDispositivo(device);
+            const escapedDeviceId = deviceId.replace(/"/g, '&quot;');
             html += `
                 <div class="device-item">
-                    <span class="ip">${ip}</span>
-                    <button class="btn-remove-ip-modal" data-ip="${ip}">Remover</button>
+                    <span class="ip">${label}</span>
+                    <button class="btn-remove-ip-modal" data-ip="${escapedDeviceId}">Remover</button>
                 </div>
             `;
         });

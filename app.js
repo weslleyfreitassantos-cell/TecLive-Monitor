@@ -119,14 +119,26 @@ function loadOwnerViewers() {
     try {
         const data = JSON.parse(fs.readFileSync(ownerViewersFile, 'utf8'));
         const map = new Map();
+        const now = Date.now();
+        // VIEWER_WINDOW_MS ainda não está definido aqui, usar valor padrão
+        const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
+        let totalLoaded = 0, totalExpired = 0;
         for (const [key, viewers] of Object.entries(data)) {
             const innerMap = new Map();
             for (const [ip, timestamp] of Object.entries(viewers)) {
-                innerMap.set(ip, timestamp);
+                // Descartar entradas expiradas ao carregar (evita dispositivos fantasmas após reinicialização)
+                if (now - timestamp <= windowMs) {
+                    innerMap.set(ip, timestamp);
+                    totalLoaded++;
+                } else {
+                    totalExpired++;
+                }
             }
-            map.set(key, innerMap);
+            if (innerMap.size > 0) {
+                map.set(key, innerMap);
+            }
         }
-        console.log(`📱 Carregados ${map.size} chaves (owner:videoId) com dispositivos ativos.`);
+        console.log(`📱 Carregados ${map.size} chaves (owner:videoId) com dispositivos ativos. ${totalLoaded} ativos, ${totalExpired} expirados descartados.`);
         return map;
     } catch (e) {
         console.log('ℹ️ Nenhum arquivo de dispositivos persistidos encontrado ou vazio.');
@@ -153,12 +165,19 @@ function loadViewerAccess() {
     try {
         const data = JSON.parse(fs.readFileSync(viewerAccessFile, 'utf8'));
         const map = new Map();
+        const now = Date.now();
+        const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
         for (const [key, ips] of Object.entries(data)) {
             const innerMap = new Map();
             for (const [ip, timestamp] of Object.entries(ips)) {
-                innerMap.set(ip, timestamp);
+                // Descartar entradas expiradas ao carregar
+                if (now - timestamp <= windowMs) {
+                    innerMap.set(ip, timestamp);
+                }
             }
-            map.set(key, innerMap);
+            if (innerMap.size > 0) {
+                map.set(key, innerMap);
+            }
         }
         console.log(`📡 Carregados ${map.size} chaves com viewerAccess.`);
         return map;
@@ -373,11 +392,17 @@ function getActiveViewerIPsForOwnerAndVideo(owner, videoId) {
     const viewers = ownerViewers.get(key);
     if (!viewers) return [];
     const now = Date.now();
-    const ips = [];
-    for (const [ip, timestamp] of viewers.entries()) {
-        if (now - timestamp <= VIEWER_WINDOW_MS) ips.push(ip);
+    const devices = [];
+    for (const [deviceId, timestamp] of viewers.entries()) {
+        if (now - timestamp <= VIEWER_WINDOW_MS) {
+            // deviceId é no formato "ip|userAgent"
+            const pipeIdx = deviceId.indexOf('|');
+            const ip = pipeIdx >= 0 ? deviceId.substring(0, pipeIdx) : deviceId;
+            const userAgent = pipeIdx >= 0 ? deviceId.substring(pipeIdx + 1) : '';
+            devices.push({ deviceId, ip, userAgent });
+        }
     }
-    return ips;
+    return devices;
 }
 
 function isIpActiveForOwnerAndVideo(owner, videoId, ip) {
@@ -1134,7 +1159,7 @@ app.get('/api/public/device-status/:owner', (req, res) => {
         return res.status(400).json({ error: 'Owner não informado' });
     }
 
-    const uniqueIps = new Set();
+    const uniqueDevices = new Map(); // deviceId -> { deviceId, ip, userAgent }
     const now = Date.now();
 
     for (const [key, viewers] of ownerViewers.entries()) {
@@ -1151,24 +1176,28 @@ app.get('/api/public/device-status/:owner', (req, res) => {
                 continue;
             }
 
-            for (const [ip, timestamp] of viewers.entries()) {
+            for (const [deviceId, timestamp] of viewers.entries()) {
                 if (now - timestamp <= VIEWER_WINDOW_MS) {
-                    uniqueIps.add(ip);
+                    // deviceId é no formato "ip|userAgent"
+                    const pipeIdx = deviceId.indexOf('|');
+                    const ip = pipeIdx >= 0 ? deviceId.substring(0, pipeIdx) : deviceId;
+                    const userAgent = pipeIdx >= 0 ? deviceId.substring(pipeIdx + 1) : '';
+                    uniqueDevices.set(deviceId, { deviceId, ip, userAgent });
                 }
             }
         }
     }
 
-    const allIps = Array.from(uniqueIps);
+    const allDevices = Array.from(uniqueDevices.values());
     const limit = getDeviceLimitForOwner(owner);
-    const remaining = Math.max(0, limit - allIps.length);
+    const remaining = Math.max(0, limit - allDevices.length);
 
     res.json({
         owner,
         limit,
-        active: allIps.length,
+        active: allDevices.length,
         remaining,
-        ips: allIps
+        ips: allDevices
     });
 });
 
@@ -1265,17 +1294,17 @@ app.get('/api/public/device-status-all', (req, res) => {
 
     for (const cliente of clientes) {
         const owner = cliente.login;
-        const uniqueIps = new Set();
+        const uniqueDevices = new Set();
 
         for (const [key, viewers] of ownerViewers.entries()) {
             if (key.startsWith(owner + ':')) {
-                for (const [ip, timestamp] of viewers.entries()) {
-                    if (now - timestamp <= VIEWER_WINDOW_MS) uniqueIps.add(ip);
+                for (const [deviceId, timestamp] of viewers.entries()) {
+                    if (now - timestamp <= VIEWER_WINDOW_MS) uniqueDevices.add(deviceId);
                 }
             }
         }
 
-        result[owner] = { active: uniqueIps.size, limit: cliente.dispositivos };
+        result[owner] = { active: uniqueDevices.size, limit: cliente.dispositivos };
     }
     res.json(result);
 });
@@ -1441,6 +1470,18 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
             if (monitor.liveState === 'ended' || monitor._liveEnded) {
                 console.log(`[${key}] 🗑️ Removendo monitor de live encerrada detectada na API`);
                 converter.removeMonitor(videoId, owner);
+                // Limpar dispositivos ativos desta live
+                if (owner) {
+                    const devKey = `${owner}:${videoId}`;
+                    if (ownerViewers.has(devKey)) {
+                        ownerViewers.delete(devKey);
+                        saveOwnerViewers(ownerViewers);
+                    }
+                    if (viewerAccess.has(devKey)) {
+                        viewerAccess.delete(devKey);
+                        saveViewerAccess(viewerAccess);
+                    }
+                }
                 continue; // Pula para o próximo, não exibe este
             }
 
@@ -1624,7 +1665,7 @@ app.get('/api/scheduler/stats', isAuthenticated, (req, res) => {
 // ============================================================
 app.post('/api/monitor/stop/:videoId', async (req, res) => {
     const videoId = req.params.videoId;
-    const { owner } = req.body;
+    const owner = (req.body && req.body.owner) ? req.body.owner : null;
 
     try {
         let monitorFound = null;
@@ -1803,6 +1844,25 @@ const revokeTokenFn = (videoId, owner) => {
             revokeToken(token);
             console.log(`🗑️ Token revogado para ${videoId}:${owner}`);
             break;
+        }
+    }
+    // Limpar dispositivos ativos associados a esta live (evita dispositivos fantasmas)
+    if (owner) {
+        const key = `${owner}:${videoId}`;
+        if (ownerViewers.has(key)) {
+            ownerViewers.delete(key);
+            saveOwnerViewers(ownerViewers);
+            console.log(`🧹 Dispositivos de ${key} limpos após encerramento automático da live.`);
+        }
+        const accessKey = `${owner}:${videoId}`;
+        if (viewerAccess.has(accessKey)) {
+            viewerAccess.delete(accessKey);
+            saveViewerAccess(viewerAccess);
+        }
+    } else {
+        if (viewerAccess.has(videoId)) {
+            viewerAccess.delete(videoId);
+            saveViewerAccess(viewerAccess);
         }
     }
 };
