@@ -195,7 +195,7 @@ function isLocalIp(ip) {
 // ============================================================
 // RASTREAMENTO DE VIEWERS
 // ============================================================
-const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 86400000; // 24h
+const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 45000; // 45 segundos (ajustado para expiração rápida)
 
 function normalizeIp(ip) {
     if (!ip) return 'unknown';
@@ -206,6 +206,43 @@ function normalizeIp(ip) {
     return ip;
 }
 
+// Limpeza periódica global de IPs inativos (a cada 30 segundos)
+setInterval(() => {
+    const now = Date.now();
+    let changed = false;
+    
+    // Limpar ownerViewers
+    for (const [key, viewers] of ownerViewers.entries()) {
+        for (const [ip, timestamp] of viewers.entries()) {
+            if (now - timestamp > VIEWER_WINDOW_MS) {
+                viewers.delete(ip);
+                changed = true;
+            }
+        }
+        if (viewers.size === 0) {
+            ownerViewers.delete(key);
+            changed = true;
+        }
+    }
+    if (changed) saveOwnerViewers(ownerViewers);
+
+    // Limpar viewerAccess
+    let accessChanged = false;
+    for (const [key, viewers] of viewerAccess.entries()) {
+        for (const [ip, timestamp] of viewers.entries()) {
+            if (now - timestamp > VIEWER_WINDOW_MS) {
+                viewers.delete(ip);
+                accessChanged = true;
+            }
+        }
+        if (viewers.size === 0) {
+            viewerAccess.delete(key);
+            accessChanged = true;
+        }
+    }
+    if (accessChanged) saveViewerAccess(viewerAccess);
+}, 30000);
+
 function trackViewer(owner, videoId, ip) {
     const now = Date.now();
     const key = owner ? `${owner}:${videoId}` : videoId;
@@ -213,7 +250,7 @@ function trackViewer(owner, videoId, ip) {
     const viewers = viewerAccess.get(key);
     viewers.set(ip, now);
     for (const [viewerIp, timestamp] of viewers.entries()) {
-        if (now - timestamp > 172800000) viewers.delete(viewerIp);
+        if (now - timestamp > VIEWER_WINDOW_MS) viewers.delete(viewerIp);
     }
     saveViewerAccess(viewerAccess);
 }
