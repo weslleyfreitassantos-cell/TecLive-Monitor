@@ -265,17 +265,17 @@ function trackViewerByOwner(owner, ip, videoId) {
     const now = Date.now();
     const currentKey = `${owner}:${videoId}`;
 
-    // --- LÓGICA DE EXCLUSIVIDADE DE IP POR CLIENTE ---
-    // Se este IP aparecer em QUALQUER OUTRA live deste mesmo owner, removemos imediatamente.
-    // Isso evita que um único dispositivo conte como 2 se o player mudar de canal rápido.
+    // --- LÓGICA DE EXCLUSIVIDADE GLOBAL DE IP ---
+    // Se este IP aparecer em QUALQUER OUTRA live de QUALQUER cliente, removemos imediatamente.
+    // Isso garante que um dispositivo físico (IP) nunca conte em dois lugares ao mesmo tempo.
     let exclusivityRemoved = false;
     for (const [key, viewers] of ownerViewers.entries()) {
-        if (key.startsWith(`${owner}:`) && key !== currentKey) {
+        if (key !== currentKey) {
             if (viewers.has(ip)) {
                 viewers.delete(ip);
                 exclusivityRemoved = true;
                 // Opcional: limpar cache da live antiga para forçar atualização no dashboard
-                const oldVideoId = key.split(':')[1];
+                const [oldOwner, oldVideoId] = key.split(':');
                 m3u8CacheContent.delete(oldVideoId);
             }
         }
