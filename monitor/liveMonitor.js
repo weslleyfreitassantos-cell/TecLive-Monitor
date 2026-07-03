@@ -118,9 +118,6 @@ class LiveMonitor {
         // ✅ NOVO: armazenar maxHeight (passado pelo proxy)
         this._currentMaxHeight = null; // será setado via proxy
         
-        if (this._scheduler && this.videoId) {
-            this._scheduler.register(this);
-        }
     }
 
     calculateMaxRepeats() {
@@ -826,7 +823,12 @@ class LiveMonitor {
         this.maxSegmentRepeats = this.calculateMaxRepeats();
         this._monitorStopped = false;
         this._liveEnded = false;
-        console.log(`🔄 Monitor iniciado para ${this.videoId} (scheduler global)`);
+        
+        if (this._scheduler && this.videoId) {
+            this._scheduler.register(this);
+        }
+        
+        console.log(`🔄 Monitor iniciado para ${this.videoId}${this.owner ? ':' + this.owner : ''} (scheduler global)`);
     }
 
     stopMonitoring() {
