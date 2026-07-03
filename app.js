@@ -960,22 +960,23 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         );
         const userAgent = req.headers['user-agent'] || '';
 
+        // RASTREAMENTO DINÂMICO: Registra o dispositivo no momento do acesso
         if (!isLocalIp(clientIp)) {
-            const isAuthorized = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp, userAgent);
-            if (!isAuthorized) {
-                const activeDevices = getActiveDevicesForOwnerAndVideo(trackingOwner, videoId);
-                const deviceLimit = getDeviceLimitForOwner(trackingOwner);
-                if (deviceLimit > 0 && activeDevices >= deviceLimit) {
-                    console.log(`[${trackingOwner}:${videoId}] 🚫 Dispositivo bloqueado: ${activeDevices} ativos, IP ${clientIp} excederia limite ${deviceLimit}`);
-                    return res.status(429).json({
-                        error: 'Limite de dispositivos excedido',
-                        message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
-                    });
-                }
-                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
-            } else {
-                trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
+            const activeDevices = getActiveDevicesForOwnerAndVideo(trackingOwner, videoId);
+            const deviceLimit = getDeviceLimitForOwner(trackingOwner);
+            const isAlreadyActive = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp, userAgent);
+
+            if (!isAlreadyActive && deviceLimit > 0 && activeDevices >= deviceLimit) {
+                console.log(`[${trackingOwner}:${videoId}] 🚫 Dispositivo bloqueado: ${activeDevices} ativos, IP ${clientIp} excederia limite ${deviceLimit}`);
+                return res.status(429).json({
+                    error: 'Limite de dispositivos excedido',
+                    message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
+                });
             }
+            
+            // Registra/Atualiza o dispositivo dinamicamente
+            trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
+            console.log(`[${trackingOwner}:${videoId}] 📱 Dispositivo registrado via Proxy: ${clientIp} | ${userAgent.substring(0, 30)}...`);
         }
     } else {
         console.warn(`[${videoId}] Acesso sem owner definido - dispositivo não será rastreado.`);
