@@ -1305,7 +1305,7 @@
                     <td><span class="device-count" style="font-size: 18px;">${m.viewers ?? 0}</span></td>
                     <td><div class="ip-list">${ipHtml}</div></td>
                     <td><span class="renew-time" style="font-size: 16px;">${lastRenew}</span></td>
-                    <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}')">FINALIZAR</button></td>
+                    <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}', '${m.owner}')">FINALIZAR</button></td>
                 </tr>`;
             });
         }
@@ -1320,10 +1320,15 @@
         renderClientDetailModal();
     });
 
-    window.stopMonitor = async function(videoId) {
+    window.stopMonitor = async function(videoId, owner = null) {
         if (!confirm(`Encerrar monitor ${videoId}?`)) return;
         try {
-            const res = await fetch(`/api/monitor/stop/${videoId}`, { method: 'POST' });
+            const body = owner ? JSON.stringify({ owner }) : JSON.stringify({});
+            const res = await fetch(`/api/monitor/stop/${videoId}`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body
+            });
             const data = await res.json();
             if (data.success) { 
                 alert('Encerrado!'); 

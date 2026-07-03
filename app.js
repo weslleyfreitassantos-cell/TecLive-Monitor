@@ -1357,6 +1357,12 @@ app.get('/api/public/monitors', (req, res) => {
     if (converter && converter.activeMonitors) {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             const [videoId, owner] = key.split(':');
+
+            // FILTRAR LIVES ENCERRADAS: Não envia para o cliente se já acabou
+            if (monitor.liveState === 'ended' || monitor._liveEnded) {
+                continue;
+            }
+
             const token = getOrCreateToken(videoId, owner || null);
             monitors.push({
                 videoId,

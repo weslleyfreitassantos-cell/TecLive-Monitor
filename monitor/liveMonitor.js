@@ -832,9 +832,9 @@ class LiveMonitor {
     stopMonitoring() {
         this._monitorStopped = true;
         if (this._scheduler) {
-            this._scheduler.unregister(this.videoId);
+            this._scheduler.unregister(this.videoId, this.owner);
         }
-        console.log(`⏹️ Monitor parado para ${this.videoId}`);
+        console.log(`⏹️ Monitor parado para ${this.videoId}${this.owner ? ':' + this.owner : ''}`);
     }
 }
 

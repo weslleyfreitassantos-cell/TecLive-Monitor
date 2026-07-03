@@ -552,7 +552,8 @@
         const limite = cliente.lives;
         const lives = getLives(currentUser);
         const ativas = lives.filter(live => {
-            const status = monitorStatusMap[live.videoId] || 'offline';
+            const statusKey = currentUser ? `${live.videoId}:${currentUser}` : live.videoId;
+            const status = monitorStatusMap[statusKey] || 'offline';
             return status === 'online' || status === 'degraded';
         }).length;
         const restantes = Math.max(0, limite - ativas);
@@ -958,7 +959,8 @@
             if (myLocalIp) {
                 link += (link.includes('?') ? '&' : '?') + 'localIp=' + myLocalIp;
             }
-            const status = monitorStatusMap[live.videoId] || 'offline';
+            const statusKey = currentUser ? `${live.videoId}:${currentUser}` : live.videoId;
+            const status = monitorStatusMap[statusKey] || 'offline';
             let statusLabel = '', statusClass = '';
             switch (status) {
                 case 'online':   statusLabel = 'ONLINE';   statusClass = 'status-online'; break;

@@ -58,14 +58,16 @@ class GlobalScheduler extends EventEmitter {
 
     register(monitor) {
         if (!monitor.videoId) return false;
-        this.monitors.set(monitor.videoId, monitor);
+        const key = monitor.owner ? `${monitor.videoId}:${monitor.owner}` : monitor.videoId;
+        this.monitors.set(key, monitor);
         if (!monitor.nextCheck) monitor.nextCheck = Date.now() + (monitor.intervalMs || 8000);
         this._startIfNeeded();
         return true;
     }
 
-    unregister(videoId) {
-        this.monitors.delete(videoId);
+    unregister(videoId, owner = null) {
+        const key = owner ? `${videoId}:${owner}` : videoId;
+        this.monitors.delete(key);
         if (this.monitors.size === 0) {
             this._stop();
         }
