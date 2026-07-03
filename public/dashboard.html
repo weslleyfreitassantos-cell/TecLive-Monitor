@@ -1309,7 +1309,7 @@
                     <td><span class="device-count" style="font-size: 18px;">${m.viewers ?? 0}</span></td>
                     <td><div class="ip-list">${ipHtml}</div></td>
                     <td><span class="renew-time" style="font-size: 16px;">${lastRenew}</span></td>
-                    <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}', '${m.owner}')">FINALIZAR</button></td>
+                    <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}', ${m.owner ? `'${m.owner}'` : 'null'})">FINALIZAR</button></td>
                 </tr>`;
             });
         }

@@ -1735,15 +1735,21 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
             }
         }
 
-        if (!monitorFound && !owner) {
+        if (!monitorFound) {
+            // Se não encontrou pela chave exata, tenta procurar qualquer instância do videoId
             for (const [key, mon] of converter.activeMonitors.entries()) {
-                if (key.startsWith(videoId + ':')) {
-                    monitorFound = mon;
-                    keyFound = key;
-                    actualOwner = key.split(':')[1];
-                    break;
+                const parts = key.split(':');
+                if (parts[0] === videoId) {
+                    // Se o owner foi passado, deve bater. Se não foi, pega o primeiro que achar.
+                    if (!owner || parts[1] === owner) {
+                        monitorFound = mon;
+                        keyFound = key;
+                        actualOwner = parts[1] || null;
+                        break;
+                    }
                 }
             }
+            // Fallback para chave simples (sem owner no formato videoId)
             if (!monitorFound && converter.activeMonitors.has(videoId)) {
                 monitorFound = converter.activeMonitors.get(videoId);
                 keyFound = videoId;
