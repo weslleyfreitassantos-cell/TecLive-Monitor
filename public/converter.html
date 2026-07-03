@@ -529,9 +529,15 @@
             const data = await resp.json();
             const map = {};
             data.monitors.forEach(m => {
-                map[m.videoId] = m.status || 'offline';
+                const statusKey = m.owner ? `${m.videoId}:${m.owner}` : m.videoId;
+                map[statusKey] = m.status || 'offline';
             });
             monitorStatusMap = map;
+            
+            if (currentUser) {
+                atualizarLivesRestantes();
+            }
+            
             return map;
         } catch (err) {
             console.warn('Erro ao buscar status:', err);
@@ -653,8 +659,14 @@
             const minhasLivesBackend = monitores.filter(m => m.owner === currentUser);
 
             const map = {};
-            monitores.forEach(m => { map[m.videoId] = m.status || 'offline'; });
+            monitores.forEach(m => { 
+                const statusKey = m.owner ? `${m.videoId}:${m.owner}` : m.videoId;
+                map[statusKey] = m.status || 'offline'; 
+            });
             monitorStatusMap = map;
+            
+            // ✅ Atualiza contadores após sincronizar
+            atualizarLivesRestantes();
 
             let livesLocal = getLives(currentUser);
             const backendIds = new Set(minhasLivesBackend.map(m => m.videoId));
@@ -875,7 +887,8 @@
             link += (link.includes('?') ? '&' : '?') + 'localIp=' + myLocalIp;
         }
 
-        const status = monitorStatusMap[primeira.videoId] || 'offline';
+        const statusKey = currentUser ? `${primeira.videoId}:${currentUser}` : primeira.videoId;
+        const status = monitorStatusMap[statusKey] || 'offline';
         let statusLabel = '', statusClass = '';
         switch (status) {
             case 'online':   statusLabel = 'ONLINE';   statusClass = 'status-online'; break;
