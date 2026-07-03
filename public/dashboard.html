@@ -540,13 +540,15 @@
             display: none;
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.7);
-            backdrop-filter: blur(6px);
+            background: rgba(0,0,0,0.8);
+            backdrop-filter: blur(8px);
             z-index: 200;
             justify-content: center;
             align-items: center;
             padding: 20px;
         }
+        /* Modal de IPs deve ficar à frente do modal de detalhes */
+        #ipModal { z-index: 300; }
         .modal-overlay.active { display: flex; }
 
         .modal-box.wide {
@@ -581,14 +583,14 @@
 
         .modal-box {
             background: #0f1322;
-            border: 1px solid rgba(46,204,113,0.2);
+            border: 1px solid rgba(46,204,113,0.3);
             border-radius: 16px;
-            max-width: 600px;
+            max-width: 800px;
             width: 100%;
             max-height: 90vh;
             overflow-y: auto;
             padding: 0;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+            box-shadow: 0 20px 80px rgba(0,0,0,0.9);
         }
         .modal-header {
             padding: 16px 24px;
@@ -639,13 +641,15 @@
             overflow-y: auto;
         }
         .modal-ip-item {
-            background: rgba(93,173,226,0.05);
-            padding: 8px 16px;
-            border-radius: 6px;
+            background: rgba(93,173,226,0.08);
+            padding: 12px 20px;
+            border-radius: 8px;
             font-family: monospace;
-            font-size: 15px;
+            font-size: 18px;
+            font-weight: 600;
             color: #5dade2;
-            border-left: 2px solid #5dade2;
+            border-left: 4px solid #5dade2;
+            margin-bottom: 4px;
         }
 
         .cadastro-modal .modal-box {

@@ -241,7 +241,7 @@ function isLocalIp(ip) {
 // ============================================================
 // RASTREAMENTO DE VIEWERS
 // ============================================================
-const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 45000; // 45 segundos (ajustado para expiração rápida)
+const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 45000; // 45 segundos
 
 function normalizeIp(ip) {
     if (!ip) return 'unknown';
@@ -252,7 +252,7 @@ function normalizeIp(ip) {
     return ip;
 }
 
-// Limpeza periódica global de IPs inativos (a cada 30 segundos)
+// Limpeza periódica global de IPs inativos (a cada 15 segundos para maior precisão)
 setInterval(() => {
     const now = Date.now();
     let changed = false;
@@ -260,9 +260,11 @@ setInterval(() => {
     // Limpar ownerViewers
     for (const [key, viewers] of ownerViewers.entries()) {
         for (const [ip, timestamp] of viewers.entries()) {
+            // Se o timestamp for muito antigo (inatividade real), remove
             if (now - timestamp > VIEWER_WINDOW_MS) {
                 viewers.delete(ip);
                 changed = true;
+                console.log(`🧹 [LIMPEZA] Dispositivo ${ip} removido de ${key} por inatividade.`);
             }
         }
         if (viewers.size === 0) {
@@ -287,7 +289,7 @@ setInterval(() => {
         }
     }
     if (accessChanged) saveViewerAccess(viewerAccess);
-}, 30000);
+}, 15000);
 
 function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
     const now = Date.now();
@@ -386,10 +388,13 @@ function renewViewersForMonitor(owner, videoId) {
         if (hasRecentActivity) {
             viewers.set(ip, now);
             renewed++;
-        } else if ((now - timestamp) > VIEWER_WINDOW_MS) {
-            viewers.delete(ip);
-            removed++;
-            console.log(`[${key}] 🔌 IP ${ip} removido por inatividade`);
+        } else {
+            // Se não há atividade recente no activityMap, e o tempo no ownerViewers expirou
+            if ((now - timestamp) > VIEWER_WINDOW_MS) {
+                viewers.delete(ip);
+                removed++;
+                console.log(`[${key}] 🔌 IP ${ip} removido por inatividade`);
+            }
         }
     }
 
