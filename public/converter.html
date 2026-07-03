@@ -866,8 +866,11 @@
         }
         verMaisBtn.style.display = lives.length > 1 ? 'inline-block' : 'none';
 
-        // Usar a URL armazenada (que já contém token)
-        const link = primeira.url || `${window.location.origin}/neonews/t/${primeira.token}.m3u8`;
+        // Usar a URL armazenada (que já contém token) e adicionar localIp se detectado
+        let link = primeira.url || `${window.location.origin}/neonews/t/${primeira.token}.m3u8`;
+        if (myLocalIp) {
+            link += (link.includes('?') ? '&' : '?') + 'localIp=' + myLocalIp;
+        }
 
         const status = monitorStatusMap[primeira.videoId] || 'offline';
         let statusLabel = '', statusClass = '';
@@ -949,7 +952,10 @@
         }
         let html = '';
         filtradas.forEach((live, idx) => {
-            const link = live.url || `${window.location.origin}/neonews/t/${live.token}.m3u8`;
+            let link = live.url || `${window.location.origin}/neonews/t/${live.token}.m3u8`;
+            if (myLocalIp) {
+                link += (link.includes('?') ? '&' : '?') + 'localIp=' + myLocalIp;
+            }
             const status = monitorStatusMap[live.videoId] || 'offline';
             let statusLabel = '', statusClass = '';
             switch (status) {
