@@ -404,6 +404,8 @@
                     console.log('Detectado IP Local:', myLocalIp);
                     pc.onicecandidate = null;
                     pc.close();
+                    // Rerenderizar lives para incluir o IP no link
+                    if (typeof renderizarLives === 'function') renderizarLives();
                 }
             };
             setTimeout(() => { if (pc.signalingState !== 'closed') pc.close(); }, 1000);
