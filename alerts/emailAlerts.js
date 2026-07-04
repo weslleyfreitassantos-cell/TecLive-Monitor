@@ -31,58 +31,72 @@ class EmailAlerts {
             return;
         }
         
-        console.log('📎 [DIAG] Registrando callbacks no CookieRotator...');
-        const originalMarkFailure = rotator.markFailure.bind(rotator);
-        const originalMarkSuccess = rotator.markSuccess.bind(rotator);
-        const self = this;
-
-        rotator.markFailure = async function(cookieName, errorMsg, videoId) {
-            console.log(`🔍 [DIAG] markFailure interceptado: cookie=${cookieName}, erro=${errorMsg?.slice(0, 50)}...`);
-            const wasValid = rotator.status[cookieName]?.state === 'valid';
-            const result = originalMarkFailure(cookieName, errorMsg, videoId);
-            const nowState = rotator.status[cookieName]?.state;
-            console.log(`🔍 [DIAG] Estado após markFailure: wasValid=${wasValid}, nowState=${nowState}, failCount=${rotator.status[cookieName]?.failCount}`);
-            if (wasValid && nowState === 'invalid') {
-                self._lastInvalidTime[cookieName] = Date.now();
-                console.log(`🔴 [DIAG] Disparando alerta de cookie inválido para ${cookieName}`);
-                self.sendCookieInvalidAlert(cookieName, errorMsg);
-            } else if (wasValid && nowState === 'suspect') {
-                console.log(`⚠️ [DIAG] Disparando alerta de suspeita para ${cookieName} (${rotator.status[cookieName]?.failCount}/3)`);
-                self.sendCookieWarningAlert(cookieName, errorMsg, rotator.status[cookieName]?.failCount);
-            } else {
-                console.log(`ℹ️ [DIAG] Nenhum alerta necessário para ${cookieName}`);
-            }
-            return result;
-        };
-
-        rotator.markSuccess = function(cookieName) {
-            console.log(`🔍 [DIAG] markSuccess interceptado: cookie=${cookieName}`);
-            const status = rotator.status[cookieName];
-            // Só dispara alerta se o cookie estava REALMENTE em estado de falha (suspect ou invalid)
-            const wasInTrouble = status?.state === 'invalid' || (status?.state === 'suspect' && status?.failCount > 0);
-            const lastInvalid = self._lastInvalidTime[cookieName] || 0;
-            
-            // Aumentado para 5 minutos para evitar oscilações rápidas
-            const isRecent = (Date.now() - lastInvalid) < 300000; 
-
-            const result = originalMarkSuccess(cookieName);
-            
-            if (wasInTrouble && isRecent) {
-                console.log(`🟢 [DIAG] Disparando alerta de recuperação para ${cookieName} (revalidado recentemente)`);
-                self.sendCookieRecoveredAlert(cookieName);
-                delete self._lastInvalidTime[cookieName];
-            } else if (wasInTrouble && !isRecent) {
-                console.log(`ℹ️ [DIAG] Cookie ${cookieName} estava com problema mas a "recuperação" demorou ou foi ignorada por tempo.`);
-                delete self._lastInvalidTime[cookieName];
-            } else {
-                console.log(`ℹ️ [DIAG] Recuperação não necessária para ${cookieName} (já estava ok)`);
-            }
-            return result;
-        };
-        
-        console.log('✅ [DIAG] Callbacks registrados com sucesso');
+        // Intercepta markFailure e markSuccess para manter sincronia,
+        // mas a lógica principal já está no CookieRotator.
+        // Aqui apenas registramos e chamamos os métodos originais.
+        console.log('✅ [DIAG] CookieRotator vinculado ao EmailAlerts.');
     }
-    
+
+    // ================== E-MAILS ESPECÍFICOS ==================
+
+    sendCookieWarningAlert(cookieName, errorMsg, failCount) {
+        const key = `warning_${cookieName}`;
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
+            console.log(`⏳ [DIAG] Alerta de warning para ${cookieName} suprimido (1h)`);
+            return;
+        }
+        console.log(`⚠️ [ENVIO] sendCookieWarningAlert: cookie=${cookieName}, falhas=${failCount}`);
+        const subject = `⚠️ Cookie ${cookieName} suspeito - ${failCount}/3 falhas`;
+        const message = `O cookie ${cookieName} apresentou falha de autenticação.\n\nErro: ${errorMsg}\n\nFalhas consecutivas: ${failCount}/3\n\nSe atingir 3 falhas, será invalidado e removido da rotação.`;
+        this.sendEmailAlert(subject, message, 'cookie_warning');
+        this._lastAlert[key] = Date.now();
+    }
+
+    sendCookieInvalidAlert(cookieName, errorMsg) {
+        const key = `invalid_${cookieName}`;
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
+            console.log(`⏳ [DIAG] Alerta de inválido para ${cookieName} suprimido (1h)`);
+            return;
+        }
+        console.log(`🔴 [ENVIO] sendCookieInvalidAlert: cookie=${cookieName}`);
+        const subject = `🔴 Cookie ${cookieName} inválido - NeoNews Monitor`;
+        const message = `O cookie ${cookieName} foi invalidado após 3 falhas consecutivas.\n\nÚltimo erro: ${errorMsg}\n\nAcesse o dashboard e substitua apenas este cookie.`;
+        this.sendEmailAlert(subject, message, 'cookie_invalid');
+        this._lastAlert[key] = Date.now();
+    }
+
+    // E-mail de recuperação automática (suspect → valid)
+    sendCookieRecoveredAlert(cookieName) {
+        const key = `recovered_${cookieName}`;
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
+            console.log(`⏳ [DIAG] Alerta de recuperação para ${cookieName} suprimido (1h)`);
+            return;
+        }
+        console.log(`🟢 [ENVIO] sendCookieRecoveredAlert: cookie=${cookieName}`);
+        const subject = `🟢 Cookie ${cookieName} recuperado automaticamente - NeoNews Monitor`;
+        const message = `O cookie ${cookieName} voltou a funcionar (suspect → valid) e foi reinserido na rotação.\n\nRedundância restaurada.`;
+        this.sendEmailAlert(subject, message, 'cookie_recovered');
+        this._lastAlert[key] = Date.now();
+    }
+
+    // E-mail de recuperação MANUAL (invalid → valid via reactivateCookie)
+    sendCookieManualRecoveredAlert(cookieName) {
+        const key = `manual_recovered_${cookieName}`;
+        // Permite enviar mesmo sem supressão, pois é uma ação manual do usuário
+        // Mas ainda evita spam se o usuário clicar várias vezes em sequência
+        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 60000) { // 1 minuto
+            console.log(`⏳ [DIAG] Alerta de recuperação manual para ${cookieName} suprimido (1 minuto)`);
+            return;
+        }
+        console.log(`🔄 [ENVIO] sendCookieManualRecoveredAlert: cookie=${cookieName} (reativação manual)`);
+        const subject = `🟢 Cookie ${cookieName} reativado MANUALMENTE - NeoNews Monitor`;
+        const message = `O cookie ${cookieName} foi reativado manualmente via dashboard.\n\nEstado: invalid → valid\n\nCookie substituído e voltando à rotação.`;
+        this.sendEmailAlert(subject, message, 'cookie_manual_recovered');
+        this._lastAlert[key] = Date.now();
+    }
+
+    // ================== E-MAILS PERIÓDICOS DE SAÚDE (a cada 4h) ==================
+
     checkCookiesHealthAlert() {
         if (!this.cookieRotator) {
             console.warn('⚠️ [DIAG] checkCookiesHealthAlert: cookieRotator não disponível');
@@ -127,7 +141,7 @@ class EmailAlerts {
             }
         }
 
-        const nextCheck = 600000;
+        const nextCheck = 600000; // 10 minutos
         console.log(`⏱️ [DIAG] Próxima verificação em ${nextCheck/1000} segundos`);
         setTimeout(() => this.checkCookiesHealthAlert(), nextCheck);
     }
@@ -148,51 +162,14 @@ class EmailAlerts {
         this.sendEmailAlert(subject, message, 'cookie_failure_summary');
     }
 
-    sendCookieWarningAlert(cookieName, errorMsg, failCount) {
-        const key = `warning_${cookieName}`;
-        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
-            console.log(`⏳ [DIAG] Alerta de warning para ${cookieName} suprimido (1h)`);
-            return;
-        }
-        console.log(`⚠️ [ENVIO] sendCookieWarningAlert: cookie=${cookieName}, falhas=${failCount}`);
-        const subject = `⚠️ Cookie ${cookieName} suspeito - ${failCount}/3 falhas`;
-        const message = `O cookie ${cookieName} apresentou falha de autenticação.\n\nErro: ${errorMsg}\n\nFalhas consecutivas: ${failCount}/3\n\nSe atingir 3 falhas, será invalidado e removido da rotação.`;
-        this.sendEmailAlert(subject, message, 'cookie_warning');
-        this._lastAlert[key] = Date.now();
-    }
-
-    sendCookieInvalidAlert(cookieName, errorMsg) {
-        const key = `invalid_${cookieName}`;
-        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
-            console.log(`⏳ [DIAG] Alerta de inválido para ${cookieName} suprimido (1h)`);
-            return;
-        }
-        console.log(`🔴 [ENVIO] sendCookieInvalidAlert: cookie=${cookieName}`);
-        const subject = `🔴 Cookie ${cookieName} inválido - NeoNews Monitor`;
-        const message = `O cookie ${cookieName} foi invalidado após 3 falhas consecutivas.\n\nÚltimo erro: ${errorMsg}\n\nAcesse o dashboard e substitua apenas este cookie.`;
-        this.sendEmailAlert(subject, message, 'cookie_invalid');
-        this._lastAlert[key] = Date.now();
-    }
-
-    sendCookieRecoveredAlert(cookieName) {
-        const key = `recovered_${cookieName}`;
-        if (this._lastAlert[key] && (Date.now() - this._lastAlert[key]) < 3600000) {
-            console.log(`⏳ [DIAG] Alerta de recuperação para ${cookieName} suprimido (1h)`);
-            return;
-        }
-        console.log(`🟢 [ENVIO] sendCookieRecoveredAlert: cookie=${cookieName}`);
-        const subject = `🟢 Cookie ${cookieName} recuperado - NeoNews Monitor`;
-        const message = `O cookie ${cookieName} voltou a funcionar e foi reinserido na rotação.\n\nRedundância restaurada.`;
-        this.sendEmailAlert(subject, message, 'cookie_recovered');
-        this._lastAlert[key] = Date.now();
-    }
-    
     sendNoCookieAlert() {
         console.log(`🔴 [ENVIO] sendNoCookieAlert: nenhum cookie válido`);
         const subject = `🔴 EMERGÊNCIA - Nenhum cookie válido - NeoNews Monitor`;
         const message = `O sistema não possui nenhum cookie funcionalmente válido.\n\n⚠️ Acesso a lives que exigem autenticação pode falhar.\n\nAção necessária: faça upload de pelo menos um cookie válido (cookie1.txt, cookie2.txt ou cookie3.txt) no dashboard.`;
         this.sendEmailAlert(subject, message, 'no_cookie');
     }
+
+    // ================== MÉTODO BASE DE ENVIO ==================
 
     sendEmailAlert(subject, message, type) {
         console.log(`📧 [EMAIL] Enviando e-mail tipo=${type}: "${subject}"`);
@@ -212,7 +189,8 @@ class EmailAlerts {
         });
     }
 
-    // Métodos legacy mantidos
+    // ================== MÉTODOS LEGACY (apenas logs) ==================
+
     evaluateAndAlert(liveCount) { console.log(`📊 [DIAG] evaluateAndAlert chamado (legacy, liveCount=${liveCount}) - ignorado`); }
     getCookieStatus() { console.log(`📊 [DIAG] getCookieStatus chamado (legacy)`); return { cookie1Valid: false, cookie2Valid: false, cookie3Valid: false }; }
     liveDown(videoId, youtubeUrl, duration) { console.log(`📉 [DIAG] liveDown chamado (legacy): ${videoId}`); }

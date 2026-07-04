@@ -64,6 +64,11 @@ class CookieRotator {
         }
     }
 
+    /**
+     * Marca falha para um cookie.
+     * Se atingir 3 falhas consecutivas, passa para 'invalid'.
+     * Se tiver 1 ou 2 falhas, fica 'suspect'.
+     */
     markFailure(cookieName, errorMsg, videoId = null) {
         if (!this.status[cookieName]) return;
         this._ensureAlertField(cookieName);
@@ -76,7 +81,7 @@ class CookieRotator {
 
         if (cookie.failCount >= 3 && (cookie.state === 'valid' || cookie.state === 'suspect')) {
             cookie.state = 'invalid';
-            cookie.failCount = 0;
+            cookie.failCount = 0; // zera para não acumular
             this.sendInvalidAlert(cookieName, errorMsg);
             console.log(`❌ Cookie ${cookieName} invalidado após 3 falhas.`);
         } else if (cookie.failCount >= 1 && cookie.failCount < 3 && cookie.state === 'valid') {
@@ -86,46 +91,104 @@ class CookieRotator {
         this.saveStatus();
     }
 
-    // 🔧 CORREÇÃO: ao recuperar, desliga o alerta automaticamente e limpa o histórico
+    /**
+     * Marca sucesso para um cookie.
+     * - Se estava 'suspect' → volta para 'valid' (e envia e-mail de recuperação).
+     * - Se estava 'invalid' → NÃO REATIVA automaticamente (apenas atualiza lastSuccess).
+     * - Se já estava 'valid' → apenas atualiza lastSuccess e desliga alerta.
+     */
     markSuccess(cookieName) {
         if (!this.status[cookieName]) return;
         this._ensureAlertField(cookieName);
 
         const cookie = this.status[cookieName];
-        const wasProblem = cookie.state === 'invalid' || cookie.state === 'suspect';
+        const previousState = cookie.state;
 
-        if (wasProblem) {
+        // Se estava invalid, NÃO reativa
+        if (previousState === 'invalid') {
+            cookie.lastSuccess = new Date().toISOString();
+            // Mantém estado 'invalid', não reseta contagem, não limpa reason
+            // Desliga o alerta? Não, pois o cookie continua inválido.
+            // O alerta só deve sumir quando o usuário reativar manualmente.
+            // Portanto, mantém alertActive = true (já estava)
+            console.log(`ℹ️ Cookie ${cookieName} funcionou, mas está marcado como 'invalid' até substituição manual.`);
+            this.saveStatus();
+            return;
+        }
+
+        // Se estava suspect, reativa e envia e-mail de recuperação
+        if (previousState === 'suspect') {
             cookie.state = 'valid';
             cookie.failCount = 0;
             cookie.reason = null;
             cookie.lastFailure = null;
-            cookie.alertActive = false;  // 🔥 DESLIGA O ALERTA AUTOMATICAMENTE
+            cookie.alertActive = false;
             this.sendRecoveryAlert(cookieName);
-            console.log(`✅ Cookie ${cookieName} recuperado e alerta desligado.`);
+            console.log(`✅ Cookie ${cookieName} recuperado (suspect → valid).`);
         } else {
-            // Se já estava válido, apenas garante que o alerta esteja desligado
+            // Já era valid: apenas mantém e desliga alerta se houver
             cookie.alertActive = false;
             cookie.reason = null;
-            cookie.lastFailure = null;
             console.log(`✅ Cookie ${cookieName} já estava válido. Alerta mantido desligado.`);
         }
         cookie.lastSuccess = new Date().toISOString();
         this.saveStatus();
     }
 
+    /**
+     * Reativa MANUALMENTE um cookie que está 'invalid'.
+     * Deve ser chamado apenas quando o usuário substituir o arquivo e clicar no botão.
+     */
+    reactivateCookie(cookieName) {
+        if (!this.status[cookieName]) return;
+        const cookie = this.status[cookieName];
+        if (cookie.state !== 'invalid') {
+            console.log(`ℹ️ Cookie ${cookieName} não está invalid, não é necessário reativar.`);
+            return;
+        }
+
+        // Verifica se o arquivo existe e tem tamanho mínimo
+        const cookiePath = path.join(this.cookiesDir, cookieName);
+        if (!fs.existsSync(cookiePath) || fs.statSync(cookiePath).size < 5000) {
+            console.error(`❌ Arquivo ${cookieName} não existe ou está vazio. Não é possível reativar.`);
+            return false;
+        }
+
+        cookie.state = 'valid';
+        cookie.failCount = 0;
+        cookie.reason = null;
+        cookie.lastFailure = null;
+        cookie.alertActive = false;
+        cookie.lastSuccess = new Date().toISOString();
+        this.saveStatus();
+
+        // Envia e-mail de recuperação por reativação manual
+        this.sendManualRecoveryAlert(cookieName);
+        console.log(`🔁 Cookie ${cookieName} reativado manualmente.`);
+        return true;
+    }
+
+    // ================== Envio de e-mails (delega ao EmailAlerts) ==================
+
     sendInvalidAlert(cookieName, errorMsg) {
-        if (!this.emailAlerts) return;
-        const subject = `🔴 Cookie ${cookieName} inválido - NeoNews Monitor`;
-        const message = `O cookie ${cookieName} foi invalidado após 3 falhas consecutivas.\n\nÚltimo erro: ${errorMsg}\n\nAcesse o dashboard e substitua apenas este cookie.`;
-        this.emailAlerts.sendEmailAlert(subject, message, 'cookie_invalid');
+        if (this.emailAlerts) {
+            this.emailAlerts.sendCookieInvalidAlert(cookieName, errorMsg);
+        }
     }
 
     sendRecoveryAlert(cookieName) {
-        if (!this.emailAlerts) return;
-        const subject = `🟢 Cookie ${cookieName} recuperado - NeoNews Monitor`;
-        const message = `O cookie ${cookieName} voltou a funcionar e o alerta foi removido automaticamente.`;
-        this.emailAlerts.sendEmailAlert(subject, message, 'cookie_recovered');
+        if (this.emailAlerts) {
+            this.emailAlerts.sendCookieRecoveredAlert(cookieName);
+        }
     }
+
+    sendManualRecoveryAlert(cookieName) {
+        if (this.emailAlerts) {
+            this.emailAlerts.sendCookieManualRecoveredAlert(cookieName);
+        }
+    }
+
+    // ================== Rotação de cookies ==================
 
     getNextCookiePath() {
         const validCookies = this.cookies.filter(cookie => {
@@ -136,6 +199,7 @@ class CookieRotator {
         });
 
         if (validCookies.length === 0) {
+            // Fallback: tenta qualquer arquivo com tamanho
             for (const cookie of this.cookies) {
                 const cookiePath = path.join(this.cookiesDir, cookie);
                 if (fs.existsSync(cookiePath)) return cookiePath;
@@ -169,28 +233,7 @@ class CookieRotator {
         return false;
     }
 
-    async replaceCookie(cookieName, newCookiePath) {
-        const targetPath = path.join(this.cookiesDir, cookieName);
-        if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
-        fs.renameSync(newCookiePath, targetPath);
-        this.status[cookieName] = {
-            state: 'valid',
-            failCount: 0,
-            lastFailure: null,
-            lastSuccess: Date.now(),
-            reason: null,
-            alertActive: false
-        };
-        this.saveStatus();
-        console.log(`🔄 Cookie ${cookieName} substituído e marcado como válido. Alerta desligado.`);
-    }
-
-    clearAlert(cookieName) {
-        if (!this.status[cookieName]) return;
-        this.status[cookieName].alertActive = false;
-        this.saveStatus();
-        console.log(`🔕 Alerta de ${cookieName} desligado manualmente.`);
-    }
+    // ================== Status para o dashboard ==================
 
     getFunctionalStatus() {
         const result = {};
