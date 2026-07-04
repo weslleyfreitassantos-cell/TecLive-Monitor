@@ -249,12 +249,11 @@ function normalizeIp(ip) {
     return ip;
 }
 
-// Limpeza periódica global de IPs inativos (a cada 15 segundos para maior precisão)
+// Limpeza periódica global de IPs inativos (a cada 15 segundos)
 setInterval(() => {
     const now = Date.now();
     let changed = false;
     
-    // Limpar ownerViewers
     for (const [key, viewers] of ownerViewers.entries()) {
         for (const [ip, timestamp] of viewers.entries()) {
             if (now - timestamp > VIEWER_WINDOW_MS) {
@@ -270,7 +269,6 @@ setInterval(() => {
     }
     if (changed) saveOwnerViewers(ownerViewers);
 
-    // Limpar viewerAccess
     let accessChanged = false;
     for (const [key, viewers] of viewerAccess.entries()) {
         for (const [ip, timestamp] of viewers.entries()) {
@@ -449,12 +447,10 @@ function getTotalViewers() {
 }
 
 // ============================================================
-// FILTRO DE QUALIDADE DO MANIFESTO MASTER (NÃO UTILIZADO NA CORREÇÃO)
-// Mantido apenas para referência, mas não será chamado no proxy.
+// FILTRO DE QUALIDADE (NÃO UTILIZADO - mantido apenas para compatibilidade)
 // ============================================================
 function filterMasterByMaxHeight(masterContent, maxHeight) {
     // Esta função não é mais utilizada para evitar travamentos.
-    // Retorna o conteúdo original sem modificações.
     console.warn('[filterMaster] Chamado, mas retornando conteúdo original (filtro desativado)');
     return masterContent;
 }
@@ -661,10 +657,10 @@ function removePersistedMapping(videoId, owner) {
 // ========== CACHE ==========
 const m3u8CachePromises = new Map();
 const m3u8CacheContent = new Map();
-const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 15000; // 15s
+const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 15000;
 
 const REFRESH_WAIT_MS = 15000;
-const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 120000; // 2 minutos
+const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 120000;
 
 const lastGoodM3u8 = new Map();
 
@@ -807,7 +803,7 @@ function logRequestSummary(videoId, ip, owner) {
 }
 
 // ============================================================
-// HANDLER DO PROXY M3U8 (com logs reduzidos)
+// HANDLER DO PROXY M3U8 (com logs reduzidos e proxy de playlists)
 // ============================================================
 async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     const reqStart = Date.now();
@@ -821,7 +817,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     let finalMaxHeight = maxHeight || envMaxHeight;
     if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
         finalMaxHeight = urlMaxHeight;
-        console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${finalMaxHeight}p (ignorada - servindo master original)`);
+        console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${finalMaxHeight}p (proxy de playlist)`);
     }
 
     let monitor = null;
@@ -923,9 +919,30 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     monitor.lastAccess = Date.now();
 
     // ============================================================
-    // 🔧 CORREÇÃO DEFINITIVA: Servir o master ORIGINAL sem filtro
-    // Isso elimina os travamentos causados pelo master artificial.
+    // 🔧 NOVO: PROXY DE PLAYLISTS DE QUALIDADE
     // ============================================================
+    // Se a requisição tem o parâmetro max, é uma solicitação de playlist de qualidade.
+    if (urlMaxHeight && monitor._playlistUrls && monitor._playlistUrls[urlMaxHeight]) {
+        const playlistUrl = monitor._playlistUrls[urlMaxHeight];
+        console.log(`[${videoId}] 🎯 Servindo playlist de qualidade ${urlMaxHeight}p diretamente do YouTube`);
+        try {
+            const result = await fetchM3u8WithCache(videoId + '_' + urlMaxHeight, playlistUrl);
+            res.writeHead(200, {
+                'Content-Type': 'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            });
+            res.end(result.content);
+            return;
+        } catch (err) {
+            console.error(`[${videoId}] ❌ Erro ao buscar playlist ${urlMaxHeight}:`, err.message);
+            // Fallback: tenta servir o master original
+        }
+    }
+
+    // Se não for uma requisição de qualidade, verifica se é o master.
     if (monitor._masterContent && monitor._masterContent.isMaster) {
         const rawContent = monitor._masterContent.content;
         console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (sem filtro)`);
@@ -941,6 +958,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         return;
     }
 
+    // Caso não tenha masterContent (ex: monitor ainda sem metadados), tenta o fetch normal
     try {
         const result = await fetchM3u8WithCache(videoId, monitor.m3u8Url);
 
@@ -961,7 +979,6 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         }
 
         if (isMaster) {
-            // 🔧 Também aqui servimos o master original sem filtro
             console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (via cache)`);
             res.writeHead(200, {
                 'Content-Type': 'application/vnd.apple.mpegurl',
@@ -975,7 +992,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
             return;
         }
 
-        // --- Para playlists de qualidade (não master), aplicamos a correção de regressão ---
+        // Para playlists de qualidade (não master), aplicamos a correção de regressão
         const parsed = parseM3u8Info(contentToServe);
         const prev = lastServedSequence.get(videoId);
 
@@ -1061,14 +1078,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                         });
                     }
                     if (isRenewedMaster) {
-                        // Serve master original sem filtro
-                        logProxyAccess(videoId, {
-                            statusCode: 200,
-                            fromCache: renewed.fromCache,
-                            elapsedMs: Date.now() - reqStart,
-                            content: renewedContent,
-                            monitorSeq: undefined
-                        });
+                        console.log(`[${videoId}] 🎯 Servindo master renovado (sem filtro)`);
                         res.writeHead(200, {
                             'Content-Type': 'application/vnd.apple.mpegurl',
                             'Access-Control-Allow-Origin': '*',
@@ -1140,7 +1150,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
 }
 
 // ============================================================
-// ROTAS (as mesmas do original, mantidas)
+// ROTAS (mantidas inalteradas)
 // ============================================================
 app.get('/converter.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'public/converter.html'));

@@ -117,12 +117,12 @@ class LiveMonitor {
         
         // ✅ NOVO: armazenar maxHeight (passado pelo proxy)
         this._currentMaxHeight = null; // será setado via proxy
-        
+
+        // ✅ NOVO: armazenar URLs das playlists de qualidade (altura -> URL)
+        this._playlistUrls = {};
     }
 
     calculateMaxRepeats() {
-        // Aumentamos a tolerância para 6 verificações (aprox. 48 segundos com intervalo de 8s)
-        // Isso evita renovações excessivas que causam o BehindLiveWindowException no ExoPlayer
         return Math.max(6, Math.ceil(this.maxStallTimeMs / this.intervalMs));
     }
 
@@ -142,7 +142,6 @@ class LiveMonitor {
     // ============================================================
     _runYtdlp(args, timeout = YTDLP_TIMEOUT) {
         return new Promise(async (resolve, reject) => {
-            // Remove qualquer -f ou --format
             const filteredArgs = args.filter((arg, index) => {
                 if (arg === '-f' || arg === '--format') return false;
                 if (index > 0 && (args[index-1] === '-f' || args[index-1] === '--format')) return false;
@@ -157,7 +156,6 @@ class LiveMonitor {
                 if (!finalArgs.includes('--playlist-end')) finalArgs.push('--playlist-end', '1');
             }
 
-            // Identifica cookie atual
             let cookieIndex = finalArgs.indexOf('--cookies');
             let cookiePath = null;
             if (cookieIndex !== -1 && finalArgs.length > cookieIndex + 1) {
@@ -176,7 +174,6 @@ class LiveMonitor {
             const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
             const cookieName = cookiePath ? path.basename(cookiePath) : null;
 
-            // Função que executa com um cookie específico e notifica falha
             const execWithCookie = (cookieFile) => {
                 return new Promise((resolveExec, rejectExec) => {
                     const argsWithCookie = [...finalArgs];
@@ -221,10 +218,8 @@ class LiveMonitor {
                 });
             };
 
-            // Tenta com o cookie atual
             try {
                 const result = await execWithCookie(cookiePath);
-                // Sucesso – marca sucesso no cookie
                 if (this._cookieRotator && cookieName) {
                     this._cookieRotator.markSuccess(cookieName);
                 }
@@ -234,13 +229,11 @@ class LiveMonitor {
                 const isNoFormats = errorMsg.includes('No video formats found');
                 const isAuth = errorMsg.includes('403') || errorMsg.includes('401') || errorMsg.includes('sign in') || errorMsg.includes('cookies');
 
-                // Se falhou com este cookie, marca falha (se for erro de formato ou autenticação)
                 if ((isNoFormats || isAuth) && this._cookieRotator && cookieName) {
                     console.log(`🔴 Marcando falha para ${cookieName}: ${errorMsg.slice(0, 100)}`);
                     this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId);
                 }
 
-                // Se for "No video formats found", tenta os outros cookies
                 if (isNoFormats) {
                     console.log(`⚠️ Falha com cookie ${cookieName}, tentando alternativos...`);
                     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
@@ -252,7 +245,6 @@ class LiveMonitor {
                             console.log(`🔄 Tentando com ${file}...`);
                             const result = await execWithCookie(fullPath);
                             console.log(`✅ Sucesso com ${file}`);
-                            // Marca sucesso APENAS para o cookie que realmente funcionou
                             if (this._cookieRotator) {
                                 this._cookieRotator.markSuccess(file);
                             }
@@ -268,7 +260,6 @@ class LiveMonitor {
                                     this._cookieRotator.markFailure(file, innerMsg, this.videoId);
                                 }
                             } else {
-                                // Outro tipo de erro, propaga
                                 throw innerErr;
                             }
                         }
@@ -277,7 +268,6 @@ class LiveMonitor {
                         reject(new Error('Todos os cookies falharam com No video formats found'));
                     }
                 } else {
-                    // Outro erro, propaga
                     reject(err);
                 }
             }
@@ -292,7 +282,6 @@ class LiveMonitor {
         }
         try {
             const cookiePath = this.getCookiePath();
-            // ✅ SEM -f, com --flat-playlist e --playlist-end 1
             const args = ['--dump-json', '--flat-playlist', '--playlist-end', '1', this.youtubeUrl];
             if (cookiePath) args.unshift('--cookies', cookiePath);
             const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
@@ -364,20 +353,18 @@ class LiveMonitor {
     }
 
     // ============================================================
-    // ✅ FUNÇÃO CORRIGIDA: RECEBE maxHeight POR PARÂMETRO
+    // ✅ FUNÇÃO CORRIGIDA: RECEBE maxHeight POR PARÂMETRO E ARMAZENA PLAYLISTS
     // ============================================================
     extractHlsUrl(metadata, maxHeight = null) {
         if (!metadata.formats || !Array.isArray(metadata.formats)) return null;
 
-        // Usa o maxHeight passado, ou o armazenado no monitor, ou o do .env, ou 1080
         const effectiveMax = maxHeight !== null ? maxHeight :
                            (this._currentMaxHeight !== null ? this._currentMaxHeight :
                            parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080);
 
-        // ✅ Se o maxHeight foi passado explicitamente (pela URL), forçamos construção artificial
         const forceArtificial = (maxHeight !== null || this._currentMaxHeight !== null);
 
-        // 1. Tentar usar master original (se existir) APENAS se não for forçado
+        // 1. Tenta usar master original (se existir) APENAS se não for forçado
         if (!forceArtificial) {
             const masterFormat = metadata.formats.find(f =>
                 f.protocol === 'm3u8_native' &&
@@ -388,26 +375,26 @@ class LiveMonitor {
             if (masterFormat) {
                 this._masterContent = null;
                 console.log(`[${this.videoId}] 📺 Usando master original do YouTube.`);
+                // Mesmo com master original, ainda preenchemos playlistUrls a partir das variantes
+                this._populatePlaylistUrls(metadata.formats);
                 return masterFormat.url;
             }
         } else {
             console.log(`[${this.videoId}] 📺 Forçando construção artificial devido ao parâmetro max.`);
         }
 
-        // 2. Construir master artificial a partir das variantes, respeitando maxHeight
+        // 2. Construir master artificial a partir das variantes
         let hlsFormats = metadata.formats.filter(f => 
             (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && 
             f.vcodec !== 'none' && 
             f.acodec !== 'none' &&
-            f.height // tem altura definida (não é master)
+            f.height
         );
 
         if (hlsFormats.length === 0) return null;
 
-        // Filtra pela altura máxima
         hlsFormats = hlsFormats.filter(f => (f.height || 0) <= effectiveMax);
         if (hlsFormats.length === 0) {
-            // Se nenhum formato atende o max, pega o menor disponível
             hlsFormats = metadata.formats.filter(f => 
                 (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && 
                 f.vcodec !== 'none' && 
@@ -418,19 +405,25 @@ class LiveMonitor {
             const fallback = hlsFormats[0];
             console.log(`[${this.videoId}] ⚠️ Nenhum formato ≤ ${effectiveMax}p, usando fallback ${fallback.height}p.`);
             this._masterContent = null;
+            this._populatePlaylistUrls(hlsFormats);
             return fallback.url;
         }
 
-        // Ordena por altura (crescente)
         hlsFormats.sort((a, b) => (a.height || 0) - (b.height || 0));
 
         console.log(`[${this.videoId}] 🛠️ Construindo manifesto master artificial com ${hlsFormats.length} qualidades (max ${effectiveMax}p).`);
 
-        // Escolhe a melhor variante (a de maior altura) como URL principal
+        // Preencher playlistUrls
+        const playlistUrls = {};
+        hlsFormats.forEach(f => {
+            const height = f.height || 360;
+            playlistUrls[height] = f.url;
+        });
+        this._playlistUrls = playlistUrls;
+
         const bestVariant = hlsFormats[hlsFormats.length - 1];
         const bestUrl = bestVariant.url;
 
-        // Gera as linhas do master
         const masterLines = hlsFormats.map(f => {
             const height = f.height || 360;
             const width = f.width || Math.round(height * 16/9);
@@ -447,15 +440,25 @@ class LiveMonitor {
 
         const masterContent = '#EXTM3U\n' + masterLines.join('\n');
 
-        // ✅ Armazena o master artificial na instância
         this._masterContent = {
             isMaster: true,
             content: masterContent,
             urls: hlsFormats.map(f => f.url)
         };
 
-        // Retorna a URL da melhor variante (para compatibilidade)
         return bestUrl;
+    }
+
+    // Helper para preencher playlistUrls a partir de uma lista de formats
+    _populatePlaylistUrls(formats) {
+        const playlistUrls = {};
+        (formats || []).forEach(f => {
+            if (f.url && (f.protocol === 'm3u8_native' || f.url.includes('.m3u8')) && f.height) {
+                const height = f.height || 360;
+                playlistUrls[height] = f.url;
+            }
+        });
+        this._playlistUrls = playlistUrls;
     }
 
     // ============================================================
@@ -611,7 +614,6 @@ class LiveMonitor {
         try {
             const metadataResult = await this.getLiveMetadata(true);
             if (!metadataResult.success) throw new Error(metadataResult.error);
-            // Passa o maxHeight atual para a extração
             const newUrl = this.extractHlsUrl(metadataResult.metadata, this._currentMaxHeight);
             if (!newUrl) throw new Error('Nova URL não encontrada');
             if (newUrl !== this.m3u8Url) {
@@ -677,7 +679,6 @@ class LiveMonitor {
                 console.log(`[${this.videoId}] 🛑 Live encerrada confirmada após 2min. Parando monitor.`);
                 this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada (confirmado)');
                 this.applyDerivedState();
-                // 👇 NOVO: chama o callback de encerramento
                 if (this._onEnd) {
                     this._onEnd(this.videoId, this.owner);
                 }
@@ -695,17 +696,12 @@ class LiveMonitor {
         const metadata = metadataResult.metadata;
         const isValid = this.validateMetadata(metadata);
         if (isValid === false) {
-            // Se o metadata indicar que não é live, podemos disparar o encerramento imediato?
-            // Mas já tratamos no validateMetadata como CRITICAL, que leva a ENDED.
-            // O applyDerivedState abaixo vai mudar o estado para ENDED.
             this.applyDerivedState();
-            // Se o estado for ENDED, chamamos o callback
             if (this.liveState === LiveState.ENDED && this._onEnd) {
                 this._onEnd(this.videoId, this.owner);
             }
             return;
         }
-        // Passa o maxHeight atual para a extração
         const newUrl = this.extractHlsUrl(metadata, this._currentMaxHeight);
         if (!newUrl) {
             console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada`);
