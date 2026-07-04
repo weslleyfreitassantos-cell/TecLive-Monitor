@@ -8,7 +8,6 @@ class CookieRotator {
         this.cookies = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
         this.currentIndex = 0;
         this.emailAlerts = null;
-
         this.loadStatus();
     }
 
@@ -64,11 +63,6 @@ class CookieRotator {
         }
     }
 
-    /**
-     * Marca falha para um cookie.
-     * Se atingir 3 falhas consecutivas, passa para 'invalid'.
-     * Se tiver 1 ou 2 falhas, fica 'suspect'.
-     */
     markFailure(cookieName, errorMsg, videoId = null) {
         if (!this.status[cookieName]) return;
         this._ensureAlertField(cookieName);
@@ -81,7 +75,7 @@ class CookieRotator {
 
         if (cookie.failCount >= 3 && (cookie.state === 'valid' || cookie.state === 'suspect')) {
             cookie.state = 'invalid';
-            cookie.failCount = 0; // zera para não acumular
+            cookie.failCount = 0;
             this.sendInvalidAlert(cookieName, errorMsg);
             console.log(`❌ Cookie ${cookieName} invalidado após 3 falhas.`);
         } else if (cookie.failCount >= 1 && cookie.failCount < 3 && cookie.state === 'valid') {
@@ -93,9 +87,8 @@ class CookieRotator {
 
     /**
      * Marca sucesso para um cookie.
-     * - Se estava 'suspect' → volta para 'valid' (e envia e-mail de recuperação).
-     * - Se estava 'invalid' → NÃO REATIVA automaticamente (apenas atualiza lastSuccess).
-     * - Se já estava 'valid' → apenas atualiza lastSuccess e desliga alerta.
+     * NUNCA REATIVA automaticamente. Apenas atualiza lastSuccess.
+     * Se o cookie estiver com problema (suspect/invalid), mantém o estado e alerta.
      */
     markSuccess(cookieName) {
         if (!this.status[cookieName]) return;
@@ -104,50 +97,33 @@ class CookieRotator {
         const cookie = this.status[cookieName];
         const previousState = cookie.state;
 
-        // Se estava invalid, NÃO reativa
-        if (previousState === 'invalid') {
-            cookie.lastSuccess = new Date().toISOString();
-            // Mantém estado 'invalid', não reseta contagem, não limpa reason
-            // Desliga o alerta? Não, pois o cookie continua inválido.
-            // O alerta só deve sumir quando o usuário reativar manualmente.
-            // Portanto, mantém alertActive = true (já estava)
-            console.log(`ℹ️ Cookie ${cookieName} funcionou, mas está marcado como 'invalid' até substituição manual.`);
+        cookie.lastSuccess = new Date().toISOString();
+
+        if (previousState === 'invalid' || previousState === 'suspect') {
+            console.log(`ℹ️ Cookie ${cookieName} funcionou, mas mantém estado '${previousState}' até substituição manual.`);
             this.saveStatus();
             return;
         }
 
-        // Se estava suspect, reativa e envia e-mail de recuperação
-        if (previousState === 'suspect') {
-            cookie.state = 'valid';
-            cookie.failCount = 0;
-            cookie.reason = null;
-            cookie.lastFailure = null;
-            cookie.alertActive = false;
-            this.sendRecoveryAlert(cookieName);
-            console.log(`✅ Cookie ${cookieName} recuperado (suspect → valid).`);
-        } else {
-            // Já era valid: apenas mantém e desliga alerta se houver
-            cookie.alertActive = false;
-            cookie.reason = null;
-            console.log(`✅ Cookie ${cookieName} já estava válido. Alerta mantido desligado.`);
-        }
-        cookie.lastSuccess = new Date().toISOString();
+        // Se já era válido, apenas mantém e desliga alerta se houver
+        cookie.alertActive = false;
+        cookie.reason = null;
+        console.log(`✅ Cookie ${cookieName} já estava válido. Alerta mantido desligado.`);
         this.saveStatus();
     }
 
     /**
-     * Reativa MANUALMENTE um cookie que está 'invalid'.
+     * Reativa MANUALMENTE um cookie que está 'suspect' ou 'invalid'.
      * Deve ser chamado apenas quando o usuário substituir o arquivo e clicar no botão.
      */
     reactivateCookie(cookieName) {
-        if (!this.status[cookieName]) return;
+        if (!this.status[cookieName]) return false;
         const cookie = this.status[cookieName];
-        if (cookie.state !== 'invalid') {
-            console.log(`ℹ️ Cookie ${cookieName} não está invalid, não é necessário reativar.`);
-            return;
+        if (cookie.state !== 'invalid' && cookie.state !== 'suspect') {
+            console.log(`ℹ️ Cookie ${cookieName} não está com problema, não é necessário reativar.`);
+            return false;
         }
 
-        // Verifica se o arquivo existe e tem tamanho mínimo
         const cookiePath = path.join(this.cookiesDir, cookieName);
         if (!fs.existsSync(cookiePath) || fs.statSync(cookiePath).size < 5000) {
             console.error(`❌ Arquivo ${cookieName} não existe ou está vazio. Não é possível reativar.`);
@@ -162,23 +138,15 @@ class CookieRotator {
         cookie.lastSuccess = new Date().toISOString();
         this.saveStatus();
 
-        // Envia e-mail de recuperação por reativação manual
         this.sendManualRecoveryAlert(cookieName);
         console.log(`🔁 Cookie ${cookieName} reativado manualmente.`);
         return true;
     }
 
-    // ================== Envio de e-mails (delega ao EmailAlerts) ==================
-
+    // ========== Envio de e-mails (delega ao EmailAlerts) ==========
     sendInvalidAlert(cookieName, errorMsg) {
         if (this.emailAlerts) {
             this.emailAlerts.sendCookieInvalidAlert(cookieName, errorMsg);
-        }
-    }
-
-    sendRecoveryAlert(cookieName) {
-        if (this.emailAlerts) {
-            this.emailAlerts.sendCookieRecoveredAlert(cookieName);
         }
     }
 
@@ -188,8 +156,7 @@ class CookieRotator {
         }
     }
 
-    // ================== Rotação de cookies ==================
-
+    // ========== Rotação ==========
     getNextCookiePath() {
         const validCookies = this.cookies.filter(cookie => {
             const cookiePath = path.join(this.cookiesDir, cookie);
@@ -199,7 +166,6 @@ class CookieRotator {
         });
 
         if (validCookies.length === 0) {
-            // Fallback: tenta qualquer arquivo com tamanho
             for (const cookie of this.cookies) {
                 const cookiePath = path.join(this.cookiesDir, cookie);
                 if (fs.existsSync(cookiePath)) return cookiePath;
@@ -232,8 +198,6 @@ class CookieRotator {
         }
         return false;
     }
-
-    // ================== Status para o dashboard ==================
 
     getFunctionalStatus() {
         const result = {};

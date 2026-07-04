@@ -1632,7 +1632,7 @@ app.get('/api/cookie/status', isAuthenticated, (req, res) => {
 });
 
 // ============================================================
-// 🔧 ROTA UPLOAD COOKIE (COM RESET DO ALERTA)
+// 🔧 ROTA UPLOAD COOKIE (COM RESET DO ALERTA USANDO reactivateCookie)
 // ============================================================
 app.post('/api/cookie/upload', isAuthenticated, upload.single('cookie'), async (req, res) => {
     const startTime = Date.now();
@@ -1666,19 +1666,15 @@ app.post('/api/cookie/upload', isAuthenticated, upload.single('cookie'), async (
         if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
         fs.renameSync(tempPath, targetPath);
 
-        // 🔧 SUBSTITUIÇÃO REALIZADA AQUI
+        // ✅ REATIVAÇÃO MANUAL USANDO O MÉTODO reactivateCookie
         if (!isLegacy && converter && converter.cookieRotator) {
             const cookieKey = `cookie${targetType}.txt`;
-            converter.cookieRotator.status[cookieKey] = {
-                state: 'valid',
-                failCount: 0,
-                lastFailure: null,
-                lastSuccess: new Date().toISOString(),
-                reason: null,
-                alertActive: false   // <-- ADICIONADO: desliga o alerta só aqui, na troca manual
-            };
-            converter.cookieRotator.saveStatus();
-            console.log(`🔄 CookieRotator: ${cookieKey} marcado como 'valid' após upload (alerta desligado)`);
+            const reactivated = converter.cookieRotator.reactivateCookie(cookieKey);
+            if (reactivated) {
+                console.log(`✅ Cookie ${cookieKey} reativado via upload manual.`);
+            } else {
+                console.warn(`⚠️ Falha ao reativar ${cookieKey} via upload (pode já estar válido).`);
+            }
         }
 
         if (!isLegacy && targetType === '1') {
