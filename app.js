@@ -1949,22 +1949,27 @@ if (emailAlerts && converter.cookieRotator) {
 }
 
 // ============================================================
-// ✅ VALIDAÇÃO ATIVA DOS COOKIES NA INICIALIZAÇÃO (usando LIVE CONTÍNUA)
+// ✅ VALIDAÇÃO CORRIGIDA DOS COOKIES NA INICIALIZAÇÃO
+// NÃO RESETA O ESTADO; MANTÉM O PERSISTIDO E ENVIA ALERTA COM BASE NELE
 // ============================================================
 (async function validateCookiesOnStartup() {
     if (!converter || !converter.cookieRotator) return;
     console.log('🔍 Validando cookies na inicialização (teste com live contínua)...');
     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
-    // Usar uma live que fica 24/7 no ar para capturar o erro "No video formats found"
-    const TEST_URL = 'https://www.youtube.com/watch?v=aSXLerQStXA'; // live atual
-    let anyInvalid = false;
-    const invalidList = [];
+    const TEST_URL = 'https://www.youtube.com/watch?v=aSXLerQStXA';
+    let anyChanged = false;
+
     for (const file of cookieFiles) {
         const fullPath = path.join(cookiesDir, file);
         if (!fs.existsSync(fullPath)) {
             console.log(`⚠️ ${file} não encontrado, ignorando.`);
             continue;
         }
+
+        const cookieKey = file;
+        const currentState = converter.cookieRotator.status[cookieKey]?.state || 'valid';
+        const currentFailCount = converter.cookieRotator.status[cookieKey]?.failCount || 0;
+
         try {
             console.log(`🔍 Testando ${file} com live contínua...`);
             await runYtdlp([
@@ -1974,46 +1979,83 @@ if (emailAlerts && converter.cookieRotator) {
                 '--dump-json',
                 TEST_URL
             ], 20000);
-            // Se não lançou erro, está válido
-            const cookieKey = file;
-            if (converter.cookieRotator.status[cookieKey]) {
-                converter.cookieRotator.status[cookieKey].state = 'valid';
-                converter.cookieRotator.status[cookieKey].failCount = 0;
-                converter.cookieRotator.status[cookieKey].lastFailure = null;
-                converter.cookieRotator.status[cookieKey].reason = null;
-                converter.cookieRotator.status[cookieKey].alertActive = false;
+
+            // Se o cookie passou no teste, apenas registra, mas NÃO RESETA o estado
+            // se ele já estiver com problema (suspect ou invalid)
+            if (currentState === 'valid') {
+                // Já era válido, mantém
+                console.log(`✅ ${file} válido (estado permanece 'valid')`);
+            } else {
+                // Se estava suspect ou invalid, NÃO muda para valid automaticamente
+                console.log(`ℹ️ ${file} passou no teste, mas mantém estado '${currentState}' (não resetamos automaticamente).`);
+                // Opcional: atualizar lastSuccess para indicar que funcionou, mas sem mudar state
+                converter.cookieRotator.status[cookieKey].lastSuccess = new Date().toISOString();
                 converter.cookieRotator.saveStatus();
             }
-            console.log(`✅ ${file} válido (live teste OK)`);
         } catch (err) {
-            console.log(`❌ ${file} inválido: ${err.message}`);
-            anyInvalid = true;
-            const cookieKey = file;
-            if (converter.cookieRotator.status[cookieKey]) {
-                converter.cookieRotator.status[cookieKey].state = 'invalid';
-                converter.cookieRotator.status[cookieKey].failCount = (converter.cookieRotator.status[cookieKey].failCount || 0) + 1;
+            console.log(`❌ ${file} falhou no teste: ${err.message}`);
+            // Se já estava com problema, mantém ou incrementa
+            if (currentState === 'valid') {
+                // Se era válido e agora falhou, vira suspect com 1 falha
+                converter.cookieRotator.status[cookieKey].state = 'suspect';
+                converter.cookieRotator.status[cookieKey].failCount = 1;
                 converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
                 converter.cookieRotator.status[cookieKey].reason = err.message;
                 converter.cookieRotator.status[cookieKey].alertActive = true;
-                converter.cookieRotator.saveStatus();
+                console.log(`⚠️ ${file} agora está suspeito (1/3 falhas) na inicialização.`);
+                anyChanged = true;
+            } else if (currentState === 'suspect') {
+                // Incrementa falhas
+                const newFail = (currentFailCount || 0) + 1;
+                converter.cookieRotator.status[cookieKey].failCount = newFail;
+                converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
+                converter.cookieRotator.status[cookieKey].reason = err.message;
+                converter.cookieRotator.status[cookieKey].alertActive = true;
+                if (newFail >= 3) {
+                    converter.cookieRotator.status[cookieKey].state = 'invalid';
+                    converter.cookieRotator.status[cookieKey].failCount = 0;
+                    console.log(`❌ ${file} agora é inválido (3 falhas) na inicialização.`);
+                    // Envia alerta de inválido
+                    if (emailAlerts) {
+                        emailAlerts.sendCookieInvalidAlert(cookieKey, err.message);
+                    }
+                } else {
+                    console.log(`⚠️ ${file} continua suspeito (${newFail}/3 falhas) na inicialização.`);
+                    if (emailAlerts) {
+                        emailAlerts.sendCookieWarningAlert(cookieKey, err.message, newFail);
+                    }
+                }
+                anyChanged = true;
+            } else if (currentState === 'invalid') {
+                // Já estava inválido, apenas atualiza a mensagem de erro
+                converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
+                converter.cookieRotator.status[cookieKey].reason = err.message;
+                converter.cookieRotator.status[cookieKey].alertActive = true;
+                console.log(`⚠️ ${file} já estava inválido, erro atualizado.`);
+                anyChanged = true;
             }
-            invalidList.push({ file, error: err.message });
+            converter.cookieRotator.saveStatus();
         }
     }
 
-    // Se houver algum cookie inválido, envia um e-mail de resumo imediatamente
-    if (anyInvalid) {
-        console.log('📧 Enviando alerta de inicialização com cookies inválidos...');
-        if (emailAlerts) {
-            const invalidOnes = Object.entries(converter.cookieRotator.status)
-                .filter(([, v]) => v.state !== 'valid')
-                .map(([name, v]) => [name, v]);
-            if (invalidOnes.length > 0) {
-                emailAlerts.sendCookieFailureSummaryAlert(invalidOnes);
-            }
+    // 🔥 Envia alerta de resumo com base no estado REAL após a validação
+    const statusAfterValidation = converter.cookieRotator.getFunctionalStatus();
+    const problematic = Object.entries(statusAfterValidation)
+        .filter(([name, info]) => info.state !== 'valid' && info.alertActive === true);
+
+    if (problematic.length > 0) {
+        console.log(`📧 Enviando alerta de inicialização com ${problematic.length} cookie(s) problemático(s)...`);
+        if (emailAlerts && emailAlerts.sendCookieFailureSummaryAlert) {
+            emailAlerts.sendCookieFailureSummaryAlert(problematic);
         }
     } else {
-        console.log('✅ Todos os cookies válidos na inicialização.');
+        // Todos estão válidos (ou sem alerta ativo)
+        const allValid = Object.values(statusAfterValidation).every(v => v.state === 'valid');
+        if (allValid) {
+            console.log('✅ Todos os cookies estão com estado válido após validação.');
+        } else {
+            console.log('ℹ️ Há cookies com estado não-válido, mas sem alerta ativo (possivelmente já recuperados).');
+        }
     }
 
     // 🔥 INICIAR A VERIFICAÇÃO PERIÓDICA APENAS AGORA, DEPOIS DA VALIDAÇÃO
