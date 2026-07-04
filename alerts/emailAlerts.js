@@ -58,20 +58,24 @@ class EmailAlerts {
         rotator.markSuccess = function(cookieName) {
             console.log(`🔍 [DIAG] markSuccess interceptado: cookie=${cookieName}`);
             const status = rotator.status[cookieName];
-            const wasInvalid = status?.state === 'invalid' || status?.state === 'suspect';
+            // Só dispara alerta se o cookie estava REALMENTE em estado de falha (suspect ou invalid)
+            const wasInTrouble = status?.state === 'invalid' || (status?.state === 'suspect' && status?.failCount > 0);
             const lastInvalid = self._lastInvalidTime[cookieName] || 0;
-            const isRecent = (Date.now() - lastInvalid) < 120000;
+            
+            // Aumentado para 5 minutos para evitar oscilações rápidas
+            const isRecent = (Date.now() - lastInvalid) < 300000; 
 
             const result = originalMarkSuccess(cookieName);
             
-            if (wasInvalid && isRecent) {
+            if (wasInTrouble && isRecent) {
                 console.log(`🟢 [DIAG] Disparando alerta de recuperação para ${cookieName} (revalidado recentemente)`);
                 self.sendCookieRecoveredAlert(cookieName);
                 delete self._lastInvalidTime[cookieName];
-            } else if (wasInvalid && !isRecent) {
-                console.log(`ℹ️ [DIAG] Cookie ${cookieName} estava inválido mas não foi revalidado recentemente, ignorando alerta de recuperação.`);
+            } else if (wasInTrouble && !isRecent) {
+                console.log(`ℹ️ [DIAG] Cookie ${cookieName} estava com problema mas a "recuperação" demorou ou foi ignorada por tempo.`);
+                delete self._lastInvalidTime[cookieName];
             } else {
-                console.log(`ℹ️ [DIAG] Recuperação não necessária para ${cookieName}`);
+                console.log(`ℹ️ [DIAG] Recuperação não necessária para ${cookieName} (já estava ok)`);
             }
             return result;
         };

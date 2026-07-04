@@ -252,7 +252,7 @@ class LiveMonitor {
                             console.log(`🔄 Tentando com ${file}...`);
                             const result = await execWithCookie(fullPath);
                             console.log(`✅ Sucesso com ${file}`);
-                            // Marca sucesso para o novo cookie
+                            // Marca sucesso APENAS para o cookie que realmente funcionou
                             if (this._cookieRotator) {
                                 this._cookieRotator.markSuccess(file);
                             }
