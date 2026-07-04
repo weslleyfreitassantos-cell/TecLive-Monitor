@@ -120,7 +120,7 @@ function loadOwnerViewers() {
         const data = JSON.parse(fs.readFileSync(ownerViewersFile, 'utf8'));
         const map = new Map();
         const now = Date.now();
-        const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
+        const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 7200000;
         let totalLoaded = 0, totalExpired = 0;
         for (const [key, viewers] of Object.entries(data)) {
             const innerMap = new Map();
@@ -164,7 +164,7 @@ function loadViewerAccess() {
         const data = JSON.parse(fs.readFileSync(viewerAccessFile, 'utf8'));
         const map = new Map();
         const now = Date.now();
-        const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
+        const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 7200000;
         for (const [key, ips] of Object.entries(data)) {
             const innerMap = new Map();
             for (const [ip, timestamp] of Object.entries(ips)) {
@@ -449,65 +449,14 @@ function getTotalViewers() {
 }
 
 // ============================================================
-// FILTRO DE QUALIDADE DO MANIFESTO MASTER
+// FILTRO DE QUALIDADE DO MANIFESTO MASTER (NÃO UTILIZADO NA CORREÇÃO)
+// Mantido apenas para referência, mas não será chamado no proxy.
 // ============================================================
 function filterMasterByMaxHeight(masterContent, maxHeight) {
-    if (!masterContent || !maxHeight) return masterContent;
-
-    const lines = masterContent.split('\n');
-    const filtered = [];
-    let skipNext = false;
-    let lastKeptResolution = null;
-    let allResolutions = [];
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('#EXT-X-STREAM-INF')) {
-            const resMatch = line.match(/RESOLUTION=\d+x(\d+)/i);
-            if (resMatch) {
-                allResolutions.push(parseInt(resMatch[1], 10));
-            }
-        }
-    }
-
-    const validResolutions = allResolutions.filter(h => h <= maxHeight);
-    const effectiveMax = validResolutions.length > 0
-        ? maxHeight
-        : Math.min(...allResolutions);
-
-    if (effectiveMax !== maxHeight) {
-        console.log(`[filterMaster] Nenhuma qualidade <= ${maxHeight}p, usando fallback ${effectiveMax}p`);
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-
-        if (line.startsWith('#EXT-X-STREAM-INF')) {
-            const resMatch = line.match(/RESOLUTION=\d+x(\d+)/i);
-            if (resMatch) {
-                const height = parseInt(resMatch[1], 10);
-                if (height <= effectiveMax) {
-                    filtered.push(lines[i]);
-                    lastKeptResolution = height;
-                    skipNext = false;
-                } else {
-                    skipNext = true;
-                }
-            } else {
-                filtered.push(lines[i]);
-                skipNext = false;
-            }
-        } else if (skipNext && line !== '' && !line.startsWith('#')) {
-            skipNext = false;
-        } else {
-            filtered.push(lines[i]);
-            if (skipNext && line === '') skipNext = false;
-        }
-    }
-
-    const result = filtered.join('\n');
-    console.log(`[filterMaster] Qualidades mantidas até ${effectiveMax}p (última: ${lastKeptResolution}p)`);
-    return result;
+    // Esta função não é mais utilizada para evitar travamentos.
+    // Retorna o conteúdo original sem modificações.
+    console.warn('[filterMaster] Chamado, mas retornando conteúdo original (filtro desativado)');
+    return masterContent;
 }
 
 // ============================================================
@@ -712,9 +661,9 @@ function removePersistedMapping(videoId, owner) {
 // ========== CACHE ==========
 const m3u8CachePromises = new Map();
 const m3u8CacheContent = new Map();
-const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 15000; // Aumentado para 15s
+const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 15000; // 15s
 
-const REFRESH_WAIT_MS = 15000; // Aumentado para 15s
+const REFRESH_WAIT_MS = 15000;
 const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 120000; // 2 minutos
 
 const lastGoodM3u8 = new Map();
@@ -872,7 +821,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     let finalMaxHeight = maxHeight || envMaxHeight;
     if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
         finalMaxHeight = urlMaxHeight;
-        console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${finalMaxHeight}p`);
+        console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${finalMaxHeight}p (ignorada - servindo master original)`);
     }
 
     let monitor = null;
@@ -932,7 +881,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         return res.status(404).send('Stream not found');
     }
 
-        const trackingOwner = queryOwner || actualOwner;
+    const trackingOwner = queryOwner || actualOwner;
     const localIp = req.query.localIp || null;
 
     if (trackingOwner) {
@@ -973,20 +922,22 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     monitor._currentMaxHeight = finalMaxHeight;
     monitor.lastAccess = Date.now();
 
+    // ============================================================
+    // 🔧 CORREÇÃO DEFINITIVA: Servir o master ORIGINAL sem filtro
+    // Isso elimina os travamentos causados pelo master artificial.
+    // ============================================================
     if (monitor._masterContent && monitor._masterContent.isMaster) {
         const rawContent = monitor._masterContent.content;
-        const filteredContent = filterMasterByMaxHeight(rawContent, finalMaxHeight);
-        console.log(`[${videoId}] 📦 Servindo master artificial filtrado até ${finalMaxHeight}p`);
+        console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (sem filtro)`);
         res.writeHead(200, {
             'Content-Type': 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'no-cache, no-store, must-revalidate',
             'Pragma': 'no-cache',
             'Expires': '0',
-            'X-Master': 'true',
-            'X-Max-Height': String(finalMaxHeight)
+            'X-Master': 'true'
         });
-        res.end(filteredContent);
+        res.end(rawContent);
         return;
     }
 
@@ -1010,38 +961,47 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         }
 
         if (isMaster) {
-            contentToServe = filterMasterByMaxHeight(contentToServe, finalMaxHeight);
-            console.log(`[${videoId}] 📦 Servindo manifesto master filtrado até ${finalMaxHeight}p`);
-        } else {
-            // --- CORREÇÃO DE REGRESSÃO DE SEQUÊNCIA (MELHORADO) ---
-            const parsed = parseM3u8Info(contentToServe);
-            const prev = lastServedSequence.get(videoId);
+            // 🔧 Também aqui servimos o master original sem filtro
+            console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (via cache)`);
+            res.writeHead(200, {
+                'Content-Type': 'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+                'X-Master': 'true'
+            });
+            res.end(contentToServe);
+            return;
+        }
 
-            if (parsed.sequence !== null && prev && parsed.sequence < prev.sequence) {
-                console.warn(`[${videoId}] ⚠️ Detectada regressão de sequência (${prev.sequence} → ${parsed.sequence}). Forçando correção.`);
-                
-                const stale = getStaleM3u8IfFresh(videoId, monitor.lastMediaSequence);
-                if (stale) {
-                    console.log(`[${videoId}] 🔄 Usando playlist anterior estável para evitar BehindLiveWindowException.`);
-                    contentToServe = stale.content;
-                } else {
-                    // Força a sequência para avançar
-                    console.warn(`[${videoId}] ⚠️ Sem stale disponível, forçando sequência ${prev.sequence + 1}`);
-                    contentToServe = contentToServe.replace(
-                        /#EXT-X-MEDIA-SEQUENCE:\d+/,
-                        `#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`
-                    );
-                }
-            }
+        // --- Para playlists de qualidade (não master), aplicamos a correção de regressão ---
+        const parsed = parseM3u8Info(contentToServe);
+        const prev = lastServedSequence.get(videoId);
 
-            const finalParsed = parseM3u8Info(contentToServe);
-            if (finalParsed.sequence !== null) {
-                if (monitor.lastMediaSequence === null || finalParsed.sequence > monitor.lastMediaSequence) {
-                    rememberGoodM3u8(videoId, contentToServe);
-                }
+        if (parsed.sequence !== null && prev && parsed.sequence < prev.sequence) {
+            console.warn(`[${videoId}] ⚠️ Detectada regressão de sequência (${prev.sequence} → ${parsed.sequence}). Forçando correção.`);
+            
+            const stale = getStaleM3u8IfFresh(videoId, monitor.lastMediaSequence);
+            if (stale) {
+                console.log(`[${videoId}] 🔄 Usando playlist anterior estável para evitar BehindLiveWindowException.`);
+                contentToServe = stale.content;
             } else {
+                console.warn(`[${videoId}] ⚠️ Sem stale disponível, forçando sequência ${prev.sequence + 1}`);
+                contentToServe = contentToServe.replace(
+                    /#EXT-X-MEDIA-SEQUENCE:\d+/,
+                    `#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`
+                );
+            }
+        }
+
+        const finalParsed = parseM3u8Info(contentToServe);
+        if (finalParsed.sequence !== null) {
+            if (monitor.lastMediaSequence === null || finalParsed.sequence > monitor.lastMediaSequence) {
                 rememberGoodM3u8(videoId, contentToServe);
             }
+        } else {
+            rememberGoodM3u8(videoId, contentToServe);
         }
 
         const monitorSeq = monitor.lastMediaSequence;
@@ -1060,8 +1020,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
             'Pragma': 'no-cache',
             'Expires': '0',
             'X-Cache': result.fromCache ? 'HIT' : 'MISS',
-            'X-Master': isMaster ? 'true' : 'false',
-            'X-Max-Height': isMaster ? String(finalMaxHeight) : 'N/A'
+            'X-Master': 'false'
         });
         res.end(contentToServe);
 
@@ -1102,7 +1061,23 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                         });
                     }
                     if (isRenewedMaster) {
-                        renewedContent = filterMasterByMaxHeight(renewedContent, finalMaxHeight);
+                        // Serve master original sem filtro
+                        logProxyAccess(videoId, {
+                            statusCode: 200,
+                            fromCache: renewed.fromCache,
+                            elapsedMs: Date.now() - reqStart,
+                            content: renewedContent,
+                            monitorSeq: undefined
+                        });
+                        res.writeHead(200, {
+                            'Content-Type': 'application/vnd.apple.mpegurl',
+                            'Access-Control-Allow-Origin': '*',
+                            'Cache-Control': 'no-cache, no-store, must-revalidate',
+                            'Pragma': 'no-cache',
+                            'Expires': '0',
+                            'X-Master': 'true'
+                        });
+                        return res.end(renewedContent);
                     } else {
                         rememberGoodM3u8(videoId, renewedContent);
                     }
@@ -1119,8 +1094,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                         'Cache-Control': 'no-cache, no-store, must-revalidate',
                         'Pragma': 'no-cache',
                         'Expires': '0',
-                        'X-Master': isRenewedMaster ? 'true' : 'false',
-                        'X-Max-Height': isRenewedMaster ? String(finalMaxHeight) : 'N/A'
+                        'X-Master': isRenewedMaster ? 'true' : 'false'
                     });
                     return res.end(renewedContent);
                 } catch (renewErr) {
@@ -1166,7 +1140,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
 }
 
 // ============================================================
-// ROTAS
+// ROTAS (as mesmas do original, mantidas)
 // ============================================================
 app.get('/converter.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'public/converter.html'));
