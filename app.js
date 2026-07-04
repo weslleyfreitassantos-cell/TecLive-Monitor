@@ -120,13 +120,11 @@ function loadOwnerViewers() {
         const data = JSON.parse(fs.readFileSync(ownerViewersFile, 'utf8'));
         const map = new Map();
         const now = Date.now();
-        // VIEWER_WINDOW_MS ainda não está definido aqui, usar valor padrão
         const windowMs = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
         let totalLoaded = 0, totalExpired = 0;
         for (const [key, viewers] of Object.entries(data)) {
             const innerMap = new Map();
             for (const [ip, timestamp] of Object.entries(viewers)) {
-                // Descartar entradas expiradas ao carregar (evita dispositivos fantasmas após reinicialização)
                 if (now - timestamp <= windowMs) {
                     innerMap.set(ip, timestamp);
                     totalLoaded++;
@@ -170,7 +168,6 @@ function loadViewerAccess() {
         for (const [key, ips] of Object.entries(data)) {
             const innerMap = new Map();
             for (const [ip, timestamp] of Object.entries(ips)) {
-                // Descartar entradas expiradas ao carregar
                 if (now - timestamp <= windowMs) {
                     innerMap.set(ip, timestamp);
                 }
@@ -241,7 +238,7 @@ function isLocalIp(ip) {
 // ============================================================
 // RASTREAMENTO DE VIEWERS
 // ============================================================
-const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 45000; // 45 segundos
+const VIEWER_WINDOW_MS = parseInt(process.env.VIEWER_WINDOW_MS) || 7200000; // 2 horas por padrão
 
 function normalizeIp(ip) {
     if (!ip) return 'unknown';
@@ -260,7 +257,6 @@ setInterval(() => {
     // Limpar ownerViewers
     for (const [key, viewers] of ownerViewers.entries()) {
         for (const [ip, timestamp] of viewers.entries()) {
-            // Se o timestamp for muito antigo (inatividade real), remove
             if (now - timestamp > VIEWER_WINDOW_MS) {
                 viewers.delete(ip);
                 changed = true;
@@ -297,15 +293,11 @@ function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
     if (!viewerAccess.has(key)) viewerAccess.set(key, new Map());
     const viewers = viewerAccess.get(key);
     
-    // Identificador único = IP + UserAgent + LocalIp (opcional)
     const deviceId = localIp ? `${ip}|${userAgent}|${localIp}` : `${ip}|${userAgent}`;
     
-    // Limpar registro legado apenas com IP se existir
     if (viewers.has(ip)) {
         viewers.delete(ip);
     }
-    
-    // Se enviou localIp, limpar também a versão sem localIp para não duplicar
     const oldDeviceId = `${ip}|${userAgent}`;
     if (localIp && viewers.has(oldDeviceId)) {
         viewers.delete(oldDeviceId);
@@ -327,9 +319,6 @@ function trackViewerByOwner(owner, ip, videoId, userAgent = '', localIp = null) 
     const currentKey = `${owner}:${videoId}`;
     const deviceId = localIp ? `${ip}|${userAgent}|${localIp}` : `${ip}|${userAgent}`;
 
-    // --- LÓGICA DE EXCLUSIVIDADE POR CLIENTE (REVERTIDA DE GLOBAL) ---
-    // Removemos o IP apenas das outras lives DO MESMO DONO.
-    // Isso permite que o mesmo IP assista lives de donos diferentes simultaneamente.
     let exclusivityRemoved = false;
     for (const [key, viewers] of ownerViewers.entries()) {
         if (key.startsWith(`${owner}:`) && key !== currentKey) {
@@ -345,12 +334,10 @@ function trackViewerByOwner(owner, ip, videoId, userAgent = '', localIp = null) 
     if (!ownerViewers.has(currentKey)) ownerViewers.set(currentKey, new Map());
     const viewers = ownerViewers.get(currentKey);
     
-    // Limpar registro legado apenas com IP se existir (evita duplicidade IP vs IP|userAgent)
     if (viewers.has(ip)) {
         viewers.delete(ip);
     }
 
-    // Se enviou localIp, limpar também a versão sem localIp para não duplicar
     const oldDeviceId = `${ip}|${userAgent}`;
     if (localIp && viewers.has(oldDeviceId)) {
         viewers.delete(oldDeviceId);
@@ -376,7 +363,7 @@ function renewViewersForMonitor(owner, videoId) {
     if (!viewers || viewers.size === 0) return;
 
     const now = Date.now();
-    const ACTIVITY_TIMEOUT = parseInt(process.env.VIEWER_WINDOW_MS) || 45000;
+    const ACTIVITY_TIMEOUT = parseInt(process.env.VIEWER_WINDOW_MS) || 7200000;
     const activityKey = `${owner}:${videoId}`;
     const activityMap = viewerAccess.get(activityKey);
     let renewed = 0, removed = 0;
@@ -389,7 +376,6 @@ function renewViewersForMonitor(owner, videoId) {
             viewers.set(ip, now);
             renewed++;
         } else {
-            // Se não há atividade recente no activityMap, e o tempo no ownerViewers expirou
             if ((now - timestamp) > VIEWER_WINDOW_MS) {
                 viewers.delete(ip);
                 removed++;
@@ -424,7 +410,6 @@ function getActiveViewerIPsForOwnerAndVideo(owner, videoId) {
     const devices = [];
     for (const [deviceId, timestamp] of viewers.entries()) {
         if (now - timestamp <= VIEWER_WINDOW_MS) {
-            // deviceId pode ser "ip|userAgent" ou "ip|userAgent|localIp"
             const parts = deviceId.split('|');
             const ip = parts[0] || 'unknown';
             const userAgent = parts[1] || '';
@@ -441,10 +426,7 @@ function isIpActiveForOwnerAndVideo(owner, videoId, ip, userAgent = '') {
     const viewers = ownerViewers.get(key);
     if (!viewers) return false;
     
-    // Verifica primeiro se o IP exato está registrado (retrocompatibilidade)
     if (viewers.has(ip)) return true;
-    
-    // Verifica se o deviceId completo (ip|userAgent) está registrado
     const deviceId = `${ip}|${userAgent}`;
     return viewers.has(deviceId);
 }
@@ -558,14 +540,12 @@ let converter = null;
 // ============================================================
 function runYtdlp(args, timeout = 30000) {
     return new Promise(async (resolve, reject) => {
-        // Remove qualquer seleção de formato (-f) para evitar warnings
         const filteredArgs = args.filter((arg, index) => {
             if (arg === '-f' || arg === '--format') return false;
             if (index > 0 && (args[index-1] === '-f' || args[index-1] === '--format')) return false;
             return true;
         });
 
-        // Detecta se é uma chamada para obter metadados
         const isMetadataCall = filteredArgs.includes('--dump-json') && 
                               filteredArgs.some(a => a.includes('youtube.com/watch'));
 
@@ -580,14 +560,12 @@ function runYtdlp(args, timeout = 30000) {
             }
         }
 
-        // Identifica qual cookie está sendo usado
         let cookieIndex = finalArgs.indexOf('--cookies');
         let cookiePath = null;
         if (cookieIndex !== -1 && finalArgs.length > cookieIndex + 1) {
             cookiePath = finalArgs[cookieIndex + 1];
         }
 
-        // Se não houver cookie, tenta usar o cookie1.txt como padrão
         if (!cookiePath) {
             const defaultCookie = path.join(cookiesDir, 'cookie1.txt');
             if (fs.existsSync(defaultCookie)) {
@@ -734,10 +712,10 @@ function removePersistedMapping(videoId, owner) {
 // ========== CACHE ==========
 const m3u8CachePromises = new Map();
 const m3u8CacheContent = new Map();
-const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 5000;
+const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 15000; // Aumentado para 15s
 
-const REFRESH_WAIT_MS = 10000;
-const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000;
+const REFRESH_WAIT_MS = 15000; // Aumentado para 15s
+const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 120000; // 2 minutos
 
 const lastGoodM3u8 = new Map();
 
@@ -965,7 +943,6 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         );
         const userAgent = req.headers['user-agent'] || '';
 
-        // RASTREAMENTO DINÂMICO: Registra o dispositivo no momento do acesso
         if (!isLocalIp(clientIp)) {
             const activeDevices = getActiveDevicesForOwnerAndVideo(trackingOwner, videoId);
             const deviceLimit = getDeviceLimitForOwner(trackingOwner);
@@ -979,7 +956,6 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                 });
             }
             
-            // Registra/Atualiza o dispositivo dinamicamente
             trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
             console.log(`[${trackingOwner}:${videoId}] 📱 Dispositivo registrado via Proxy: ${clientIp} | ${userAgent.substring(0, 30)}...`);
         }
@@ -1037,18 +1013,24 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
             contentToServe = filterMasterByMaxHeight(contentToServe, finalMaxHeight);
             console.log(`[${videoId}] 📦 Servindo manifesto master filtrado até ${finalMaxHeight}p`);
         } else {
-            // --- ESTABILIZAÇÃO DE SEQUÊNCIA HLS PARA EXOPLAYER ---
+            // --- CORREÇÃO DE REGRESSÃO DE SEQUÊNCIA (MELHORADO) ---
             const parsed = parseM3u8Info(contentToServe);
             const prev = lastServedSequence.get(videoId);
-            
+
             if (parsed.sequence !== null && prev && parsed.sequence < prev.sequence) {
                 console.warn(`[${videoId}] ⚠️ Detectada regressão de sequência (${prev.sequence} → ${parsed.sequence}). Forçando correção.`);
                 
-                // Se a sequência regrediu, tentamos usar o cache "bom" anterior para evitar erro no ExoPlayer
                 const stale = getStaleM3u8IfFresh(videoId, monitor.lastMediaSequence);
                 if (stale) {
                     console.log(`[${videoId}] 🔄 Usando playlist anterior estável para evitar BehindLiveWindowException.`);
                     contentToServe = stale.content;
+                } else {
+                    // Força a sequência para avançar
+                    console.warn(`[${videoId}] ⚠️ Sem stale disponível, forçando sequência ${prev.sequence + 1}`);
+                    contentToServe = contentToServe.replace(
+                        /#EXT-X-MEDIA-SEQUENCE:\d+/,
+                        `#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`
+                    );
                 }
             }
 
@@ -1210,35 +1192,27 @@ app.get('/api/public/device-status/:owner', (req, res) => {
         return res.status(400).json({ error: 'Owner não informado' });
     }
 
-    // Se o painel enviou localIp, aproveitamos para registrar/atualizar o dispositivo do painel
     if (localIp) {
         const rawIp = req.ip || req.socket.remoteAddress;
         const ip = normalizeIp(req.headers['x-forwarded-for']?.split(',')[0]?.trim() || rawIp);
         const userAgent = req.headers['user-agent'] || '';
-        // O painel não tem um videoId específico, mas podemos registrar no viewerAccess global
         trackViewer(owner, 'panel', ip, userAgent, localIp);
     }
 
-    const uniqueDevices = new Map(); // deviceId -> { deviceId, ip, userAgent, localIp }
+    const uniqueDevices = new Map();
     const now = Date.now();
 
     for (const [key, viewers] of ownerViewers.entries()) {
         if (key.startsWith(owner + ':')) {
             const [ownerName, videoId] = key.split(':');
-            
-            // --- FILTRO DE IPs ÓRFÃOS ---
-            // Só contamos o IP se a live ainda existir no monitor ativo.
-            // Se a live acabou ou foi removida, o IP é ignorado e limpo.
             const monitorKey = `${videoId}:${ownerName}`;
             if (!converter.activeMonitors.has(monitorKey)) {
-                // Opcional: Limpa o registro órfão do mapa para economizar memória
                 ownerViewers.delete(key);
                 continue;
             }
 
             for (const [deviceId, timestamp] of viewers.entries()) {
                 if (now - timestamp <= VIEWER_WINDOW_MS) {
-                    // deviceId pode ser "ip|userAgent" ou "ip|userAgent|localIp"
                     const parts = deviceId.split('|');
                     const ip = parts[0] || 'unknown';
                     const userAgent = parts[1] || '';
@@ -1376,7 +1350,6 @@ app.get('/api/public/monitors', (req, res) => {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             const [videoId, owner] = key.split(':');
 
-            // FILTRAR LIVES ENCERRADAS: Não envia para o cliente se já acabou
             if (monitor.liveState === 'ended' || monitor._liveEnded) {
                 continue;
             }
@@ -1532,12 +1505,9 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             const [videoId, owner] = key.split(':');
 
-            // --- LÓGICA DE REMOÇÃO AUTOMÁTICA DE LIVES ENCERRADAS ---
-            // Se o monitor detectou que a live terminou (ENDED) ou está OFFLINE por muito tempo, removemos.
             if (monitor.liveState === 'ended' || monitor._liveEnded) {
                 console.log(`[${key}] 🗑️ Removendo monitor de live encerrada detectada na API`);
                 converter.removeMonitor(videoId, owner);
-                // Limpar dispositivos ativos desta live
                 if (owner) {
                     const devKey = `${owner}:${videoId}`;
                     if (ownerViewers.has(devKey)) {
@@ -1549,7 +1519,7 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
                         saveViewerAccess(viewerAccess);
                     }
                 }
-                continue; // Pula para o próximo, não exibe este
+                continue;
             }
 
             const activeDevices = owner ? getActiveDevicesForOwnerAndVideo(owner, videoId) : 0;
@@ -1666,7 +1636,6 @@ app.post('/api/cookie/upload', isAuthenticated, upload.single('cookie'), async (
         if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
         fs.renameSync(tempPath, targetPath);
 
-        // ✅ REATIVAÇÃO MANUAL USANDO O MÉTODO reactivateCookie
         if (!isLegacy && converter && converter.cookieRotator) {
             const cookieKey = `cookie${targetType}.txt`;
             const reactivated = converter.cookieRotator.reactivateCookie(cookieKey);
@@ -1745,11 +1714,9 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
         }
 
         if (!monitorFound) {
-            // Se não encontrou pela chave exata, tenta procurar qualquer instância do videoId
             for (const [key, mon] of converter.activeMonitors.entries()) {
                 const parts = key.split(':');
                 if (parts[0] === videoId) {
-                    // Se o owner foi passado, deve bater. Se não foi, pega o primeiro que achar.
                     if (!owner || parts[1] === owner) {
                         monitorFound = mon;
                         keyFound = key;
@@ -1758,7 +1725,6 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
                     }
                 }
             }
-            // Fallback para chave simples (sem owner no formato videoId)
             if (!monitorFound && converter.activeMonitors.has(videoId)) {
                 monitorFound = converter.activeMonitors.get(videoId);
                 keyFound = videoId;
@@ -1770,7 +1736,6 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Monitor não encontrado' });
         }
 
-        // Se for admin autenticado na sessão, ignorar a verificação de owner
         const isAdmin = req.session && req.session.admin === true;
 
         if (actualOwner && actualOwner !== owner && !isAdmin) {
@@ -1909,7 +1874,6 @@ const EmailAlerts = require('./alerts/emailAlerts');
 const ConvertAPI = require('./api/convert');
 const emailAlerts = new EmailAlerts();
 
-// 👇 Função que revoga o token associado a um videoId+owner
 const revokeTokenFn = (videoId, owner) => {
     for (const [token, info] of Object.entries(tokenMap)) {
         if (info.videoId === videoId && info.owner === owner) {
@@ -1918,7 +1882,6 @@ const revokeTokenFn = (videoId, owner) => {
             break;
         }
     }
-    // Limpar dispositivos ativos associados a esta live (evita dispositivos fantasmas)
     if (owner) {
         const key = `${owner}:${videoId}`;
         if (ownerViewers.has(key)) {
@@ -1950,7 +1913,6 @@ if (emailAlerts && converter.cookieRotator) {
 
 // ============================================================
 // ✅ VALIDAÇÃO CORRIGIDA DOS COOKIES NA INICIALIZAÇÃO
-// NÃO RESETA O ESTADO; MANTÉM O PERSISTIDO E ENVIA ALERTA COM BASE NELE
 // ============================================================
 (async function validateCookiesOnStartup() {
     if (!converter || !converter.cookieRotator) return;
@@ -1980,23 +1942,16 @@ if (emailAlerts && converter.cookieRotator) {
                 TEST_URL
             ], 20000);
 
-            // Se o cookie passou no teste, apenas registra, mas NÃO RESETA o estado
-            // se ele já estiver com problema (suspect ou invalid)
             if (currentState === 'valid') {
-                // Já era válido, mantém
                 console.log(`✅ ${file} válido (estado permanece 'valid')`);
             } else {
-                // Se estava suspect ou invalid, NÃO muda para valid automaticamente
                 console.log(`ℹ️ ${file} passou no teste, mas mantém estado '${currentState}' (não resetamos automaticamente).`);
-                // Opcional: atualizar lastSuccess para indicar que funcionou, mas sem mudar state
                 converter.cookieRotator.status[cookieKey].lastSuccess = new Date().toISOString();
                 converter.cookieRotator.saveStatus();
             }
         } catch (err) {
             console.log(`❌ ${file} falhou no teste: ${err.message}`);
-            // Se já estava com problema, mantém ou incrementa
             if (currentState === 'valid') {
-                // Se era válido e agora falhou, vira suspect com 1 falha
                 converter.cookieRotator.status[cookieKey].state = 'suspect';
                 converter.cookieRotator.status[cookieKey].failCount = 1;
                 converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
@@ -2005,7 +1960,6 @@ if (emailAlerts && converter.cookieRotator) {
                 console.log(`⚠️ ${file} agora está suspeito (1/3 falhas) na inicialização.`);
                 anyChanged = true;
             } else if (currentState === 'suspect') {
-                // Incrementa falhas
                 const newFail = (currentFailCount || 0) + 1;
                 converter.cookieRotator.status[cookieKey].failCount = newFail;
                 converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
@@ -2015,7 +1969,6 @@ if (emailAlerts && converter.cookieRotator) {
                     converter.cookieRotator.status[cookieKey].state = 'invalid';
                     converter.cookieRotator.status[cookieKey].failCount = 0;
                     console.log(`❌ ${file} agora é inválido (3 falhas) na inicialização.`);
-                    // Envia alerta de inválido
                     if (emailAlerts) {
                         emailAlerts.sendCookieInvalidAlert(cookieKey, err.message);
                     }
@@ -2027,7 +1980,6 @@ if (emailAlerts && converter.cookieRotator) {
                 }
                 anyChanged = true;
             } else if (currentState === 'invalid') {
-                // Já estava inválido, apenas atualiza a mensagem de erro
                 converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
                 converter.cookieRotator.status[cookieKey].reason = err.message;
                 converter.cookieRotator.status[cookieKey].alertActive = true;
@@ -2038,7 +1990,6 @@ if (emailAlerts && converter.cookieRotator) {
         }
     }
 
-    // 🔥 Envia alerta de resumo com base no estado REAL após a validação
     const statusAfterValidation = converter.cookieRotator.getFunctionalStatus();
     const problematic = Object.entries(statusAfterValidation)
         .filter(([name, info]) => info.state !== 'valid' && info.alertActive === true);
@@ -2049,7 +2000,6 @@ if (emailAlerts && converter.cookieRotator) {
             emailAlerts.sendCookieFailureSummaryAlert(problematic);
         }
     } else {
-        // Todos estão válidos (ou sem alerta ativo)
         const allValid = Object.values(statusAfterValidation).every(v => v.state === 'valid');
         if (allValid) {
             console.log('✅ Todos os cookies estão com estado válido após validação.');
@@ -2058,7 +2008,6 @@ if (emailAlerts && converter.cookieRotator) {
         }
     }
 
-    // 🔥 INICIAR A VERIFICAÇÃO PERIÓDICA APENAS AGORA, DEPOIS DA VALIDAÇÃO
     if (emailAlerts && emailAlerts.checkCookiesHealthAlert) {
         setTimeout(() => {
             console.log('🔄 Iniciando verificação periódica de cookies após validação...');
@@ -2066,7 +2015,6 @@ if (emailAlerts && converter.cookieRotator) {
         }, 1000);
     }
 
-    // 🚀 RESTAURAR MONITORES DA SESSÃO ANTERIOR
     setTimeout(async () => {
         await restoreMonitorsPersistence();
     }, 2000);

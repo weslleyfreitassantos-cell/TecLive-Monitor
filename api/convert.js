@@ -20,7 +20,10 @@ class ConvertAPI {
             this.cookieRotator.setEmailAlerts(this.emailAlerts);
         }
         
-        this.scheduler = new GlobalScheduler(30000, 6, this.cookieRotator);
+        // ============================================================
+        // 🔧 ALTERADO: Aumentado o intervalo do scheduler para 60s
+        // ============================================================
+        this.scheduler = new GlobalScheduler(60000, 6, this.cookieRotator);
         this.pendingConversions = new Map();
     }
 
@@ -251,7 +254,6 @@ class ConvertAPI {
             } catch (error) {
                 console.log(`❌ ${file} falhou: ${error.message}`);
                 failedCookies.push({ file, error: error.message });
-                // Marca falha apenas se for erro de cookie (para não poluir com erros de rede)
                 const errorMsg = error.message.toLowerCase();
                 const isCookieError = 
                     errorMsg.includes('no video formats found') ||
@@ -306,7 +308,10 @@ class ConvertAPI {
         monitor.isLive = true;
         monitor.owner = owner;
         monitor.metadata = metadata;
-        monitor.startMonitoring(30);
+        // ============================================================
+        // 🔧 ALTERADO: Aumentado o intervalo de verificação do monitor para 60s
+        // ============================================================
+        monitor.startMonitoring(60);
         
         this.activeMonitors.set(key, monitor);
         this._persistMapping(videoId, youtubeUrl, owner, metadata);
