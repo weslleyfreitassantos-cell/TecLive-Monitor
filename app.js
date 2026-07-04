@@ -1037,12 +1037,25 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
             contentToServe = filterMasterByMaxHeight(contentToServe, finalMaxHeight);
             console.log(`[${videoId}] 📦 Servindo manifesto master filtrado até ${finalMaxHeight}p`);
         } else {
+            // --- ESTABILIZAÇÃO DE SEQUÊNCIA HLS PARA EXOPLAYER ---
             const parsed = parseM3u8Info(contentToServe);
-            if (parsed.sequence !== null) {
-                if (monitor.lastMediaSequence === null || parsed.sequence > monitor.lastMediaSequence) {
+            const prev = lastServedSequence.get(videoId);
+            
+            if (parsed.sequence !== null && prev && parsed.sequence < prev.sequence) {
+                console.warn(`[${videoId}] ⚠️ Detectada regressão de sequência (${prev.sequence} → ${parsed.sequence}). Forçando correção.`);
+                
+                // Se a sequência regrediu, tentamos usar o cache "bom" anterior para evitar erro no ExoPlayer
+                const stale = getStaleM3u8IfFresh(videoId, monitor.lastMediaSequence);
+                if (stale) {
+                    console.log(`[${videoId}] 🔄 Usando playlist anterior estável para evitar BehindLiveWindowException.`);
+                    contentToServe = stale.content;
+                }
+            }
+
+            const finalParsed = parseM3u8Info(contentToServe);
+            if (finalParsed.sequence !== null) {
+                if (monitor.lastMediaSequence === null || finalParsed.sequence > monitor.lastMediaSequence) {
                     rememberGoodM3u8(videoId, contentToServe);
-                } else {
-                    console.log(`[${videoId}] Sequência não avançou (${parsed.sequence}), não atualizando lastGood.`);
                 }
             } else {
                 rememberGoodM3u8(videoId, contentToServe);

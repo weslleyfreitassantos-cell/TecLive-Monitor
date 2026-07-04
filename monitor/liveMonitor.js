@@ -121,7 +121,9 @@ class LiveMonitor {
     }
 
     calculateMaxRepeats() {
-        return Math.max(3, Math.ceil(this.maxStallTimeMs / this.intervalMs));
+        // Aumentamos a tolerância para 6 verificações (aprox. 48 segundos com intervalo de 8s)
+        // Isso evita renovações excessivas que causam o BehindLiveWindowException no ExoPlayer
+        return Math.max(6, Math.ceil(this.maxStallTimeMs / this.intervalMs));
     }
 
     extractVideoId(url) {
