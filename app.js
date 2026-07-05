@@ -450,7 +450,6 @@ function getTotalViewers() {
 // FILTRO DE QUALIDADE (NÃO UTILIZADO - mantido apenas para compatibilidade)
 // ============================================================
 function filterMasterByMaxHeight(masterContent, maxHeight) {
-    // Esta função não é mais utilizada para evitar travamentos.
     console.warn('[filterMaster] Chamado, mas retornando conteúdo original (filtro desativado)');
     return masterContent;
 }
@@ -915,13 +914,11 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     const userAgentActivity = req.headers['user-agent'] || '';
     trackViewer(trackingOwner, videoId, clientIpActivity, userAgentActivity, localIp);
 
-    monitor._currentMaxHeight = finalMaxHeight;
     monitor.lastAccess = Date.now();
 
     // ============================================================
-    // 🔧 NOVO: PROXY DE PLAYLISTS DE QUALIDADE
+    // 🔧 PROXY DE PLAYLISTS DE QUALIDADE (individual por requisição)
     // ============================================================
-    // Se a requisição tem o parâmetro max, é uma solicitação de playlist de qualidade.
     if (urlMaxHeight && monitor._playlistUrls && monitor._playlistUrls[urlMaxHeight]) {
         const playlistUrl = monitor._playlistUrls[urlMaxHeight];
         console.log(`[${videoId}] 🎯 Servindo playlist de qualidade ${urlMaxHeight}p diretamente do YouTube`);
@@ -942,7 +939,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         }
     }
 
-    // Se não for uma requisição de qualidade, verifica se é o master.
+    // Se não for requisição de qualidade, verifica se é o master
     if (monitor._masterContent && monitor._masterContent.isMaster) {
         const rawContent = monitor._masterContent.content;
         console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (sem filtro)`);
@@ -958,7 +955,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         return;
     }
 
-    // Caso não tenha masterContent (ex: monitor ainda sem metadados), tenta o fetch normal
+    // Fallback: fetch normal
     try {
         const result = await fetchM3u8WithCache(videoId, monitor.m3u8Url);
 

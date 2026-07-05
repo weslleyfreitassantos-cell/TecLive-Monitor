@@ -1,10 +1,9 @@
-﻿// monitor/liveMonitor.js - Versão com ABR (master artificial) e suporte a maxHeight dinâmico
+﻿// monitor/liveMonitor.js - Versão com ABR (master artificial) e suporte a maxHeight por requisição
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
-const scheduler = require('../scheduler');
 const CookieRotator = require('../cookieRotator');
 
 // ============================================================
@@ -60,7 +59,7 @@ class LiveMonitor {
         this._activeMonitors = activeMonitorsMap;
         this._scheduler = scheduler;
         this._cookieRotator = cookieRotator;
-        this._onEnd = onEnd; // callback quando a live terminar
+        this._onEnd = onEnd;
         
         this.metadataFails = 0;
         this.segmentFails = 0;
@@ -115,11 +114,10 @@ class LiveMonitor {
         this._liveEndedFirstDetection = null;
         this.lastRefreshFailedAt = 0;
         
-        // ✅ NOVO: armazenar maxHeight (passado pelo proxy)
-        this._currentMaxHeight = null; // será setado via proxy
-
-        // ✅ NOVO: armazenar URLs das playlists de qualidade (altura -> URL)
+        // ✅ Armazenar URLs das playlists de qualidade (altura -> URL)
         this._playlistUrls = {};
+        // Armazenar master artificial (se gerado)
+        this._masterContent = null;
     }
 
     calculateMaxRepeats() {
@@ -138,7 +136,7 @@ class LiveMonitor {
     }
 
     // ============================================================
-    // ✅ _runYtdlp CORRIGIDA COM NOTIFICAÇÃO DE FALHA
+    // _runYtdlp (mantida igual)
     // ============================================================
     _runYtdlp(args, timeout = YTDLP_TIMEOUT) {
         return new Promise(async (resolve, reject) => {
@@ -353,16 +351,13 @@ class LiveMonitor {
     }
 
     // ============================================================
-    // ✅ FUNÇÃO CORRIGIDA: RECEBE maxHeight POR PARÂMETRO E ARMAZENA PLAYLISTS
+    // extractHlsUrl – recebe maxHeight por parâmetro (não armazena)
     // ============================================================
     extractHlsUrl(metadata, maxHeight = null) {
         if (!metadata.formats || !Array.isArray(metadata.formats)) return null;
 
-        const effectiveMax = maxHeight !== null ? maxHeight :
-                           (this._currentMaxHeight !== null ? this._currentMaxHeight :
-                           parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080);
-
-        const forceArtificial = (maxHeight !== null || this._currentMaxHeight !== null);
+        const effectiveMax = maxHeight !== null ? maxHeight : parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
+        const forceArtificial = (maxHeight !== null);
 
         // 1. Tenta usar master original (se existir) APENAS se não for forçado
         if (!forceArtificial) {
@@ -375,7 +370,6 @@ class LiveMonitor {
             if (masterFormat) {
                 this._masterContent = null;
                 console.log(`[${this.videoId}] 📺 Usando master original do YouTube.`);
-                // Mesmo com master original, ainda preenchemos playlistUrls a partir das variantes
                 this._populatePlaylistUrls(metadata.formats);
                 return masterFormat.url;
             }
@@ -449,7 +443,6 @@ class LiveMonitor {
         return bestUrl;
     }
 
-    // Helper para preencher playlistUrls a partir de uma lista de formats
     _populatePlaylistUrls(formats) {
         const playlistUrls = {};
         (formats || []).forEach(f => {
@@ -614,7 +607,8 @@ class LiveMonitor {
         try {
             const metadataResult = await this.getLiveMetadata(true);
             if (!metadataResult.success) throw new Error(metadataResult.error);
-            const newUrl = this.extractHlsUrl(metadataResult.metadata, this._currentMaxHeight);
+            // Passa null para não forçar artificial, usa o padrão do .env
+            const newUrl = this.extractHlsUrl(metadataResult.metadata, null);
             if (!newUrl) throw new Error('Nova URL não encontrada');
             if (newUrl !== this.m3u8Url) {
                 this.m3u8Url = newUrl;
@@ -702,7 +696,8 @@ class LiveMonitor {
             }
             return;
         }
-        const newUrl = this.extractHlsUrl(metadata, this._currentMaxHeight);
+        // Passa null para não forçar artificial no ciclo normal (usa .env)
+        const newUrl = this.extractHlsUrl(metadata, null);
         if (!newUrl) {
             console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada`);
             this.urlFails++;
