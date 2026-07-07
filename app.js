@@ -656,10 +656,11 @@ function removePersistedMapping(videoId, owner) {
 // ========== CACHE ==========
 const m3u8CachePromises = new Map();
 const m3u8CacheContent = new Map();
-const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 15000;
+// REDUZIDO para 5 segundos para forçar atualizações mais frequentes
+const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 5000;
 
-const REFRESH_WAIT_MS = 15000;
-const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 120000;
+const REFRESH_WAIT_MS = 20000; // Aumentado para 20s
+const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000; // 1 minuto
 
 const lastGoodM3u8 = new Map();
 
@@ -923,7 +924,20 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         const playlistUrl = monitor._playlistUrls[urlMaxHeight];
         console.log(`[${videoId}] 🎯 Servindo playlist de qualidade ${urlMaxHeight}p diretamente do YouTube`);
         try {
-            const result = await fetchM3u8WithCache(videoId + '_' + urlMaxHeight, playlistUrl);
+            // Força a renovação do cache, evitando servir conteúdo antigo
+            const cacheKey = videoId + '_' + urlMaxHeight;
+            // Remove o cache existente para forçar um fetch fresco
+            if (m3u8CacheContent.has(cacheKey)) {
+                const cached = m3u8CacheContent.get(cacheKey);
+                if (Date.now() - cached.fetchedAt > M3U8_CACHE_TTL) {
+                    m3u8CacheContent.delete(cacheKey);
+                    m3u8CachePromises.delete(cacheKey);
+                }
+            }
+            const result = await fetchM3u8WithCache(cacheKey, playlistUrl);
+            let content = result.content;
+            // Log do início do conteúdo para verificar se é uma playlist válida
+            console.log(`[${videoId}] 🔍 Playlist ${urlMaxHeight}p recebida (${content.length} bytes), primeiros 200 chars: ${content.substring(0, 200).replace(/\n/g, ' ')}`);
             res.writeHead(200, {
                 'Content-Type': 'application/vnd.apple.mpegurl',
                 'Access-Control-Allow-Origin': '*',
@@ -931,7 +945,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                 'Pragma': 'no-cache',
                 'Expires': '0'
             });
-            res.end(result.content);
+            res.end(content);
             return;
         } catch (err) {
             console.error(`[${videoId}] ❌ Erro ao buscar playlist ${urlMaxHeight}:`, err.message);
