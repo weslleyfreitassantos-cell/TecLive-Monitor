@@ -1,4 +1,4 @@
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$TaskName = 'TecLive Cookie Sync Agent',
     [string]$ConfigPath,
@@ -8,6 +8,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Import-Module ScheduledTasks -ErrorAction Stop
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $PSScriptRoot 'cookie-agent.config.json'
@@ -29,7 +30,9 @@ if ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) -and -
     throw "Tarefa ja existe. Use -Force para substituir: $TaskName"
 }
 if ($Force) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if ($PSCmdlet.ShouldProcess($TaskName, 'remover tarefa existente')) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-ScheduledTaskRunLevel {
@@ -59,9 +62,13 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 $runLevel = Get-ScheduledTaskRunLevel -Elevated:$RunAsAdmin.IsPresent
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel $runLevel
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
+if ($PSCmdlet.ShouldProcess($TaskName, "criar tarefa agendada com RunLevel $runLevel")) {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
+    Write-Host "Tarefa criada: $TaskName"
+} else {
+    Write-Host "Tarefa validada: $TaskName"
+}
 
-Write-Host "Tarefa criada: $TaskName"
 Write-Host "Comando: $ps $arguments"
 Write-Host "RunLevel: $runLevel"
 Write-Host "A tarefa nao foi iniciada automaticamente por este instalador."

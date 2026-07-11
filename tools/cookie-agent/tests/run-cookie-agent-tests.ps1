@@ -54,6 +54,18 @@ Assert-True ($installContent -match 'RunLevelEnum') 'Deteccao defensiva do enum 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie-agent-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
+    $installConfig = Join-Path $tmp 'install-config.json'
+    '{}' | Set-Content -LiteralPath $installConfig -Encoding UTF8
+    $defaultTaskName = "Cookie Agent Test Default $([guid]::NewGuid().ToString('N'))"
+    $adminTaskName = "Cookie Agent Test Admin $([guid]::NewGuid().ToString('N'))"
+    $defaultInstall = (& $install -TaskName $defaultTaskName -ConfigPath $installConfig -WhatIf *>&1) -join "`n"
+    $adminInstall = (& $install -TaskName $adminTaskName -ConfigPath $installConfig -RunAsAdmin -WhatIf *>&1) -join "`n"
+    Assert-True ($defaultInstall -match 'RunLevel:\s+Limited') 'Padrao do instalador deve usar Limited'
+    Assert-True ($adminInstall -match 'RunLevel:\s+Highest') 'RunAsAdmin deve usar Highest'
+    Assert-True (($defaultInstall + $adminInstall) -notmatch 'RunLevel:\s+LeastPrivilege') 'Instalador nunca deve usar LeastPrivilege'
+    $createdInstallTasks = Get-ScheduledTask -TaskName $defaultTaskName, $adminTaskName -ErrorAction SilentlyContinue
+    Assert-True (-not $createdInstallTasks) 'Teste do instalador nao deve criar tarefa real'
+
     $missing = Join-Path $tmp 'missing.json'
     $missingExit = Invoke-Agent -Arguments @('-Once', '-DryRun', '-ConfigPath', $missing)
     Assert-True ($missingExit -ne 0) 'Config ausente deveria falhar'
