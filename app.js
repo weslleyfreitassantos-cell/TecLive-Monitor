@@ -1525,13 +1525,23 @@ function mapQueueResultToStatus(result) {
     return 400;
 }
 
+function positiveNumber(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
 function getCookieRefreshAdminStatus() {
     const queueStatus = cookieRefreshQueue.getStatus();
     const agents = queueStatus.agents || [];
     const lastAgent = agents[0] || null;
-    const offlineMs = Number(process.env.COOKIE_AGENT_OFFLINE_MS || 90000);
-    const agentOnline = lastAgent?.lastSeen ? (Date.now() - Date.parse(lastAgent.lastSeen) <= offlineMs) : false;
     const queueCheckedAt = new Date().toISOString();
+    const agentTiming = CookieRefreshQueue.computeAgentStatus(lastAgent, {
+        heartbeatRecentMs: positiveNumber(
+            process.env.COOKIE_AGENT_HEARTBEAT_RECENT_MS || process.env.COOKIE_AGENT_OFFLINE_MS,
+            90000
+        ),
+        activityRecentMs: positiveNumber(process.env.COOKIE_AGENT_ACTIVITY_RECENT_MS, 180000)
+    });
     const recentJobs = queueStatus.recentJobs || [];
     const byLatestJobUpdate = (a, b) => {
         const aTime = Date.parse(a.completedAt || a.updatedAt || a.createdAt || 0);
@@ -1550,13 +1560,20 @@ function getCookieRefreshAdminStatus() {
     return {
         enabled: Boolean(process.env.COOKIE_AGENT_TOKEN),
         tokenConfigured: Boolean(process.env.COOKIE_AGENT_TOKEN),
-        agent: lastAgent ? {
-            online: agentOnline,
-            lastSeen: lastAgent.lastSeen,
-            hostname: lastAgent.hostname,
-            version: lastAgent.version,
-            status: lastAgent.status
-        } : null,
+        agent: {
+            online: agentTiming.online,
+            status: agentTiming.status,
+            reason: agentTiming.reason,
+            lastSeen: agentTiming.lastHeartbeatAt,
+            lastHeartbeatAt: agentTiming.lastHeartbeatAt,
+            lastQueueCheckAt: agentTiming.lastQueueCheckAt,
+            lastAgentActivityAt: agentTiming.lastAgentActivityAt,
+            heartbeatAgeSeconds: agentTiming.heartbeatAgeSeconds,
+            activityAgeSeconds: agentTiming.activityAgeSeconds,
+            hostname: lastAgent?.hostname || null,
+            version: lastAgent?.version || null,
+            reportedStatus: lastAgent?.status || null
+        },
         counts: queueStatus.counts,
         activeJobs: queueStatus.activeJobs,
         recentJobs,
@@ -1567,7 +1584,7 @@ function getCookieRefreshAdminStatus() {
             lastCookieUpdated: lastCookieUpdated?.cookie || null,
             lastCookieUpdatedAt: lastCookieUpdated?.completedAt || lastCookieUpdated?.updatedAt || null,
             lastError: lastErrorJob?.lastError || null,
-            lastQueueCheck: queueCheckedAt
+            lastQueueCheck: agentTiming.lastQueueCheckAt
         },
         cookies: converter?.cookieRotator?.getFunctionalStatus ? converter.cookieRotator.getFunctionalStatus() : {},
         timestamp: queueCheckedAt
@@ -1612,6 +1629,7 @@ app.get('/api/cookie/functional-status', isAuthenticated, (req, res) => {
 app.use('/api/cookie-agent', cookieAgentLimiter, authenticateCookieAgent);
 
 app.get('/api/cookie-agent/jobs/next', (req, res) => {
+    cookieRefreshQueue.recordQueueCheck(req.agentId);
     const job = cookieRefreshQueue.getNextPending();
     if (!job) return res.status(204).send();
     res.json({ success: true, job });

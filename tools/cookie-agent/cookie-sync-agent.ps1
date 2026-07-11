@@ -19,6 +19,7 @@ $script:ShutdownRequested = $false
 $script:RuntimeStatePath = Get-CookieAgentRuntimeStatePath -ScriptRoot $PSScriptRoot
 $script:LifecycleLogPath = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'logs\cookie-agent\agent.log'
 $script:HasRuntimeOwnership = $false
+$script:HeartbeatFailureActive = $false
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $PSScriptRoot 'cookie-agent.config.json'
@@ -75,8 +76,41 @@ function Protect-ConfigAcl {
     param([string]$Path)
     if ($env:OS -notmatch 'Windows') { return }
     try {
-        $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        & icacls $Path /inheritance:r /grant:r "${user}:R" *> $null
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $systemSid = [System.Security.Principal.SecurityIdentifier]::new(
+            [System.Security.Principal.WellKnownSidType]::LocalSystemSid,
+            $null
+        )
+        $adminsSid = [System.Security.Principal.SecurityIdentifier]::new(
+            [System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,
+            $null
+        )
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.Access)) {
+            [void]$acl.RemoveAccessRuleSpecific($rule)
+        }
+        $rules = @(
+            [System.Security.AccessControl.FileSystemAccessRule]::new(
+                $currentUser,
+                [System.Security.AccessControl.FileSystemRights]::Read,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            ),
+            [System.Security.AccessControl.FileSystemAccessRule]::new(
+                $systemSid,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            ),
+            [System.Security.AccessControl.FileSystemAccessRule]::new(
+                $adminsSid,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                [System.Security.AccessControl.AccessControlType]::Allow
+            )
+        )
+        foreach ($rule in $rules) {
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
     } catch {
         Write-Verbose "Nao foi possivel ajustar ACL do config: $($_.Exception.Message)"
     }
@@ -232,16 +266,19 @@ function Assert-AgentApiSuccess {
 
 function Assert-Prerequisites {
     param([pscustomobject]$Config, [string]$CookieSyncScript)
-    foreach ($cmd in @('yt-dlp', 'ssh', 'scp')) {
-        if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-            throw "Comando obrigatorio ausente: $cmd"
-        }
-    }
     if (-not (Test-Path -LiteralPath $CookieSyncScript -PathType Leaf)) {
         throw "Cookie Sync ausente: $CookieSyncScript"
     }
     if ([string]::IsNullOrWhiteSpace([string]$Config.server.token)) {
         throw 'Token ausente no config local.'
+    }
+}
+
+function Assert-CookieSyncToolsAvailable {
+    foreach ($cmd in @('yt-dlp', 'ssh', 'scp')) {
+        if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+            throw "Comando obrigatorio ausente: $cmd"
+        }
     }
 }
 
@@ -305,6 +342,32 @@ function Send-Heartbeat {
     }
 }
 
+function Invoke-AgentHeartbeat {
+    param(
+        [pscustomobject]$Config,
+        [string]$Status,
+        [string]$LogPath
+    )
+    $response = Send-Heartbeat -Config $Config -Status $Status
+    $ok = $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
+    if ($ok) {
+        Update-RuntimeState @{ lastHeartbeatAt = (Get-Date).ToString('o') }
+        if ($script:HeartbeatFailureActive) {
+            Write-AgentLog -Path $LogPath -Message "Heartbeat recuperado ($Status)."
+        } else {
+            Write-AgentLog -Path $LogPath -Message "Heartbeat enviado ($Status)."
+        }
+        $script:HeartbeatFailureActive = $false
+        return $true
+    }
+
+    if (-not $script:HeartbeatFailureActive) {
+        Write-AgentLog -Path $LogPath -Message "Heartbeat falhou: HTTP $($response.StatusCode)."
+    }
+    $script:HeartbeatFailureActive = $true
+    return $false
+}
+
 function Send-PendingReport {
     param(
         [pscustomobject]$Config,
@@ -350,6 +413,7 @@ function Invoke-CookieSync {
     if ($AllowedCookies -notcontains $Cookie) {
         throw "Cookie invalido: $Cookie"
     }
+    Assert-CookieSyncToolsAvailable
     $psExe = (Get-Process -Id $PID).Path
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, '-Cookie', $Cookie)
     if ($VerboseOutput) { $arguments += '-VerboseOutput' }
@@ -393,9 +457,7 @@ function Invoke-OneCycle {
         [string]$RuntimeStatePath
     )
     $heartbeatStatus = if ($DryRun) { 'dry-run' } else { 'idle' }
-    [void](Send-Heartbeat -Config $Config -Status $heartbeatStatus)
-    Update-RuntimeState @{ lastHeartbeatAt = (Get-Date).ToString('o') }
-    Write-AgentLog -Path $LogPath -Message "Heartbeat enviado ($heartbeatStatus)."
+    [void](Invoke-AgentHeartbeat -Config $Config -Status $heartbeatStatus -LogPath $LogPath)
     if (-not (Send-PendingReport -Config $Config -StatePath $StatePath -LogPath $LogPath)) {
         return $false
     }
@@ -437,9 +499,10 @@ function Invoke-OneCycle {
     $running = Invoke-AgentApi -Config $Config -Method POST -Path "/api/cookie-agent/jobs/$($job.id)/running"
     Assert-AgentApiSuccess -Response $running -Action 'marcar running'
     Write-AgentLog -Path $LogPath -Message "Job running: $($job.id)."
-    [void](Send-Heartbeat -Config $Config -Status "running:$cookie")
-    Update-RuntimeState @{ lastHeartbeatAt = (Get-Date).ToString('o') }
-    Write-AgentLog -Path $LogPath -Message "Heartbeat enviado (running:$cookie)."
+    [void](Invoke-AgentHeartbeat -Config $Config -Status "running:$cookie" -LogPath $LogPath)
+    if ($VerboseOutput) {
+        Write-AgentLog -Path $LogPath -Message "Processo filho autorizado: powershell; motivo=cookie-sync-job."
+    }
     Write-AgentLog -Path $LogPath -Message "Cookie Sync iniciado para $cookie (job $($job.id))."
     Write-AgentLog -Path $LogPath -Message "Executando Cookie Sync para $cookie (job $($job.id))."
 

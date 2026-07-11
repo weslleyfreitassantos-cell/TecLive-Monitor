@@ -167,6 +167,63 @@ function testRotatorDoesNotCancelClaimedOrRunning() {
     assert.equal(runningAfter.status, 'running');
 }
 
+function testAgentStatusClassification() {
+    const now = Date.parse('2026-07-11T12:00:00.000Z');
+    const heartbeatRecent = CookieRefreshQueue.computeAgentStatus({
+        lastSeen: '2026-07-11T11:59:20.000Z',
+        lastQueueCheck: '2026-07-11T11:58:00.000Z'
+    }, { nowMs: now, heartbeatRecentMs: 90000, activityRecentMs: 180000 });
+    assert.equal(heartbeatRecent.status, 'online');
+    assert.equal(heartbeatRecent.reason, 'heartbeat_recent');
+
+    const queueRecent = CookieRefreshQueue.computeAgentStatus({
+        lastSeen: '2026-07-11T11:55:00.000Z',
+        lastQueueCheck: '2026-07-11T11:59:00.000Z'
+    }, { nowMs: now, heartbeatRecentMs: 90000, activityRecentMs: 180000 });
+    assert.equal(queueRecent.status, 'degraded');
+    assert.equal(queueRecent.reason, 'heartbeat_stale_queue_recent');
+
+    const staleHeartbeatRecentActivity = CookieRefreshQueue.computeAgentStatus({
+        lastSeen: '2026-07-11T11:58:20.000Z'
+    }, { nowMs: now, heartbeatRecentMs: 90000, activityRecentMs: 180000 });
+    assert.equal(staleHeartbeatRecentActivity.status, 'degraded');
+
+    const stale = CookieRefreshQueue.computeAgentStatus({
+        lastSeen: '2026-07-11T11:50:00.000Z',
+        lastQueueCheck: '2026-07-11T11:50:30.000Z'
+    }, { nowMs: now, heartbeatRecentMs: 90000, activityRecentMs: 180000 });
+    assert.equal(stale.status, 'offline');
+    assert.equal(stale.reason, 'no_recent_activity');
+
+    const neverSeen = CookieRefreshQueue.computeAgentStatus(null, { nowMs: now });
+    assert.equal(neverSeen.status, 'offline');
+    assert.equal(neverSeen.reason, 'never_seen');
+
+    const invalid = CookieRefreshQueue.computeAgentStatus({
+        lastSeen: 'not-a-date',
+        lastQueueCheck: 'also-invalid'
+    }, { nowMs: now });
+    assert.equal(invalid.status, 'offline');
+    assert.equal(invalid.reason, 'never_seen');
+}
+
+function testQueueCheckActivityIsPersisted() {
+    const dir = tempDir();
+    const queue = new CookieRefreshQueue({ filePath: path.join(dir, 'jobs.json') });
+    queue.recordQueueCheck('agent-a');
+    const agent = queue.getAgents()[0];
+    assert.equal(agent.agentId, 'agent-a');
+    assert.ok(agent.lastQueueCheckAt);
+    assert.equal(agent.lastSeen, null);
+    const status = CookieRefreshQueue.computeAgentStatus(agent, {
+        nowMs: Date.parse(agent.lastQueueCheckAt),
+        heartbeatRecentMs: 90000,
+        activityRecentMs: 180000
+    });
+    assert.equal(status.status, 'degraded');
+    assert.equal(status.reason, 'heartbeat_stale_queue_recent');
+}
+
 function testSecurityAndDashboardStaticChecks() {
     const app = readApp();
     assert.ok(app.includes('COOKIE_AGENT_TOKEN'));
@@ -174,6 +231,10 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(app.includes("Object.prototype.hasOwnProperty.call(req.query || {}, 'token')"));
     assert.ok(app.includes("app.use('/api/cookie-agent', cookieAgentLimiter, authenticateCookieAgent)"));
     assert.ok(app.includes('/api/admin/cookie-refresh/status'));
+    assert.ok(app.includes('recordQueueCheck(req.agentId)'));
+    assert.ok(app.includes('lastAgentActivityAt'));
+    assert.ok(app.includes('heartbeatAgeSeconds'));
+    assert.ok(app.includes('activityAgeSeconds'));
     assert.ok(app.includes('lastQueueCheck'));
     assert.ok(app.includes('lastCookieUpdated'));
 
@@ -185,6 +246,8 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(dashboard.includes('Último cookie atualizado'));
     assert.ok(dashboard.includes('Último erro'));
     assert.ok(dashboard.includes('Última consulta à fila'));
+    assert.ok(dashboard.includes('DEGRADADO'));
+    assert.ok(dashboard.includes('atividade recente, heartbeat atrasado'));
     assert.ok(dashboard.includes('/api/admin/cookie-refresh/enqueue/'));
     assert.ok(!dashboard.includes('COOKIE_AGENT_TOKEN'));
     assert.ok(!dashboard.includes('LINHA DO TEMPO'));
@@ -198,6 +261,8 @@ testInvalidJsonRecoveryAndHistory();
 testSanitization();
 testRotatorIntegration();
 testRotatorDoesNotCancelClaimedOrRunning();
+testAgentStatusClassification();
+testQueueCheckActivityIsPersisted();
 testSecurityAndDashboardStaticChecks();
 
 console.log('Cookie refresh automation Node tests OK');

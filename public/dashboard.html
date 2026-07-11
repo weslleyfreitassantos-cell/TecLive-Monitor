@@ -526,6 +526,9 @@
         .automation-pill.ok { border-left-color: #2ecc71; }
         .automation-pill.warn { border-left-color: #f1c40f; }
         .automation-pill.fail { border-left-color: #e74c3c; }
+        .cookie-automation-card .badge.ok { background: rgba(46,204,113,0.1); color: #2ecc71; }
+        .cookie-automation-card .badge.warn { background: rgba(241,196,15,0.1); color: #f1c40f; }
+        .cookie-automation-card .badge.fail { background: rgba(231,76,60,0.1); color: #e74c3c; }
         .automation-label {
             color: #7a8aa0;
             font-size: 11px;
@@ -1940,6 +1943,7 @@
 
         if (!status || !status.enabled) {
             badge.textContent = 'DESATIVADA';
+            badge.classList.remove('ok', 'warn', 'fail');
             container.innerHTML = `
                 <div class="public-mode-card">
                     AUTOMAÇÃO DESATIVADA<br>
@@ -1958,9 +1962,15 @@
         const pendingCancelable = recentJobs.some(item => item.status === 'pending');
         const disabledAttr = cookieAutomationBusy ? 'disabled' : '';
         const cancelDisabledAttr = cookieAutomationBusy || !pendingCancelable ? 'disabled' : '';
-        const agentClass = agent?.online ? 'ok' : 'fail';
-        const stage = activeJob ? getAutomationStage(activeJob) : (agent?.online ? 'aguardando tarefa' : 'agente offline');
-        const agentStatus = agent?.online ? 'ONLINE' : 'OFFLINE';
+        const agentState = agent?.status || 'offline';
+        const agentClass = agentState === 'online' ? 'ok' : (agentState === 'degraded' ? 'warn' : 'fail');
+        const agentMessages = {
+            online: 'aguardando tarefa',
+            degraded: 'atividade recente, heartbeat atrasado',
+            offline: 'sem atividade recente'
+        };
+        const stage = activeJob ? getAutomationStage(activeJob) : (agentMessages[agentState] || 'sem atividade recente');
+        const agentStatus = agentState === 'online' ? 'ONLINE' : (agentState === 'degraded' ? 'DEGRADADO' : 'OFFLINE');
         const lastExecutionLabel = summary.lastExecutionAt
             ? `${formatDateTime(summary.lastExecutionAt)}`
             : '—';
@@ -1972,9 +1982,11 @@
             : '—';
         const lastCookieUpdatedMeta = formatDateTime(summary.lastCookieUpdatedAt);
         const lastError = summary.lastError || 'Nenhum';
-        const lastQueueCheck = formatDateTime(summary.lastQueueCheck || status.timestamp);
+        const lastQueueCheck = formatDateTime(agent?.lastQueueCheckAt || summary.lastQueueCheck);
 
         badge.textContent = agentStatus;
+        badge.classList.remove('ok', 'warn', 'fail');
+        badge.classList.add(agentClass);
 
         const cookieRows = ['cookie1', 'cookie2', 'cookie3'].map(name => {
             const info = cookies[name] || {};
@@ -2004,7 +2016,7 @@
                 </div>
                 <div class="automation-pill ${activeJob ? 'warn' : 'ok'}">
                     <div class="automation-label">Último heartbeat</div>
-                    <div class="automation-value">${escapeHtml(formatDateTime(agent?.lastSeen))}</div>
+                    <div class="automation-value">${escapeHtml(formatDateTime(agent?.lastHeartbeatAt || agent?.lastSeen))}</div>
                     <div class="automation-muted">${escapeHtml(stage)}</div>
                 </div>
                 <div class="automation-pill">
@@ -2059,7 +2071,11 @@
         } catch (err) {
             const badge = document.getElementById('cookieAutomationBadge');
             const container = document.getElementById('cookieAutomationContent');
-            if (badge) badge.textContent = 'ERRO';
+            if (badge) {
+                badge.textContent = 'ERRO';
+                badge.classList.remove('ok', 'warn', 'fail');
+                badge.classList.add('fail');
+            }
             if (container) {
                 container.innerHTML = `<div class="public-mode-card">Falha ao carregar automação<br><span style="color:#e74c3c;">${escapeHtml(err.message)}</span></div>`;
             }

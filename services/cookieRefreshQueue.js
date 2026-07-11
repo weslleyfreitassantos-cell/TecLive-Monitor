@@ -22,6 +22,61 @@ class CookieRefreshQueue {
         return new Date().toISOString();
     }
 
+    static _timeMs(value) {
+        const time = Date.parse(value || '');
+        return Number.isFinite(time) ? time : null;
+    }
+
+    static _ageSeconds(value, nowMs) {
+        const time = CookieRefreshQueue._timeMs(value);
+        if (time === null) return null;
+        return Math.max(0, Math.floor((nowMs - time) / 1000));
+    }
+
+    static _latestTimestamp(...values) {
+        const latest = values
+            .map(value => ({ value, time: CookieRefreshQueue._timeMs(value) }))
+            .filter(item => item.time !== null)
+            .sort((a, b) => b.time - a.time)[0];
+        return latest ? latest.value : null;
+    }
+
+    static computeAgentStatus(agent, options = {}) {
+        const nowMs = Number(options.nowMs || Date.now());
+        const heartbeatRecentMs = Number(options.heartbeatRecentMs || 90000);
+        const activityRecentMs = Number(options.activityRecentMs || 180000);
+        const lastHeartbeatAt = agent?.lastSeen || agent?.lastHeartbeatAt || null;
+        const lastQueueCheckAt = agent?.lastQueueCheckAt || agent?.lastQueueCheck || null;
+        const lastAgentActivityAt = CookieRefreshQueue._latestTimestamp(lastHeartbeatAt, lastQueueCheckAt);
+        const heartbeatAgeSeconds = CookieRefreshQueue._ageSeconds(lastHeartbeatAt, nowMs);
+        const activityAgeSeconds = CookieRefreshQueue._ageSeconds(lastAgentActivityAt, nowMs);
+        const heartbeatRecent = heartbeatAgeSeconds !== null && heartbeatAgeSeconds * 1000 <= heartbeatRecentMs;
+        const activityRecent = activityAgeSeconds !== null && activityAgeSeconds * 1000 <= activityRecentMs;
+
+        let status = 'offline';
+        let reason = 'never_seen';
+        if (heartbeatRecent) {
+            status = 'online';
+            reason = 'heartbeat_recent';
+        } else if (activityRecent) {
+            status = 'degraded';
+            reason = 'heartbeat_stale_queue_recent';
+        } else if (lastAgentActivityAt) {
+            reason = 'no_recent_activity';
+        }
+
+        return {
+            online: status === 'online',
+            status,
+            reason,
+            lastHeartbeatAt,
+            lastQueueCheckAt,
+            lastAgentActivityAt,
+            heartbeatAgeSeconds,
+            activityAgeSeconds
+        };
+    }
+
     _shortText(value, limit = this.maxTextLength) {
         return this._redactSensitiveText(value)
             .replace(/\s+/g, ' ')
@@ -331,12 +386,31 @@ class CookieRefreshQueue {
         const store = this._readStore();
         const id = this._shortText(agentId, 120);
         if (!id) throw new Error('agentId ausente');
+        const previous = store.agents[id] || {};
         store.agents[id] = {
             agentId: id,
             hostname: this._shortText(data.hostname, 120),
             version: this._shortText(data.version, 60),
             status: this._shortText(data.status || 'online', 80),
-            lastSeen: this._now()
+            lastSeen: this._now(),
+            lastQueueCheckAt: previous.lastQueueCheckAt || previous.lastQueueCheck || null
+        };
+        this._writeStore(store);
+        return store.agents[id];
+    }
+
+    recordQueueCheck(agentId) {
+        const store = this._readStore();
+        const id = this._shortText(agentId, 120);
+        if (!id) throw new Error('agentId ausente');
+        const previous = store.agents[id] || {};
+        store.agents[id] = {
+            agentId: id,
+            hostname: previous.hostname || '',
+            version: previous.version || '',
+            status: previous.status || 'queue-check',
+            lastSeen: previous.lastSeen || null,
+            lastQueueCheckAt: this._now()
         };
         this._writeStore(store);
         return store.agents[id];
@@ -345,7 +419,11 @@ class CookieRefreshQueue {
     getAgents() {
         const store = this._readStore();
         return Object.values(store.agents || {})
-            .sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')));
+            .sort((a, b) => {
+                const aLatest = CookieRefreshQueue._latestTimestamp(a.lastSeen, a.lastQueueCheckAt, a.lastQueueCheck);
+                const bLatest = CookieRefreshQueue._latestTimestamp(b.lastSeen, b.lastQueueCheckAt, b.lastQueueCheck);
+                return String(bLatest || '').localeCompare(String(aLatest || ''));
+            });
     }
 
     _safeResult(result) {

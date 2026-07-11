@@ -56,6 +56,12 @@ Assert-True ($content -match 'Console\.CancelKeyPress') 'Tratamento de Ctrl+C au
 Assert-True ($content -match 'PowerShell\.Exiting') 'Tratamento de PowerShell.Exiting ausente'
 Assert-True ($content -match 'WaitOne\(\$TimeoutMilliseconds\)') 'Mutex deve usar timeout curto'
 Assert-True ($content -match 'instancia ja em execucao') 'Segunda instancia deve sair com log claro'
+Assert-True ($content -notmatch '&\s+icacls') 'Polling/startup do agente nao deve iniciar icacls.exe'
+Assert-True ($content -match 'Set-Acl') 'Protecao de ACL deve ser feita in-process'
+Assert-True ($content -match 'WellKnownSidType') 'Protecao de ACL deve usar SIDs, nao nomes localizados'
+Assert-True ($content -match 'LocalSystemSid' -and $content -match 'BuiltinAdministratorsSid') 'Protecao de ACL deve preservar SYSTEM e Administrators'
+Assert-True ($content -match 'SetAccessRuleProtection\(\$true, \$false\)') 'Protecao de ACL deve remover heranca generica'
+Assert-True ($content -match 'Assert-CookieSyncToolsAvailable') 'Checagem de yt-dlp/ssh/scp deve ficar no caminho de job'
 Assert-True ($installContent -match 'RunAsAdmin') 'Parametro RunAsAdmin ausente no instalador'
 Assert-True ($installContent -match "'Highest'") 'RunAsAdmin deve usar Highest'
 Assert-True ($installContent -match "'Limited'") 'Padrao deve usar Limited'
@@ -142,6 +148,68 @@ Assert-True ($emptyProcessList -eq $false) 'Lista mock vazia nao deve consultar 
 
 $redacted = Redact-CookieAgentText 'Authorization: Bearer secret-token token:abc C:\Users\Weslley\secret.txt /var/www/livemonitor/app.js # Netscape HTTP Cookie File content'
 Assert-True ($redacted -notmatch 'secret-token|abc|Netscape|C:\\Users|/var/www') 'Redacao de dados sensiveis falhou'
+
+function Import-AgentFunctionDefinitions {
+    param([string]$Path)
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    Assert-True ($errors.Count -eq 0) "Parser falhou em $Path"
+    $functions = $ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+    }, $true)
+    foreach ($function in $functions) {
+        Invoke-Expression ("function script:$($function.Name) $($function.Body.Extent.Text)")
+    }
+}
+
+Import-AgentFunctionDefinitions -Path $agent
+$script:DryRun = $false
+$script:VerboseOutput = $false
+$script:AllowedCookies = @('cookie1', 'cookie2', 'cookie3')
+$script:HeartbeatFailureActive = $false
+$script:heartbeatCalls = 0
+$script:queueCalls = 0
+$script:cookieSyncCalls = 0
+$script:toolChecks = 0
+function Write-AgentLog { param([string]$Path, [string]$Message) }
+function Update-RuntimeState { param([hashtable]$Patch) }
+function Send-PendingReport { param([pscustomobject]$Config, [string]$StatePath, [string]$LogPath) return $true }
+function Assert-CookieSyncToolsAvailable { $script:toolChecks += 1; throw 'tool check should not run during empty polling' }
+function Invoke-CookieSync {
+    $script:cookieSyncCalls += 1
+    throw 'Cookie Sync should not run during empty polling'
+}
+function Invoke-AgentApi {
+    param(
+        [pscustomobject]$Config,
+        [string]$Method,
+        [string]$Path,
+        [object]$Body = $null
+    )
+    if ($Method -eq 'POST' -and $Path -eq '/api/cookie-agent/heartbeat') {
+        $script:heartbeatCalls += 1
+        return [pscustomobject]@{ StatusCode = 200; Data = [pscustomobject]@{ success = $true } }
+    }
+    if ($Method -eq 'GET' -and $Path -eq '/api/cookie-agent/jobs/next') {
+        $script:queueCalls += 1
+        return [pscustomobject]@{ StatusCode = 204; Data = $null }
+    }
+    throw "Chamada inesperada no polling vazio: $Method $Path"
+}
+$mockAgentConfig = [pscustomobject]@{
+    server = [pscustomobject]@{ timeoutSeconds = 900 }
+    agent = [pscustomobject]@{ id = 'mock-agent'; version = 'test' }
+}
+foreach ($i in 1..3) {
+    $emptyCycleOk = Invoke-OneCycle -Config $mockAgentConfig -ProjectPath $root -CookieSyncScript $agent -LogPath 'mock.log' -StatePath 'mock-state.json' -RuntimeStatePath 'mock-runtime.json'
+    Assert-True ($emptyCycleOk -eq $true) "Polling vazio ciclo $i deveria retornar sucesso"
+}
+Assert-True ($script:heartbeatCalls -eq 3) 'Polling vazio deve manter heartbeat'
+Assert-True ($script:queueCalls -eq 3) 'Polling vazio deve consultar fila'
+Assert-True ($script:cookieSyncCalls -eq 0) 'Polling vazio nao deve executar Cookie Sync/processo filho'
+Assert-True ($script:toolChecks -eq 0) 'Polling vazio nao deve checar yt-dlp/ssh/scp'
 
 $invalidStatePath = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie-agent-invalid-state-" + [guid]::NewGuid().ToString('N') + '.json')
 try {
