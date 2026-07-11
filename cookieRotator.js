@@ -8,11 +8,16 @@ class CookieRotator {
         this.cookies = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
         this.currentIndex = 0;
         this.emailAlerts = null;
+        this.refreshQueue = null;
         this.loadStatus();
     }
 
     setEmailAlerts(emailAlerts) {
         this.emailAlerts = emailAlerts;
+    }
+
+    setRefreshQueue(refreshQueue) {
+        this.refreshQueue = refreshQueue;
     }
 
     loadStatus() {
@@ -120,6 +125,39 @@ class CookieRotator {
         return String(errorMsg || '').replace(/\s+/g, ' ').trim().slice(0, 180);
     }
 
+    _queueCookieName(cookieName) {
+        return String(cookieName || '').replace(/\.txt$/i, '');
+    }
+
+    _enqueueRefreshIfAvailable(cookieName, reason) {
+        if (!this.refreshQueue || typeof this.refreshQueue.enqueue !== 'function') return;
+        try {
+            const result = this.refreshQueue.enqueue(this._queueCookieName(cookieName), 'automatic', this._shortError(reason));
+            if (result?.created) {
+                console.log(`🧾 Tarefa automática de atualização criada para ${cookieName}: ${result.job.id}`);
+            } else {
+                console.log(`ℹ️ Tarefa ativa já existe para ${cookieName}; nova tarefa automática não foi criada.`);
+            }
+        } catch (err) {
+            console.error(`⚠️ Falha ao criar tarefa automática para ${cookieName}: ${err.message}`);
+        }
+    }
+
+    _cancelPendingRefreshIfAvailable(cookieName) {
+        if (!this.refreshQueue || typeof this.refreshQueue.cancelPendingForCookie !== 'function') return;
+        try {
+            const cancelled = this.refreshQueue.cancelPendingForCookie(
+                this._queueCookieName(cookieName),
+                'cookie revalidado antes da execução'
+            );
+            if (cancelled.length > 0) {
+                console.log(`🧾 ${cancelled.length} tarefa(s) pendente(s) cancelada(s) para ${cookieName} após revalidação.`);
+            }
+        } catch (err) {
+            console.error(`⚠️ Falha ao cancelar tarefa pendente para ${cookieName}: ${err.message}`);
+        }
+    }
+
     _isKnownNonCookieError(errorMsg) {
         const msg = String(errorMsg || '').toLowerCase();
         const nonCookiePatterns = [
@@ -216,6 +254,7 @@ class CookieRotator {
             if (previousState !== 'invalid') {
                 this.sendInvalidAlert(cookieName, errorMsg);
                 console.log(`❌ Cookie ${cookieName} foi invalidado após ${cookie.failCount} falhas de autenticação/cookie.`);
+                this._enqueueRefreshIfAvailable(cookieName, errorMsg);
             } else {
                 console.log(`❌ Cookie ${cookieName} permanece invalid após nova falha de autenticação/cookie.`);
             }
@@ -255,8 +294,10 @@ class CookieRotator {
 
         if (previousState === 'invalid' || previousState === 'suspect') {
             console.log(`✅ Cookie ${cookieName} foi revalidado após sucesso real do yt-dlp (${previousState} -> valid).`);
+            this._cancelPendingRefreshIfAvailable(cookieName);
         } else if (hadFailureInfo) {
             console.log(`✅ Cookie ${cookieName} recuperado após sucesso real do yt-dlp; falhas anteriores zeradas.`);
+            this._cancelPendingRefreshIfAvailable(cookieName);
         } else {
             console.log(`✅ Cookie ${cookieName} válido; sucesso registrado.`);
         }

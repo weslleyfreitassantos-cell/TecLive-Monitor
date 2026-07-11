@@ -502,6 +502,80 @@
         .public-mode-title { font-size: 16px; font-weight: 700; color: #7a8aa0; text-transform: uppercase; letter-spacing: 2px; }
         .public-mode-message { font-size: 14px; color: #2ecc71; }
 
+        .cookie-automation {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            font-size: 13px;
+        }
+        .automation-summary {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .automation-pill {
+            background: rgba(0,0,0,0.25);
+            border-left: 3px solid #5dade2;
+            border-radius: 6px;
+            padding: 8px 10px;
+            min-height: 48px;
+        }
+        .automation-pill.ok { border-left-color: #2ecc71; }
+        .automation-pill.warn { border-left-color: #f1c40f; }
+        .automation-pill.fail { border-left-color: #e74c3c; }
+        .automation-label {
+            color: #7a8aa0;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 3px;
+        }
+        .automation-value {
+            color: #e0e0e0;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+        .automation-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .automation-actions button {
+            background: rgba(46,204,113,0.12);
+            border: 1px solid rgba(46,204,113,0.25);
+            color: #2ecc71;
+            border-radius: 6px;
+            padding: 7px 10px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .automation-actions button.danger {
+            background: rgba(231,76,60,0.12);
+            border-color: rgba(231,76,60,0.35);
+            color: #e74c3c;
+        }
+        .automation-actions button:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        .automation-jobs {
+            max-height: 150px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .automation-job {
+            background: rgba(0,0,0,0.22);
+            border-radius: 6px;
+            padding: 7px 9px;
+            border-left: 3px solid #7a8aa0;
+        }
+        .automation-job.pending { border-left-color: #f1c40f; }
+        .automation-job.running, .automation-job.claimed { border-left-color: #5dade2; }
+        .automation-job.succeeded { border-left-color: #2ecc71; }
+        .automation-job.failed { border-left-color: #e74c3c; }
+
         .footer {
             position: fixed;
             bottom: 0;
@@ -1057,6 +1131,14 @@
                 <div class="card-header"><h2>AUTENTICAÇÃO</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
                 <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
             </div>
+            <div class="card">
+                <div class="card-header"><h2>AUTOMAÇÃO DE COOKIES</h2><span class="badge" id="cookieAutomationBadge">DESATIVADA</span></div>
+                <div class="card-content">
+                    <div id="cookieAutomationContent" class="cookie-automation">
+                        <div class="public-mode-card">Carregando automação...</div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -1189,6 +1271,8 @@
 
     const emergencyBanner = document.getElementById('emergencyBanner');
     const bannerMessage = document.getElementById('bannerMessage');
+    let lastCookieAutomationStatus = null;
+    let cookieAutomationBusy = false;
 
     // ============================================================
     // FUNÇÕES DO MODAL IP
@@ -1759,6 +1843,187 @@
     setInterval(updateClock, 1000);
     updateClock();
 
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
+    function formatDateTime(value) {
+        if (!value) return 'nunca';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return 'indisponível';
+        return date.toLocaleString('pt-BR');
+    }
+
+    function getAutomationStage(job) {
+        if (!job) return 'aguardando agente';
+        if (job.status === 'pending') return 'tarefa pendente';
+        if (job.status === 'claimed') return 'exportando';
+        if (job.status === 'running') return 'validando/promovendo';
+        if (job.status === 'succeeded') return 'concluído';
+        if (job.status === 'failed') return 'falhou';
+        if (job.status === 'cancelled') return 'cancelado';
+        return job.status || 'desconhecido';
+    }
+
+    async function postCookieAutomation(url, body = {}) {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.success === false) {
+            throw new Error(data.error || data.message || `HTTP ${res.status}`);
+        }
+        return data;
+    }
+
+    async function enqueueCookieRefresh(cookie) {
+        if (cookieAutomationBusy) return;
+        const label = cookie === 'all' ? 'todos os cookies' : cookie.toUpperCase();
+        if (!confirm(`Criar tarefa de atualização para ${label}?`)) return;
+        cookieAutomationBusy = true;
+        renderCookieAutomation(lastCookieAutomationStatus);
+        try {
+            if (cookie === 'all') {
+                await postCookieAutomation('/api/admin/cookie-refresh/enqueue-all');
+            } else {
+                await postCookieAutomation(`/api/admin/cookie-refresh/enqueue/${cookie}`, { reason: 'solicitado pelo dashboard' });
+            }
+            await loadCookieAutomationStatus();
+        } catch (err) {
+            alert(`Erro ao criar tarefa: ${err.message}`);
+        } finally {
+            cookieAutomationBusy = false;
+            renderCookieAutomation(lastCookieAutomationStatus);
+        }
+    }
+
+    async function cancelPendingCookieRefresh() {
+        if (cookieAutomationBusy) return;
+        const status = lastCookieAutomationStatus;
+        const job = status?.recentJobs?.find(item => item.status === 'pending');
+        if (!job) {
+            alert('Nenhuma tarefa pendente para cancelar.');
+            return;
+        }
+        if (!confirm(`Cancelar tarefa ${job.cookie.toUpperCase()} (${job.status})?`)) return;
+        cookieAutomationBusy = true;
+        renderCookieAutomation(lastCookieAutomationStatus);
+        try {
+            await postCookieAutomation(`/api/admin/cookie-refresh/cancel/${job.id}`, { reason: 'cancelado pelo dashboard' });
+            await loadCookieAutomationStatus();
+        } catch (err) {
+            alert(`Erro ao cancelar tarefa: ${err.message}`);
+        } finally {
+            cookieAutomationBusy = false;
+            renderCookieAutomation(lastCookieAutomationStatus);
+        }
+    }
+
+    function renderCookieAutomation(status) {
+        const container = document.getElementById('cookieAutomationContent');
+        const badge = document.getElementById('cookieAutomationBadge');
+        if (!container || !badge) return;
+
+        if (!status || !status.enabled) {
+            badge.textContent = 'DESATIVADA';
+            container.innerHTML = `
+                <div class="public-mode-card">
+                    AUTOMAÇÃO DESATIVADA<br>
+                    <span style="color:#7a8aa0;">Configure o token do agente no servidor para ativar a API.</span>
+                </div>
+            `;
+            return;
+        }
+
+        const agent = status.agent;
+        const activeJob = (status.activeJobs || [])[0] || null;
+        const recentJobs = status.recentJobs || [];
+        const counts = status.counts || {};
+        const cookies = status.cookies || {};
+        const pendingCancelable = recentJobs.some(item => item.status === 'pending');
+        const disabledAttr = cookieAutomationBusy ? 'disabled' : '';
+        const cancelDisabledAttr = cookieAutomationBusy || !pendingCancelable ? 'disabled' : '';
+        const agentClass = agent?.online ? 'ok' : 'fail';
+        const stage = activeJob ? getAutomationStage(activeJob) : (agent?.online ? 'aguardando tarefa' : 'agente offline');
+
+        badge.textContent = agent?.online ? 'ONLINE' : 'OFFLINE';
+
+        const cookieRows = ['cookie1', 'cookie2', 'cookie3'].map(name => {
+            const info = cookies[name] || {};
+            const state = info.state || 'desconhecido';
+            const lastSuccess = formatDateTime(info.lastSuccess);
+            return `<div class="automation-pill ${state === 'valid' ? 'ok' : 'warn'}">
+                <div class="automation-label">${name.toUpperCase()}</div>
+                <div class="automation-value">${escapeHtml(state)}<br><span style="color:#7a8aa0; font-size:11px;">última sync: ${escapeHtml(lastSuccess)}</span></div>
+            </div>`;
+        }).join('');
+
+        const jobsHtml = recentJobs.length === 0
+            ? '<div class="automation-job">Nenhuma tarefa registrada.</div>'
+            : recentJobs.slice(0, 6).map(job => `<div class="automation-job ${escapeHtml(job.status)}">
+                <strong>${escapeHtml((job.cookie || '').toUpperCase())}</strong>
+                ${escapeHtml(getAutomationStage(job))}
+                <div style="color:#7a8aa0; font-size:11px;">${escapeHtml(formatDateTime(job.updatedAt))}</div>
+                ${job.lastError ? `<div style="color:#e74c3c; font-size:11px;">${escapeHtml(job.lastError)}</div>` : ''}
+            </div>`).join('');
+
+        container.innerHTML = `
+            <div class="automation-summary">
+                <div class="automation-pill ${agentClass}">
+                    <div class="automation-label">Agente Windows</div>
+                    <div class="automation-value">${agent?.online ? 'online' : 'offline'}<br><span style="color:#7a8aa0; font-size:11px;">${escapeHtml(agent?.hostname || 'sem heartbeat')}</span></div>
+                </div>
+                <div class="automation-pill ${activeJob ? 'warn' : 'ok'}">
+                    <div class="automation-label">Status</div>
+                    <div class="automation-value">${escapeHtml(stage)}<br><span style="color:#7a8aa0; font-size:11px;">último heartbeat: ${escapeHtml(formatDateTime(agent?.lastSeen))}</span></div>
+                </div>
+                <div class="automation-pill">
+                    <div class="automation-label">Versão do agente</div>
+                    <div class="automation-value">${escapeHtml(agent?.version || 'não informado')}</div>
+                </div>
+                <div class="automation-pill">
+                    <div class="automation-label">Tarefas</div>
+                    <div class="automation-value">P:${counts.pending || 0} R:${(counts.running || 0) + (counts.claimed || 0)} OK:${counts.succeeded || 0} F:${counts.failed || 0}</div>
+                </div>
+                ${cookieRows}
+            </div>
+            <div class="automation-actions">
+                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie1')">Atualizar Cookie1</button>
+                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie2')">Atualizar Cookie2</button>
+                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie3')">Atualizar Cookie3</button>
+                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('all')">Atualizar Todos</button>
+                <button type="button" class="danger" ${cancelDisabledAttr} onclick="cancelPendingCookieRefresh()">Cancelar tarefa pendente</button>
+                <button type="button" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
+            </div>
+            <div class="automation-jobs">${jobsHtml}</div>
+        `;
+    }
+
+    async function loadCookieAutomationStatus() {
+        try {
+            const res = await fetch('/api/admin/cookie-refresh/status', { cache: 'no-store' });
+            const data = await res.json();
+            if (!res.ok || data.success === false) throw new Error(data.error || 'falha ao carregar automação');
+            lastCookieAutomationStatus = data.status;
+            renderCookieAutomation(data.status);
+        } catch (err) {
+            const badge = document.getElementById('cookieAutomationBadge');
+            const container = document.getElementById('cookieAutomationContent');
+            if (badge) badge.textContent = 'ERRO';
+            if (container) {
+                container.innerHTML = `<div class="public-mode-card">Falha ao carregar automação<br><span style="color:#e74c3c;">${escapeHtml(err.message)}</span></div>`;
+            }
+        }
+    }
+
     function filterAndDisplayMonitors() {
         let filtered = [...allMonitorsData];
         if (currentFilter === 'online') filtered = filtered.filter(m => m.status === 'online');
@@ -2021,6 +2286,7 @@
             const minutes = Math.floor((uptimeSec % 3600) / 60);
             document.getElementById('mainUptime').innerHTML = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
             await loadFunctionalCookieStatus();
+            await loadCookieAutomationStatus();
             updateChart(monitors.monitors || []);
             if (monitors.monitors?.length > 0 && (!window.lastLiveCount || window.lastLiveCount !== monitors.monitors.length)) {
                 addEvent(`${monitors.monitors.length} live(s) monitorada(s)`);
@@ -2048,6 +2314,7 @@
     console.log('Tippy disponível?', typeof tippy);
     fetchData();
     setInterval(fetchData, 5000);
+    setInterval(loadCookieAutomationStatus, 15000);
     setupFilters();
     addEvent('Sistema iniciado');
 

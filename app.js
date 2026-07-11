@@ -5,6 +5,8 @@ const multer = require('multer');
 const { spawn } = require('child_process');
 const session = require('express-session');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
+const CookieRefreshQueue = require('./services/cookieRefreshQueue');
 require('dotenv').config();
 
 // ============================================================
@@ -54,6 +56,9 @@ app.use(express.static('public'));
 
 const cookiesDir = path.join(__dirname, 'cookies');
 if (!fs.existsSync(cookiesDir)) fs.mkdirSync(cookiesDir, { recursive: true });
+const cookieRefreshQueue = new CookieRefreshQueue({
+    filePath: path.join(__dirname, 'data', 'cookie-refresh-jobs.json')
+});
 
 // ========== ARQUIVO DE CLIENTES ==========
 const clientesFile = path.join(cookiesDir, 'clientes.json');
@@ -1462,6 +1467,88 @@ function isAuthenticated(req, res, next) {
     res.redirect('/admin-login');
 }
 
+function isAdminApiAuthenticated(req, res, next) {
+    if (req.session && req.session.admin === true) return next();
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+}
+
+const cookieAgentLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: 'rate_limited' }
+});
+
+function sanitizeApiText(value, max = 500) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function getBearerToken(req) {
+    const header = req.get('authorization') || '';
+    const match = header.match(/^Bearer\s+(.+)$/i);
+    return match ? match[1].trim() : '';
+}
+
+function safeTokenMatch(provided, expected) {
+    if (!provided || !expected) return false;
+    const providedHash = crypto.createHash('sha256').update(provided).digest();
+    const expectedHash = crypto.createHash('sha256').update(expected).digest();
+    return crypto.timingSafeEqual(providedHash, expectedHash);
+}
+
+function authenticateCookieAgent(req, res, next) {
+    if (!process.env.COOKIE_AGENT_TOKEN) {
+        return res.status(503).json({ success: false, error: 'cookie_agent_unavailable' });
+    }
+    if (Object.prototype.hasOwnProperty.call(req.query || {}, 'token')) {
+        return res.status(401).json({ success: false, error: 'unauthorized' });
+    }
+    const token = getBearerToken(req);
+    if (!safeTokenMatch(token, process.env.COOKIE_AGENT_TOKEN)) {
+        return res.status(401).json({ success: false, error: 'unauthorized' });
+    }
+    const agentId = sanitizeApiText(req.get('x-agent-id'), 120);
+    if (!agentId) {
+        return res.status(400).json({ success: false, error: 'agent_id_required' });
+    }
+    req.agentId = agentId;
+    next();
+}
+
+function mapQueueResultToStatus(result) {
+    if (result.ok) return 200;
+    if (result.code === 'not_found') return 404;
+    if (result.code === 'conflict' || result.code === 'cooldown') return 409;
+    if (result.code === 'forbidden') return 403;
+    if (result.code === 'running') return 409;
+    return 400;
+}
+
+function getCookieRefreshAdminStatus() {
+    const queueStatus = cookieRefreshQueue.getStatus();
+    const agents = queueStatus.agents || [];
+    const lastAgent = agents[0] || null;
+    const offlineMs = Number(process.env.COOKIE_AGENT_OFFLINE_MS || 90000);
+    const agentOnline = lastAgent?.lastSeen ? (Date.now() - Date.parse(lastAgent.lastSeen) <= offlineMs) : false;
+    return {
+        enabled: Boolean(process.env.COOKIE_AGENT_TOKEN),
+        tokenConfigured: Boolean(process.env.COOKIE_AGENT_TOKEN),
+        agent: lastAgent ? {
+            online: agentOnline,
+            lastSeen: lastAgent.lastSeen,
+            hostname: lastAgent.hostname,
+            version: lastAgent.version,
+            status: lastAgent.status
+        } : null,
+        counts: queueStatus.counts,
+        activeJobs: queueStatus.activeJobs,
+        recentJobs: queueStatus.recentJobs,
+        cookies: converter?.cookieRotator?.getFunctionalStatus ? converter.cookieRotator.getFunctionalStatus() : {},
+        timestamp: new Date().toISOString()
+    };
+}
+
 app.get('/admin-login', (req, res) => {
     if (req.session.admin) return res.redirect('/dashboard');
     res.sendFile(path.join(__dirname, 'public/admin-login.html'));
@@ -1492,6 +1579,106 @@ app.get('/api/cookie/functional-status', isAuthenticated, (req, res) => {
     }
     const functional = converter.cookieRotator.getFunctionalStatus();
     res.json({ functional, timestamp: new Date().toISOString() });
+});
+
+// ============================================================
+// COOKIE AGENT API (Bearer token, sem sessão de dashboard)
+// ============================================================
+app.use('/api/cookie-agent', cookieAgentLimiter, authenticateCookieAgent);
+
+app.get('/api/cookie-agent/jobs/next', (req, res) => {
+    const job = cookieRefreshQueue.getNextPending();
+    if (!job) return res.status(204).send();
+    res.json({ success: true, job });
+});
+
+app.post('/api/cookie-agent/jobs/:id/claim', (req, res) => {
+    const result = cookieRefreshQueue.claim(req.params.id, req.agentId);
+    const status = mapQueueResultToStatus(result);
+    res.status(status).json({ success: result.ok, code: result.code, job: result.job });
+});
+
+app.post('/api/cookie-agent/jobs/:id/running', (req, res) => {
+    const result = cookieRefreshQueue.markRunning(req.params.id, req.agentId);
+    const status = mapQueueResultToStatus(result);
+    res.status(status).json({ success: result.ok, code: result.code, job: result.job });
+});
+
+app.post('/api/cookie-agent/jobs/:id/complete', (req, res) => {
+    const result = cookieRefreshQueue.complete(req.params.id, req.agentId, {
+        message: sanitizeApiText(req.body?.message, 500),
+        exitCode: req.body?.exitCode,
+        durationMs: req.body?.durationMs
+    });
+    const status = mapQueueResultToStatus(result);
+    res.status(status).json({ success: result.ok, code: result.code, idempotent: result.idempotent === true, job: result.job });
+});
+
+app.post('/api/cookie-agent/jobs/:id/fail', (req, res) => {
+    const result = cookieRefreshQueue.fail(req.params.id, req.agentId, sanitizeApiText(req.body?.error || req.body?.message, 500));
+    const status = mapQueueResultToStatus(result);
+    res.status(status).json({ success: result.ok, code: result.code, idempotent: result.idempotent === true, job: result.job });
+});
+
+app.post('/api/cookie-agent/heartbeat', (req, res) => {
+    try {
+        const heartbeat = cookieRefreshQueue.recordHeartbeat(req.agentId, {
+            hostname: req.body?.hostname,
+            version: req.body?.version,
+            status: req.body?.status
+        });
+        res.json({ success: true, heartbeat });
+    } catch (err) {
+        res.status(400).json({ success: false, error: 'invalid_heartbeat' });
+    }
+});
+
+// ============================================================
+// COOKIE REFRESH ADMIN API (sessão administrativa)
+// ============================================================
+app.get('/api/admin/cookie-refresh/status', isAdminApiAuthenticated, (req, res) => {
+    res.json({ success: true, status: getCookieRefreshAdminStatus() });
+});
+
+app.get('/api/admin/cookie-refresh/jobs', isAdminApiAuthenticated, (req, res) => {
+    try {
+        const jobs = cookieRefreshQueue.list({
+            cookie: req.query.cookie,
+            status: req.query.status,
+            limit: req.query.limit
+        });
+        res.json({ success: true, jobs });
+    } catch (err) {
+        res.status(400).json({ success: false, error: 'invalid_filter' });
+    }
+});
+
+app.post('/api/admin/cookie-refresh/enqueue/:cookie', isAdminApiAuthenticated, (req, res) => {
+    try {
+        const result = cookieRefreshQueue.enqueue(
+            req.params.cookie,
+            'dashboard',
+            sanitizeApiText(req.body?.reason || 'solicitado pelo dashboard', 300),
+            { requestedBy: req.session?.user || 'admin' }
+        );
+        res.status(result.created ? 201 : 200).json({ success: true, created: result.created, job: result.job });
+    } catch (err) {
+        res.status(400).json({ success: false, error: 'invalid_cookie' });
+    }
+});
+
+app.post('/api/admin/cookie-refresh/enqueue-all', isAdminApiAuthenticated, (req, res) => {
+    const results = [];
+    for (const cookie of ['cookie1', 'cookie2', 'cookie3']) {
+        results.push(cookieRefreshQueue.enqueue(cookie, 'dashboard', 'solicitado pelo dashboard', { requestedBy: req.session?.user || 'admin' }));
+    }
+    res.status(201).json({ success: true, results });
+});
+
+app.post('/api/admin/cookie-refresh/cancel/:jobId', isAdminApiAuthenticated, (req, res) => {
+    const result = cookieRefreshQueue.cancel(req.params.jobId, sanitizeApiText(req.body?.reason || 'cancelado pelo dashboard', 300));
+    const status = mapQueueResultToStatus(result);
+    res.status(status).json({ success: result.ok, code: result.code, job: result.job });
 });
 
 app.get('/api/monitors', isAuthenticated, (req, res) => {
@@ -1901,6 +2088,10 @@ converter = new ConvertAPI(emailAlerts, null, revokeTokenFn);
 
 if (emailAlerts && converter.cookieRotator) {
     emailAlerts.setCookieRotator(converter.cookieRotator);
+    if (converter.cookieRotator.setRefreshQueue) {
+        converter.cookieRotator.setRefreshQueue(cookieRefreshQueue);
+        console.log('🧾 Fila de atualização de cookies injetada no CookieRotator');
+    }
     console.log('📧 CookieRotator injetado no EmailAlerts');
 } else {
     console.log('⚠️ Não foi possível injetar CookieRotator no EmailAlerts');

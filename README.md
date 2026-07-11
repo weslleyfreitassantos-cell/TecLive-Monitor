@@ -198,3 +198,13 @@ yt-dlp --simulate --dump-json --flat-playlist --playlist-end 1 URL
 ```
 
 O validador tenta as URLs em ordem. URL encerrada, privada, removida ou indisponivel e considerada inadequada para validacao; rede e timeout tambem nao invalidam cookies.
+
+## Automacao sob demanda de cookies
+
+A fila segura de atualizacao sob demanda e o agente Windows estao documentados em:
+
+```text
+docs/cookie-refresh-automation.md
+```
+
+Essa automacao e opcional. Sem `COOKIE_AGENT_TOKEN`, o monitor continua funcionando e o dashboard mostra a automacao como desativada.

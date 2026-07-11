@@ -1,0 +1,18 @@
+{
+  "server": {
+    "baseUrl": "https://SEU_DOMINIO",
+    "token": "COLOCAR_TOKEN_LOCAL",
+    "pollSeconds": 30,
+    "timeoutSeconds": 900
+  },
+  "agent": {
+    "id": "teclive-weslley-pc",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "projectPath": "C:\\Users\\Weslley\\Downloads\\youtube-live-api-v3",
+    "cookieSyncScript": "tools\\cookie-sync\\export-and-upload.ps1",
+    "logPath": "logs\\cookie-agent\\agent.log",
+    "statePath": "tools\\cookie-agent\\agent-state.json"
+  }
+}

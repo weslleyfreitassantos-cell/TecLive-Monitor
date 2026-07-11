@@ -47,8 +47,18 @@ scripts/cookie-sync/cookie-sync.env
 # yt-dlp manager local env
 scripts/yt-dlp-manager/yt-dlp-manager.env
 
+# Cookie refresh queue runtime state
+data/*
+!data/.gitkeep
+
+# Cookie Agent local secrets and state
+tools/cookie-agent/cookie-agent.config.json
+tools/cookie-agent/agent-state.json
+
 # Runtime logs
 logs/cookie-sync/*
 logs/yt-dlp-manager/*
+logs/cookie-agent/*
 !logs/cookie-sync/.gitkeep
 !logs/yt-dlp-manager/.gitkeep
+!logs/cookie-agent/.gitkeep
