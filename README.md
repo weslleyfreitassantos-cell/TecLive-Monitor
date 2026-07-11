@@ -186,3 +186,15 @@ Servidor não reinicia	Verifique se a porta 3002 está livre. Use pm2 logs para 
 
   # Windows (via chocolatey ou manual)
   choco install yt-dlp
+
+## Cookie Sync e URLs de teste
+
+O fluxo seguro de exportacao de cookies fica em `tools/cookie-sync` no Windows e `scripts/cookie-sync` no Ubuntu. A validacao usa `testUrls`, uma lista ordenada de URLs publicas, e ainda aceita `testUrl` legado para compatibilidade.
+
+Antes de fixar uma URL nos exemplos, valide com:
+
+```bash
+yt-dlp --simulate --dump-json --flat-playlist --playlist-end 1 URL
+```
+
+O validador tenta as URLs em ordem. URL encerrada, privada, removida ou indisponivel e considerada inadequada para validacao; rede e timeout tambem nao invalidam cookies.

@@ -1,0 +1,37 @@
+{
+  "server": {
+    "host": "177.153.62.32",
+    "port": 22,
+    "user": "root",
+    "projectPath": "/var/www/livemonitor",
+    "pm2Process": "youtube-monitor-v3",
+    "useSudo": false
+  },
+  "ytDlpPath": "",
+  "validation": {
+    "testUrls": [
+      "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "https://www.youtube.com/watch?v=M7lc1UVf-VE"
+    ],
+    "minimumCookieSizeBytes": 1000,
+    "timeoutSeconds": 60
+  },
+  "cookies": {
+    "cookie1": {
+      "targetFile": "cookie1.txt",
+      "browser": "firefox",
+      "profilePath": "CAMINHO_DO_PERFIL_FIREFOX_1"
+    },
+    "cookie2": {
+      "targetFile": "cookie2.txt",
+      "browser": "firefox",
+      "profilePath": "CAMINHO_DO_PERFIL_FIREFOX_2"
+    },
+    "cookie3": {
+      "targetFile": "cookie3.txt",
+      "browser": "firefox",
+      "profilePath": "CAMINHO_DO_PERFIL_FIREFOX_3"
+    }
+  }
+}
