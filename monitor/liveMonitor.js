@@ -136,6 +136,12 @@ class LiveMonitor {
         return this._cookieRotator.getFallbackCookiePath();
     }
 
+    _isCookieAuthError(errorMsg) {
+        return !!(this._cookieRotator &&
+            this._cookieRotator.isCookieAuthError &&
+            this._cookieRotator.isCookieAuthError(errorMsg));
+    }
+
     // ============================================================
     // _runYtdlp (mantido igual)
     // ============================================================
@@ -172,6 +178,7 @@ class LiveMonitor {
 
             const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
             const cookieName = cookiePath ? path.basename(cookiePath) : null;
+            let cookieFailureAlreadyHandled = false;
 
             const execWithCookie = (cookieFile) => {
                 return new Promise((resolveExec, rejectExec) => {
@@ -226,14 +233,15 @@ class LiveMonitor {
             } catch (err) {
                 const errorMsg = err.message || '';
                 const isNoFormats = errorMsg.includes('No video formats found');
-                const isAuth = errorMsg.includes('403') || errorMsg.includes('401') || errorMsg.includes('sign in') || errorMsg.includes('cookies');
+                const isCookieAuth = this._isCookieAuthError(errorMsg);
 
-                if ((isNoFormats || isAuth) && this._cookieRotator && cookieName) {
+                if (isCookieAuth && this._cookieRotator && cookieName) {
                     console.log(`🔴 Marcando falha para ${cookieName}: ${errorMsg.slice(0, 100)}`);
-                    this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId);
+                    cookieFailureAlreadyHandled = this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId) ||
+                        cookieFailureAlreadyHandled;
                 }
 
-                if (isNoFormats) {
+                if (isNoFormats || isCookieAuth) {
                     console.log(`⚠️ Falha com cookie ${cookieName}, tentando alternativos...`);
                     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
                     let tried = false;
@@ -253,18 +261,24 @@ class LiveMonitor {
                         } catch (innerErr) {
                             const innerMsg = innerErr.message || '';
                             const isInnerNoFormats = innerMsg.includes('No video formats found');
-                            if (isInnerNoFormats || innerMsg.includes('403') || innerMsg.includes('401')) {
+                            const isInnerCookieAuth = this._isCookieAuthError(innerMsg);
+                            if (isInnerCookieAuth && this._cookieRotator) {
+                                cookieFailureAlreadyHandled = this._cookieRotator.markFailure(file, innerMsg, this.videoId) ||
+                                    cookieFailureAlreadyHandled;
+                            }
+                            if (isInnerNoFormats || isInnerCookieAuth) {
                                 console.log(`❌ ${file} também falhou.`);
-                                if (this._cookieRotator) {
-                                    this._cookieRotator.markFailure(file, innerMsg, this.videoId);
-                                }
                             } else {
                                 throw innerErr;
                             }
                         }
                     }
                     if (!tried) {
-                        reject(new Error('Todos os cookies falharam com No video formats found'));
+                        const finalError = new Error(isCookieAuth ? 'Todos os cookies falharam por autenticação/cookie' : errorMsg);
+                        if (cookieFailureAlreadyHandled) {
+                            finalError.cookieFailureAlreadyHandled = true;
+                        }
+                        reject(finalError);
                     }
                 } else {
                     reject(err);
@@ -279,8 +293,9 @@ class LiveMonitor {
             console.log(`[${this.videoId}] 📦 Usando cache de metadados (${((agora - this._metadataCacheTime)/1000).toFixed(1)}s)`);
             return { success: true, metadata: this._cachedMetadata };
         }
+        let cookiePath = null;
         try {
-            const cookiePath = this.getCookiePath();
+            cookiePath = this.getCookiePath();
             const args = ['--dump-json', '--flat-playlist', '--playlist-end', '1', this.youtubeUrl];
             if (cookiePath) args.unshift('--cookies', cookiePath);
             const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
@@ -291,11 +306,6 @@ class LiveMonitor {
             this.metadataFails = 0;
             if (cookiePath) this.updateHealthComponent('cookies', ComponentStatus.OK, 'Cookie funcionando');
             
-            if (this._cookieRotator && cookiePath) {
-                const cookieName = path.basename(cookiePath);
-                this._cookieRotator.markSuccess(cookieName);
-            }
-            
             return { success: true, metadata };
         } catch (error) {
             console.error(`[${this.videoId}] ❌ Erro spawn: ${error.message}`);
@@ -305,11 +315,12 @@ class LiveMonitor {
                                errorMsg.includes('recording is not available') ||
                                errorMsg.includes('this live event has ended');
             
-            if (errorMsg.includes('403') || errorMsg.includes('401') || errorMsg.includes('sign in')) {
-                const cookieUsed = this.getCookiePath();
-                if (this._cookieRotator && cookieUsed) {
-                    const cookieName = path.basename(cookieUsed);
-                    this._cookieRotator.markFailure(cookieName, error.message, this.videoId);
+            if (this._isCookieAuthError(error.message)) {
+                if (this._cookieRotator && cookiePath) {
+                    const cookieName = path.basename(cookiePath);
+                    if (!error.cookieFailureAlreadyHandled) {
+                        this._cookieRotator.markFailure(cookieName, error.message, this.videoId);
+                    }
                 }
                 this.updateHealthComponent('cookies', ComponentStatus.ERROR, 'Cookie inválido');
                 this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Erro de autenticação');

@@ -482,7 +482,7 @@ let converter = null;
 // ============================================================
 // FUNÇÃO runYtdlp CORRIGIDA (com fallback de cookie e parâmetros forçados)
 // ============================================================
-function runYtdlp(args, timeout = 30000) {
+function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
     return new Promise(async (resolve, reject) => {
         const filteredArgs = args.filter((arg, index) => {
             if (arg === '-f' || arg === '--format') return false;
@@ -576,7 +576,7 @@ function runYtdlp(args, timeout = 30000) {
             const result = await execWithCookie(cookiePath);
             resolve(result.stdout);
         } catch (err) {
-            if (err.message.includes('No video formats found')) {
+            if (allowCookieFallback && err.message.includes('No video formats found')) {
                 console.log(`⚠️ Falha com cookie ${path.basename(cookiePath)}, tentando alternativos...`);
                 const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
                 let tried = false;
@@ -624,7 +624,7 @@ async function validateCookieSimple(cookiePath) {
             '--playlist-end', '1',
             '--dump-json',
             'https://www.youtube.com/feed/subscriptions'
-        ], 20000);
+        ], 20000, false);
         console.log('✅ Cookie válido (autenticação confirmada)');
         return true;
     } catch (error) {
@@ -1914,7 +1914,6 @@ if (emailAlerts && converter.cookieRotator) {
     console.log('🔍 Validando cookies na inicialização (teste com live contínua)...');
     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
     const TEST_URL = 'https://www.youtube.com/watch?v=aSXLerQStXA';
-    let anyChanged = false;
 
     for (const file of cookieFiles) {
         const fullPath = path.join(cookiesDir, file);
@@ -1925,7 +1924,6 @@ if (emailAlerts && converter.cookieRotator) {
 
         const cookieKey = file;
         const currentState = converter.cookieRotator.status[cookieKey]?.state || 'valid';
-        const currentFailCount = converter.cookieRotator.status[cookieKey]?.failCount || 0;
 
         try {
             console.log(`🔍 Testando ${file} com live contínua...`);
@@ -1935,53 +1933,19 @@ if (emailAlerts && converter.cookieRotator) {
                 '--playlist-end', '1',
                 '--dump-json',
                 TEST_URL
-            ], 20000);
+            ], 20000, false);
 
-            if (currentState === 'valid') {
-                console.log(`✅ ${file} válido (estado permanece 'valid')`);
-            } else {
-                console.log(`ℹ️ ${file} passou no teste, mas mantém estado '${currentState}' (não resetamos automaticamente).`);
-                converter.cookieRotator.status[cookieKey].lastSuccess = new Date().toISOString();
-                converter.cookieRotator.saveStatus();
+            converter.cookieRotator.markSuccess(cookieKey);
+            if (currentState !== 'valid') {
+                console.log(`✅ ${file} voltou de '${currentState}' para 'valid' após teste bem-sucedido.`);
             }
         } catch (err) {
             console.log(`❌ ${file} falhou no teste: ${err.message}`);
-            if (currentState === 'valid') {
-                converter.cookieRotator.status[cookieKey].state = 'suspect';
-                converter.cookieRotator.status[cookieKey].failCount = 1;
-                converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
-                converter.cookieRotator.status[cookieKey].reason = err.message;
-                converter.cookieRotator.status[cookieKey].alertActive = true;
-                console.log(`⚠️ ${file} agora está suspeito (1/3 falhas) na inicialização.`);
-                anyChanged = true;
-            } else if (currentState === 'suspect') {
-                const newFail = (currentFailCount || 0) + 1;
-                converter.cookieRotator.status[cookieKey].failCount = newFail;
-                converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
-                converter.cookieRotator.status[cookieKey].reason = err.message;
-                converter.cookieRotator.status[cookieKey].alertActive = true;
-                if (newFail >= 3) {
-                    converter.cookieRotator.status[cookieKey].state = 'invalid';
-                    converter.cookieRotator.status[cookieKey].failCount = 0;
-                    console.log(`❌ ${file} agora é inválido (3 falhas) na inicialização.`);
-                    if (emailAlerts) {
-                        emailAlerts.sendCookieInvalidAlert(cookieKey, err.message);
-                    }
-                } else {
-                    console.log(`⚠️ ${file} continua suspeito (${newFail}/3 falhas) na inicialização.`);
-                    if (emailAlerts) {
-                        emailAlerts.sendCookieWarningAlert(cookieKey, err.message, newFail);
-                    }
-                }
-                anyChanged = true;
-            } else if (currentState === 'invalid') {
-                converter.cookieRotator.status[cookieKey].lastFailure = new Date().toISOString();
-                converter.cookieRotator.status[cookieKey].reason = err.message;
-                converter.cookieRotator.status[cookieKey].alertActive = true;
-                console.log(`⚠️ ${file} já estava inválido, erro atualizado.`);
-                anyChanged = true;
+            if (converter.cookieRotator.isCookieAuthError(err.message)) {
+                converter.cookieRotator.markFailure(cookieKey, err.message, 'startup-validation');
+            } else {
+                console.log(`ℹ️ ${file}: Falha não relacionada a autenticação de cookie; estado preservado.`);
             }
-            converter.cookieRotator.saveStatus();
         }
     }
 

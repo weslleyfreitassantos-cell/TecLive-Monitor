@@ -254,20 +254,12 @@ class ConvertAPI {
             } catch (error) {
                 console.log(`❌ ${file} falhou: ${error.message}`);
                 failedCookies.push({ file, error: error.message });
-                const errorMsg = error.message.toLowerCase();
-                const isCookieError = 
-                    errorMsg.includes('no video formats found') ||
-                    errorMsg.includes('unable to download') ||
-                    errorMsg.includes('login required') ||
-                    errorMsg.includes('private video') ||
-                    errorMsg.includes('account associated') ||
-                    errorMsg.includes('cookies are no longer valid') ||
-                    errorMsg.includes('sign in to confirm') ||
-                    errorMsg.includes('bot') ||
-                    errorMsg.includes('cookie') ||
-                    errorMsg.includes('authentication');
+                const isCookieError = this.cookieRotator &&
+                    this.cookieRotator.isCookieAuthError(error.message);
                 if (isCookieError && this.cookieRotator) {
                     this.cookieRotator.markFailure(file, error.message, videoId);
+                } else {
+                    console.log(`[COOKIE] ${file}: erro nao classificado como falha de cookie; estado preservado.`);
                 }
             }
         }
@@ -275,12 +267,19 @@ class ConvertAPI {
         // Se nenhum cookie funcionou
         if (!streamUrl || !workingCookie) {
             console.error(`❌ Todos os cookies falharam para ${videoId}`);
+            const cookieErrorCount = this.cookieRotator
+                ? failedCookies.filter(({ error }) => this.cookieRotator.isCookieAuthError(error)).length
+                : 0;
+            const onlyCookieAuthFailures = failedCookies.length > 0 &&
+                cookieErrorCount === failedCookies.length;
             return {
                 success: false,
                 videoId: videoId,
                 error: 'Todos os cookies falharam para obter a stream',
                 metadata: metadata,
-                message: 'Falha de autenticação. Verifique os cookies.'
+                message: onlyCookieAuthFailures
+                    ? 'Falha de autenticacao/cookie. Verifique os cookies.'
+                    : 'Nao foi possivel obter a stream; o erro parece relacionado ao video, disponibilidade ou rede, nao necessariamente aos cookies.'
             };
         }
 

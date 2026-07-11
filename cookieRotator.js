@@ -21,9 +21,11 @@ class CookieRotator {
                 const data = fs.readFileSync(this.statusFilePath, 'utf8');
                 const parsed = JSON.parse(data);
                 this.status = parsed;
+                let normalized = false;
                 for (const cookie of this.cookies) {
-                    this._ensureAlertField(cookie);
+                    normalized = this._ensureStatusFields(cookie) || normalized;
                 }
+                if (normalized) this.saveStatus();
                 console.log('📁 Estado dos cookies carregado de', this.statusFilePath);
             } else {
                 this.initDefaultStatus();
@@ -37,22 +39,73 @@ class CookieRotator {
     initDefaultStatus() {
         this.status = {};
         for (const cookie of this.cookies) {
-            this.status[cookie] = {
-                state: 'valid',
-                failCount: 0,
-                lastFailure: null,
-                lastSuccess: Date.now(),
-                reason: null,
-                alertActive: false
-            };
+            this.status[cookie] = this._defaultCookieStatus();
         }
         this.saveStatus();
     }
 
-    _ensureAlertField(cookieName) {
-        if (this.status[cookieName] && this.status[cookieName].alertActive === undefined) {
-            this.status[cookieName].alertActive = false;
+    _defaultCookieStatus() {
+        return {
+            state: 'valid',
+            failCount: 0,
+            lastFailure: null,
+            lastSuccess: new Date().toISOString(),
+            reason: null,
+            alertActive: false
+        };
+    }
+
+    _ensureStatusFields(cookieName) {
+        let changed = false;
+        if (!this.status[cookieName]) {
+            this.status[cookieName] = this._defaultCookieStatus();
+            return true;
         }
+
+        const cookie = this.status[cookieName];
+        if (cookie.failCount === undefined && cookie.faiCount !== undefined) {
+            cookie.failCount = cookie.faiCount;
+            changed = true;
+        }
+        if (cookie.faiCount !== undefined) {
+            delete cookie.faiCount;
+            changed = true;
+        }
+
+        if (cookie.state === undefined) {
+            cookie.state = 'valid';
+            changed = true;
+        }
+        const normalizedFailCount = Number(cookie.failCount);
+        if (!Number.isFinite(normalizedFailCount) || normalizedFailCount < 0) {
+            cookie.failCount = 0;
+            changed = true;
+        } else if (cookie.failCount !== normalizedFailCount) {
+            cookie.failCount = normalizedFailCount;
+            changed = true;
+        }
+        if (cookie.lastFailure === undefined) {
+            cookie.lastFailure = null;
+            changed = true;
+        }
+        if (cookie.lastSuccess === undefined) {
+            cookie.lastSuccess = null;
+            changed = true;
+        }
+        if (cookie.reason === undefined) {
+            cookie.reason = null;
+            changed = true;
+        }
+        if (cookie.alertActive === undefined) {
+            cookie.alertActive = false;
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    _ensureAlertField(cookieName) {
+        this._ensureStatusFields(cookieName);
     }
 
     saveStatus() {
@@ -63,53 +116,151 @@ class CookieRotator {
         }
     }
 
+    _shortError(errorMsg) {
+        return String(errorMsg || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+    }
+
+    _isKnownNonCookieError(errorMsg) {
+        const msg = String(errorMsg || '').toLowerCase();
+        const nonCookiePatterns = [
+            'private video',
+            'video unavailable',
+            'this video is unavailable',
+            'this video is private',
+            'not available',
+            'has been removed',
+            'removed by the uploader',
+            'copyright claim',
+            'copyright',
+            'this live event has ended',
+            'live event has ended',
+            'recording is not available',
+            'premiere will begin',
+            'premieres in',
+            'not currently live',
+            'members-only',
+            'members only',
+            'network is unreachable',
+            'econnreset',
+            'etimedout',
+            'enotfound',
+            'eai_again',
+            'socket hang up',
+            'tls connection',
+            'timeout',
+            'timed out',
+            'http error 500',
+            'http error 502',
+            'http error 503',
+            'http error 504'
+        ];
+
+        return nonCookiePatterns.some(pattern => msg.includes(pattern));
+    }
+
+    isCookieAuthError(errorMsg) {
+        const msg = String(errorMsg || '').toLowerCase();
+        if (!msg || this._isKnownNonCookieError(msg)) return false;
+
+        const cookieAuthPatterns = [
+            'cookies are no longer valid',
+            'cookie file is invalid',
+            'invalid cookie',
+            'invalid cookies',
+            'cookie header is invalid',
+            'cookiefile',
+            'use --cookies',
+            'pass cookies',
+            'export cookies',
+            'login required',
+            'authentication required',
+            'requires authentication',
+            'autenticação/cookie',
+            'autenticacao/cookie',
+            'sign in to confirm',
+            'sign in to verify',
+            'confirm you’re not a bot',
+            "confirm you're not a bot",
+            'not a bot',
+            'protect our community'
+        ];
+
+        return cookieAuthPatterns.some(pattern => msg.includes(pattern));
+    }
+
     markFailure(cookieName, errorMsg, videoId = null) {
-        if (!this.status[cookieName]) return;
-        this._ensureAlertField(cookieName);
+        if (!this.status[cookieName]) return false;
+        this._ensureStatusFields(cookieName);
+
+        if (!this.isCookieAuthError(errorMsg)) {
+            console.log(`ℹ️ Falha de ${cookieName} não alterou estado: não parece erro de cookie/autenticação. Erro: ${this._shortError(errorMsg)}`);
+            return false;
+        }
 
         const cookie = this.status[cookieName];
-        cookie.failCount++;
+        const previousState = cookie.state || 'valid';
+        const previousFailCount = Number(cookie.failCount) || 0;
+        const context = videoId ? ` (${videoId})` : '';
+
+        cookie.failCount = previousState === 'invalid'
+            ? Math.max(previousFailCount, 3)
+            : previousFailCount + 1;
         cookie.lastFailure = new Date().toISOString();
         cookie.reason = errorMsg;
         cookie.alertActive = true;
 
-        if (cookie.failCount >= 3 && (cookie.state === 'valid' || cookie.state === 'suspect')) {
+        console.log(`⚠️ Cookie ${cookieName} falhou${context}: ${this._shortError(errorMsg)} (${Math.min(cookie.failCount, 3)}/3)`);
+
+        if (cookie.failCount >= 3) {
             cookie.state = 'invalid';
-            cookie.failCount = 0;
-            this.sendInvalidAlert(cookieName, errorMsg);
-            console.log(`❌ Cookie ${cookieName} invalidado após 3 falhas.`);
-        } else if (cookie.failCount >= 1 && cookie.failCount < 3 && cookie.state === 'valid') {
+            if (previousState !== 'invalid') {
+                this.sendInvalidAlert(cookieName, errorMsg);
+                console.log(`❌ Cookie ${cookieName} foi invalidado após ${cookie.failCount} falhas de autenticação/cookie.`);
+            } else {
+                console.log(`❌ Cookie ${cookieName} permanece invalid após nova falha de autenticação/cookie.`);
+            }
+        } else {
             cookie.state = 'suspect';
-            console.log(`⚠️ Cookie ${cookieName} está suspeito (${cookie.failCount}/3 falhas).`);
+            if (previousState !== 'suspect') {
+                console.log(`⚠️ Cookie ${cookieName} ficou suspect (${cookie.failCount}/3 falhas).`);
+            } else {
+                console.log(`⚠️ Cookie ${cookieName} continua suspect (${cookie.failCount}/3 falhas).`);
+            }
         }
         this.saveStatus();
+        return true;
     }
 
     /**
-     * Marca sucesso para um cookie.
-     * NUNCA REATIVA automaticamente. Apenas atualiza lastSuccess.
-     * Se o cookie estiver com problema (suspect/invalid), mantém o estado e alerta.
+     * Marca sucesso real para um cookie e reativa automaticamente.
      */
     markSuccess(cookieName) {
-        if (!this.status[cookieName]) return;
-        this._ensureAlertField(cookieName);
+        if (!this.status[cookieName]) return false;
+        this._ensureStatusFields(cookieName);
 
         const cookie = this.status[cookieName];
         const previousState = cookie.state;
+        const hadFailureInfo = (Number(cookie.failCount) || 0) > 0 ||
+            Boolean(cookie.lastFailure) ||
+            Boolean(cookie.reason) ||
+            cookie.alertActive === true;
 
+        cookie.state = 'valid';
+        cookie.failCount = 0;
         cookie.lastSuccess = new Date().toISOString();
+        cookie.lastFailure = null;
+        cookie.reason = null;
+        cookie.alertActive = false;
+        this.saveStatus();
 
         if (previousState === 'invalid' || previousState === 'suspect') {
-            console.log(`ℹ️ Cookie ${cookieName} funcionou, mas mantém estado '${previousState}' até substituição manual.`);
-            this.saveStatus();
-            return;
+            console.log(`✅ Cookie ${cookieName} foi revalidado após sucesso real do yt-dlp (${previousState} -> valid).`);
+        } else if (hadFailureInfo) {
+            console.log(`✅ Cookie ${cookieName} recuperado após sucesso real do yt-dlp; falhas anteriores zeradas.`);
+        } else {
+            console.log(`✅ Cookie ${cookieName} válido; sucesso registrado.`);
         }
-
-        // Se já era válido, apenas mantém e desliga alerta se houver
-        cookie.alertActive = false;
-        cookie.reason = null;
-        console.log(`✅ Cookie ${cookieName} já estava válido. Alerta mantido desligado.`);
-        this.saveStatus();
+        return true;
     }
 
     /**
