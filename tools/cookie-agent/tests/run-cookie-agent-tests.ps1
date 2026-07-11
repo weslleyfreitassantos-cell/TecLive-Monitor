@@ -35,6 +35,7 @@ foreach ($file in @($agent, $install, $uninstall)) {
 }
 
 $content = Get-Content -LiteralPath $agent -Raw
+$installContent = Get-Content -LiteralPath $install -Raw
 Assert-True ($content -notmatch 'Invoke-Expression') 'Invoke-Expression nao deve ser usado'
 Assert-True ($content -match 'Mutex') 'Mutex/lock local ausente'
 Assert-True ($content -match 'Authorization = "Bearer') 'Bearer token header ausente'
@@ -44,6 +45,11 @@ Assert-True ($content -match 'Assert-AgentApiSuccess') 'Validacao de resposta da
 Assert-True ($content -match 'pendingReport') 'Retry/idempotencia de complete/fail ausente'
 Assert-True ($content -match "marcar running") 'Falha ao marcar running deve ser tratada antes do Cookie Sync'
 Assert-True ($content -notmatch "-All") 'Agente nao deve executar -All'
+Assert-True ($installContent -match 'RunAsAdmin') 'Parametro RunAsAdmin ausente no instalador'
+Assert-True ($installContent -match "'Highest'") 'RunAsAdmin deve usar Highest'
+Assert-True ($installContent -match "'Limited'") 'Padrao deve usar Limited'
+Assert-True ($installContent -notmatch '-RunLevel\s+LeastPrivilege') 'Instalador nao deve usar LeastPrivilege'
+Assert-True ($installContent -match 'RunLevelEnum') 'Deteccao defensiva do enum RunLevelEnum ausente'
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie-agent-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
