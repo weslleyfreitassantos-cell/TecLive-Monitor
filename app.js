@@ -1531,6 +1531,22 @@ function getCookieRefreshAdminStatus() {
     const lastAgent = agents[0] || null;
     const offlineMs = Number(process.env.COOKIE_AGENT_OFFLINE_MS || 90000);
     const agentOnline = lastAgent?.lastSeen ? (Date.now() - Date.parse(lastAgent.lastSeen) <= offlineMs) : false;
+    const queueCheckedAt = new Date().toISOString();
+    const recentJobs = queueStatus.recentJobs || [];
+    const byLatestJobUpdate = (a, b) => {
+        const aTime = Date.parse(a.completedAt || a.updatedAt || a.createdAt || 0);
+        const bTime = Date.parse(b.completedAt || b.updatedAt || b.createdAt || 0);
+        return bTime - aTime;
+    };
+    const lastExecution = recentJobs
+        .filter(job => ['succeeded', 'failed', 'cancelled'].includes(job.status))
+        .sort(byLatestJobUpdate)[0] || null;
+    const lastCookieUpdated = recentJobs
+        .filter(job => job.status === 'succeeded')
+        .sort(byLatestJobUpdate)[0] || null;
+    const lastErrorJob = recentJobs
+        .filter(job => job.lastError && job.status !== 'cancelled')
+        .sort(byLatestJobUpdate)[0] || null;
     return {
         enabled: Boolean(process.env.COOKIE_AGENT_TOKEN),
         tokenConfigured: Boolean(process.env.COOKIE_AGENT_TOKEN),
@@ -1543,9 +1559,18 @@ function getCookieRefreshAdminStatus() {
         } : null,
         counts: queueStatus.counts,
         activeJobs: queueStatus.activeJobs,
-        recentJobs: queueStatus.recentJobs,
+        recentJobs,
+        summary: {
+            lastExecutionAt: lastExecution?.completedAt || lastExecution?.updatedAt || null,
+            lastExecutionCookie: lastExecution?.cookie || null,
+            lastExecutionStatus: lastExecution?.status || null,
+            lastCookieUpdated: lastCookieUpdated?.cookie || null,
+            lastCookieUpdatedAt: lastCookieUpdated?.completedAt || lastCookieUpdated?.updatedAt || null,
+            lastError: lastErrorJob?.lastError || null,
+            lastQueueCheck: queueCheckedAt
+        },
         cookies: converter?.cookieRotator?.getFunctionalStatus ? converter.cookieRotator.getFunctionalStatus() : {},
-        timestamp: new Date().toISOString()
+        timestamp: queueCheckedAt
     };
 }
 

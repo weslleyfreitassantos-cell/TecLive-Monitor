@@ -390,9 +390,10 @@
         /* ===== NOVO LAYOUT INFERIOR ===== */
         .bottom-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
             gap: 24px;
             margin-top: 24px;
+            align-items: stretch;
         }
         .bottom-grid .card { background: #0f1322; border: 1px solid rgba(46,204,113,0.1); border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; }
         .bottom-grid .card-header { padding: 14px 20px; background: rgba(0,0,0,0.25); border-bottom: 1px solid rgba(46,204,113,0.1); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -412,10 +413,6 @@
         .right-stack .card:first-child {
             min-height: 220px;
         }
-
-        .timeline { max-height: 180px; overflow-y: auto; }
-        .timeline-item { background: rgba(0,0,0,0.2); border-left: 2px solid #2ecc71; padding: 6px 14px; margin-bottom: 4px; border-radius: 4px; font-size: 14px; }
-        .timeline-time { color: #2ecc71; font-weight: 600; margin-right: 10px; }
 
         .chart-item {
             margin-bottom: 8px;
@@ -508,6 +505,12 @@
             gap: 12px;
             font-size: 13px;
         }
+        .cookie-automation-card {
+            min-height: 100%;
+        }
+        .cookie-automation-card .cookie-automation {
+            flex: 1;
+        }
         .automation-summary {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -534,6 +537,17 @@
             color: #e0e0e0;
             font-weight: 700;
             overflow-wrap: anywhere;
+        }
+        .automation-muted {
+            color: #7a8aa0;
+            font-size: 11px;
+            margin-top: 3px;
+            overflow-wrap: anywhere;
+        }
+        .automation-detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
         }
         .automation-actions {
             display: flex;
@@ -575,6 +589,12 @@
         .automation-job.running, .automation-job.claimed { border-left-color: #5dade2; }
         .automation-job.succeeded { border-left-color: #2ecc71; }
         .automation-job.failed { border-left-color: #e74c3c; }
+
+        @media (min-width: 1100px) {
+            .cookie-automation-card .automation-summary {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
 
         .footer {
             position: fixed;
@@ -981,6 +1001,7 @@
         @media (max-width: 900px) {
             .container { padding: 16px; }
             .bottom-grid { grid-template-columns: 1fr; }
+            .automation-detail-grid { grid-template-columns: 1fr; }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .footer { padding: 8px 16px; flex-direction: column; text-align: center; }
             .footer-right { justify-content: center; }
@@ -1020,6 +1041,7 @@
             .card-header h2 { font-size: 16px; }
             .filter-btn { font-size: 13px; padding: 4px 12px; }
             .cookie-item { font-size: 12px; }
+            .automation-summary { grid-template-columns: 1fr; }
             .monitor-table .canal-cell { max-width: 80px; }
             .cadastro-modal .modal-box { max-width: 100%; margin: 10px; }
             .lista-clientes-modal .modal-box { max-width: 100%; margin: 10px; }
@@ -1115,13 +1137,15 @@
 
     <!-- ===== NOVO LAYOUT INFERIOR ===== -->
     <div class="bottom-grid">
-        <!-- Esquerda: Linha do Tempo -->
-        <div class="card">
-            <div class="card-header"><h2>LINHA DO TEMPO</h2><span class="badge">TERMINAL</span></div>
-            <div class="card-content"><div id="timelineContent" class="timeline"></div></div>
+        <div class="card cookie-automation-card">
+            <div class="card-header"><h2>AUTOMAÇÃO DE COOKIES</h2><span class="badge" id="cookieAutomationBadge">DESATIVADA</span></div>
+            <div class="card-content">
+                <div id="cookieAutomationContent" class="cookie-automation">
+                    <div class="public-mode-card">Carregando automação...</div>
+                </div>
+            </div>
         </div>
 
-        <!-- Direita: Atividade + Autenticação empilhadas -->
         <div class="right-stack">
             <div class="card">
                 <div class="card-header"><h2>ATIVIDADE</h2><span class="badge">ULTIMOS 60 MIN</span></div>
@@ -1130,14 +1154,6 @@
             <div class="card">
                 <div class="card-header"><h2>AUTENTICAÇÃO</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
                 <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
-            </div>
-            <div class="card">
-                <div class="card-header"><h2>AUTOMAÇÃO DE COOKIES</h2><span class="badge" id="cookieAutomationBadge">DESATIVADA</span></div>
-                <div class="card-content">
-                    <div id="cookieAutomationContent" class="cookie-automation">
-                        <div class="public-mode-card">Carregando automação...</div>
-                    </div>
-                </div>
             </div>
         </div>
     </div>
@@ -1251,7 +1267,6 @@
     // ============================================================
     // CÓDIGO PRINCIPAL
     // ============================================================
-    let eventLog = [];
     let renewalCount = 0;
     let lastRenewTime = null;
     let allMonitorsData = [];
@@ -1807,15 +1822,6 @@
         return problems.join('\n');
     }
 
-    function addEvent(message) {
-        const time = new Date().toLocaleTimeString('pt-BR');
-        eventLog.unshift({ time, message });
-        if (eventLog.length > 20) eventLog.pop();
-        const container = document.getElementById('timelineContent');
-        if (eventLog.length === 0) { container.innerHTML = '<div class="empty-state">Aguardando eventos...</div>'; return; }
-        container.innerHTML = eventLog.map(e => `<div class="timeline-item"><span class="timeline-time">[${e.time}]</span><span>${e.message}</span></div>`).join('');
-    }
-
     function updateChart(monitors) {
         const totalLives = monitors.length;
         const totalOnline = monitors.filter(m => m.status === 'online').length;
@@ -1854,9 +1860,9 @@
     }
 
     function formatDateTime(value) {
-        if (!value) return 'nunca';
+        if (!value) return '—';
         const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return 'indisponível';
+        if (Number.isNaN(date.getTime())) return '—';
         return date.toLocaleString('pt-BR');
     }
 
@@ -1948,13 +1954,27 @@
         const recentJobs = status.recentJobs || [];
         const counts = status.counts || {};
         const cookies = status.cookies || {};
+        const summary = status.summary || {};
         const pendingCancelable = recentJobs.some(item => item.status === 'pending');
         const disabledAttr = cookieAutomationBusy ? 'disabled' : '';
         const cancelDisabledAttr = cookieAutomationBusy || !pendingCancelable ? 'disabled' : '';
         const agentClass = agent?.online ? 'ok' : 'fail';
         const stage = activeJob ? getAutomationStage(activeJob) : (agent?.online ? 'aguardando tarefa' : 'agente offline');
+        const agentStatus = agent?.online ? 'ONLINE' : 'OFFLINE';
+        const lastExecutionLabel = summary.lastExecutionAt
+            ? `${formatDateTime(summary.lastExecutionAt)}`
+            : '—';
+        const lastExecutionMeta = summary.lastExecutionCookie
+            ? `${String(summary.lastExecutionCookie).toUpperCase()} · ${getAutomationStage({ status: summary.lastExecutionStatus })}`
+            : '—';
+        const lastCookieUpdatedLabel = summary.lastCookieUpdated
+            ? String(summary.lastCookieUpdated).toUpperCase()
+            : '—';
+        const lastCookieUpdatedMeta = formatDateTime(summary.lastCookieUpdatedAt);
+        const lastError = summary.lastError || 'Nenhum';
+        const lastQueueCheck = formatDateTime(summary.lastQueueCheck || status.timestamp);
 
-        badge.textContent = agent?.online ? 'ONLINE' : 'OFFLINE';
+        badge.textContent = agentStatus;
 
         const cookieRows = ['cookie1', 'cookie2', 'cookie3'].map(name => {
             const info = cookies[name] || {};
@@ -1978,22 +1998,44 @@
         container.innerHTML = `
             <div class="automation-summary">
                 <div class="automation-pill ${agentClass}">
-                    <div class="automation-label">Agente Windows</div>
-                    <div class="automation-value">${agent?.online ? 'online' : 'offline'}<br><span style="color:#7a8aa0; font-size:11px;">${escapeHtml(agent?.hostname || 'sem heartbeat')}</span></div>
+                    <div class="automation-label">Status do agente</div>
+                    <div class="automation-value">${agentStatus}</div>
+                    <div class="automation-muted">${escapeHtml(agent?.hostname || '—')}</div>
                 </div>
                 <div class="automation-pill ${activeJob ? 'warn' : 'ok'}">
-                    <div class="automation-label">Status</div>
-                    <div class="automation-value">${escapeHtml(stage)}<br><span style="color:#7a8aa0; font-size:11px;">último heartbeat: ${escapeHtml(formatDateTime(agent?.lastSeen))}</span></div>
+                    <div class="automation-label">Último heartbeat</div>
+                    <div class="automation-value">${escapeHtml(formatDateTime(agent?.lastSeen))}</div>
+                    <div class="automation-muted">${escapeHtml(stage)}</div>
                 </div>
                 <div class="automation-pill">
+                    <div class="automation-label">Última execução</div>
+                    <div class="automation-value">${escapeHtml(lastExecutionLabel)}</div>
+                    <div class="automation-muted">${escapeHtml(lastExecutionMeta)}</div>
+                </div>
+                <div class="automation-pill">
+                    <div class="automation-label">Último cookie atualizado</div>
+                    <div class="automation-value">${escapeHtml(lastCookieUpdatedLabel)}</div>
+                    <div class="automation-muted">${escapeHtml(lastCookieUpdatedMeta)}</div>
+                </div>
+                <div class="automation-pill ${summary.lastError ? 'fail' : 'ok'}">
+                    <div class="automation-label">Último erro</div>
+                    <div class="automation-value">${escapeHtml(lastError)}</div>
+                </div>
+                <div class="automation-pill">
+                    <div class="automation-label">Última consulta à fila</div>
+                    <div class="automation-value">${escapeHtml(lastQueueCheck)}</div>
+                </div>
+                ${cookieRows}
+            </div>
+            <div class="automation-detail-grid">
+                <div class="automation-pill">
                     <div class="automation-label">Versão do agente</div>
-                    <div class="automation-value">${escapeHtml(agent?.version || 'não informado')}</div>
+                    <div class="automation-value">${escapeHtml(agent?.version || '—')}</div>
                 </div>
                 <div class="automation-pill">
                     <div class="automation-label">Tarefas</div>
                     <div class="automation-value">P:${counts.pending || 0} R:${(counts.running || 0) + (counts.claimed || 0)} OK:${counts.succeeded || 0} F:${counts.failed || 0}</div>
                 </div>
-                ${cookieRows}
             </div>
             <div class="automation-actions">
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie1')">Atualizar Cookie1</button>
@@ -2288,11 +2330,7 @@
             await loadFunctionalCookieStatus();
             await loadCookieAutomationStatus();
             updateChart(monitors.monitors || []);
-            if (monitors.monitors?.length > 0 && (!window.lastLiveCount || window.lastLiveCount !== monitors.monitors.length)) {
-                addEvent(`${monitors.monitors.length} live(s) monitorada(s)`);
-            }
-            window.lastLiveCount = monitors.monitors?.length || 0;
-        } catch (error) { console.error(error); addEvent('Erro ao buscar dados'); }
+        } catch (error) { console.error(error); }
     }
 
     function setupFilters() {
@@ -2316,8 +2354,6 @@
     setInterval(fetchData, 5000);
     setInterval(loadCookieAutomationStatus, 15000);
     setupFilters();
-    addEvent('Sistema iniciado');
-
     setInterval(sincronizarClientesBackend, 30000);
 </script>
 </body>

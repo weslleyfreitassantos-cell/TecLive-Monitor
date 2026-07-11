@@ -174,11 +174,22 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(app.includes("Object.prototype.hasOwnProperty.call(req.query || {}, 'token')"));
     assert.ok(app.includes("app.use('/api/cookie-agent', cookieAgentLimiter, authenticateCookieAgent)"));
     assert.ok(app.includes('/api/admin/cookie-refresh/status'));
+    assert.ok(app.includes('lastQueueCheck'));
+    assert.ok(app.includes('lastCookieUpdated'));
 
     const dashboard = readDashboard();
     assert.ok(dashboard.includes('AUTOMAÇÃO DE COOKIES'));
+    assert.ok(dashboard.includes('Status do agente'));
+    assert.ok(dashboard.includes('Último heartbeat'));
+    assert.ok(dashboard.includes('Última execução'));
+    assert.ok(dashboard.includes('Último cookie atualizado'));
+    assert.ok(dashboard.includes('Último erro'));
+    assert.ok(dashboard.includes('Última consulta à fila'));
     assert.ok(dashboard.includes('/api/admin/cookie-refresh/enqueue/'));
     assert.ok(!dashboard.includes('COOKIE_AGENT_TOKEN'));
+    assert.ok(!dashboard.includes('LINHA DO TEMPO'));
+    assert.ok(!dashboard.includes('timelineContent'));
+    assert.ok(!dashboard.includes('function addEvent'));
 }
 
 testQueueBasics();
