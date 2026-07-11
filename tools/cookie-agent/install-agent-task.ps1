@@ -3,7 +3,8 @@ param(
     [string]$TaskName = 'TecLive Cookie Sync Agent',
     [string]$ConfigPath,
     [switch]$Force,
-    [switch]$RunAsAdmin
+    [switch]$RunAsAdmin,
+    [switch]$WakeToRun
 )
 
 Set-StrictMode -Version Latest
@@ -59,7 +60,15 @@ $arguments = @(
 
 $action = New-ScheduledTaskAction -Execute $ps -Argument $arguments -WorkingDirectory $projectRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings = New-ScheduledTaskSettingsSet `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -WakeToRun:$WakeToRun.IsPresent
 $runLevel = Get-ScheduledTaskRunLevel -Elevated:$RunAsAdmin.IsPresent
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel $runLevel
 if ($PSCmdlet.ShouldProcess($TaskName, "criar tarefa agendada com RunLevel $runLevel")) {
@@ -71,4 +80,14 @@ if ($PSCmdlet.ShouldProcess($TaskName, "criar tarefa agendada com RunLevel $runL
 
 Write-Host "Comando: $ps $arguments"
 Write-Host "RunLevel: $runLevel"
+Write-Host "MultipleInstances: $($settings.MultipleInstances)"
+Write-Host "RestartCount: $($settings.RestartCount)"
+Write-Host "RestartInterval: $($settings.RestartInterval)"
+Write-Host "ExecutionTimeLimit: $($settings.ExecutionTimeLimit)"
+Write-Host "AllowDemandStart: $($settings.AllowDemandStart)"
+Write-Host "DisallowStartIfOnBatteries: $($settings.DisallowStartIfOnBatteries)"
+Write-Host "StopIfGoingOnBatteries: $($settings.StopIfGoingOnBatteries)"
+Write-Host "StartWhenAvailable: $($settings.StartWhenAvailable)"
+Write-Host "RunOnlyIfNetworkAvailable: $($settings.RunOnlyIfNetworkAvailable)"
+Write-Host "WakeToRun: $($settings.WakeToRun)"
 Write-Host "A tarefa nao foi iniciada automaticamente por este instalador."

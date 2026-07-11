@@ -14,6 +14,11 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-OutputMatch {
+    param([string]$Output, [string]$Pattern, [string]$Message)
+    Assert-True ($Output -match $Pattern) $Message
+}
+
 function Invoke-Agent {
     param([string[]]$Arguments)
     $psExe = (Get-Process -Id $PID).Path
@@ -50,6 +55,10 @@ Assert-True ($installContent -match "'Highest'") 'RunAsAdmin deve usar Highest'
 Assert-True ($installContent -match "'Limited'") 'Padrao deve usar Limited'
 Assert-True ($installContent -notmatch '-RunLevel\s+LeastPrivilege') 'Instalador nao deve usar LeastPrivilege'
 Assert-True ($installContent -match 'RunLevelEnum') 'Deteccao defensiva do enum RunLevelEnum ausente'
+Assert-True ($installContent -match 'WakeToRun') 'Parametro WakeToRun ausente no instalador'
+Assert-True ($installContent -match 'SupportsShouldProcess') 'Instalador deve suportar WhatIf'
+Assert-True ($installContent -match 'New-ScheduledTaskTrigger\s+-AtLogOn') 'Trigger no logon deve ser mantido'
+Assert-True ($installContent -notmatch '-Password|LogonType\s+Password') 'Instalador nao deve armazenar senha'
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie-agent-test-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -58,12 +67,25 @@ try {
     '{}' | Set-Content -LiteralPath $installConfig -Encoding UTF8
     $defaultTaskName = "Cookie Agent Test Default $([guid]::NewGuid().ToString('N'))"
     $adminTaskName = "Cookie Agent Test Admin $([guid]::NewGuid().ToString('N'))"
+    $wakeTaskName = "Cookie Agent Test Wake $([guid]::NewGuid().ToString('N'))"
     $defaultInstall = (& $install -TaskName $defaultTaskName -ConfigPath $installConfig -WhatIf *>&1) -join "`n"
     $adminInstall = (& $install -TaskName $adminTaskName -ConfigPath $installConfig -RunAsAdmin -WhatIf *>&1) -join "`n"
-    Assert-True ($defaultInstall -match 'RunLevel:\s+Limited') 'Padrao do instalador deve usar Limited'
-    Assert-True ($adminInstall -match 'RunLevel:\s+Highest') 'RunAsAdmin deve usar Highest'
-    Assert-True (($defaultInstall + $adminInstall) -notmatch 'RunLevel:\s+LeastPrivilege') 'Instalador nunca deve usar LeastPrivilege'
-    $createdInstallTasks = Get-ScheduledTask -TaskName $defaultTaskName, $adminTaskName -ErrorAction SilentlyContinue
+    $wakeInstall = (& $install -TaskName $wakeTaskName -ConfigPath $installConfig -WakeToRun -WhatIf *>&1) -join "`n"
+    Assert-OutputMatch $defaultInstall 'RunLevel:\s+Limited' 'Padrao do instalador deve usar Limited'
+    Assert-OutputMatch $adminInstall 'RunLevel:\s+Highest' 'RunAsAdmin deve usar Highest'
+    Assert-True (($defaultInstall + $adminInstall + $wakeInstall) -notmatch 'RunLevel:\s+LeastPrivilege') 'Instalador nunca deve usar LeastPrivilege'
+    Assert-OutputMatch $defaultInstall 'MultipleInstances:\s+IgnoreNew' 'MultipleInstances deve ser IgnoreNew'
+    Assert-OutputMatch $defaultInstall 'RestartCount:\s+3' 'RestartCount deve ser 3'
+    Assert-OutputMatch $defaultInstall 'RestartInterval:\s+PT1M' 'RestartInterval deve ser 1 minuto'
+    Assert-OutputMatch $defaultInstall 'ExecutionTimeLimit:\s+PT0S' 'ExecutionTimeLimit deve ser ilimitado'
+    Assert-OutputMatch $defaultInstall 'AllowDemandStart:\s+True' 'AllowDemandStart deve ser True'
+    Assert-OutputMatch $defaultInstall 'DisallowStartIfOnBatteries:\s+False' 'DisallowStartIfOnBatteries deve ser False'
+    Assert-OutputMatch $defaultInstall 'StopIfGoingOnBatteries:\s+False' 'StopIfGoingOnBatteries deve ser False'
+    Assert-OutputMatch $defaultInstall 'StartWhenAvailable:\s+True' 'StartWhenAvailable deve ser True'
+    Assert-OutputMatch $defaultInstall 'RunOnlyIfNetworkAvailable:\s+False' 'RunOnlyIfNetworkAvailable deve ser False'
+    Assert-OutputMatch $defaultInstall 'WakeToRun:\s+False' 'WakeToRun padrao deve ser False'
+    Assert-OutputMatch $wakeInstall 'WakeToRun:\s+True' 'WakeToRun explicito deve ser True'
+    $createdInstallTasks = Get-ScheduledTask -TaskName $defaultTaskName, $adminTaskName, $wakeTaskName -ErrorAction SilentlyContinue
     Assert-True (-not $createdInstallTasks) 'Teste do instalador nao deve criar tarefa real'
 
     $missing = Join-Path $tmp 'missing.json'
