@@ -3,12 +3,14 @@ set -Eeuo pipefail
 
 MODE="human"
 QUIET=0
+SELF_TEST=0
 for arg in "$@"; do
   case "$arg" in
     --json) MODE="json" ;;
     --human) MODE="human" ;;
     --quiet) QUIET=1 ;;
-    *) echo "Uso: $0 [--json|--human] [--quiet]" >&2; exit 2 ;;
+    --self-test) SELF_TEST=1 ;;
+    *) echo "Uso: $0 [--json|--human] [--quiet] [--self-test]" >&2; exit 2 ;;
   esac
 done
 
@@ -19,8 +21,11 @@ TEST_URL="${HEALTH_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"
 RESULTS=()
 
 add_result() {
-  local name="$1" status="$2" detail="$3"
-  RESULTS+=("$name|$status|$detail")
+  local name="$1" status="$2" detail="$3" fields="${4:-}"
+  if [[ -z "$fields" ]]; then
+    fields="{}"
+  fi
+  RESULTS+=("$name|$status|$detail|$fields")
 }
 
 json_string() {
@@ -43,6 +48,169 @@ check_cmd() {
     add_result "$cmd" "fail" "ausente"
   fi
 }
+
+parse_pm2_jlist_file() {
+  local process_name="$1" json_file="$2"
+  node - "$process_name" "$json_file" <<'NODE'
+const fs = require('fs');
+const [processName, jsonFile] = process.argv.slice(2);
+
+function formatUptime(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  let seconds = Math.floor(ms / 1000);
+  const days = Math.floor(seconds / 86400);
+  seconds %= 86400;
+  const hours = Math.floor(seconds / 3600);
+  seconds %= 3600;
+  const minutes = Math.floor(seconds / 60);
+  seconds %= 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours || parts.length) parts.push(`${hours}h`);
+  if (minutes || parts.length) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+function emit(status, detail, fields) {
+  console.log(status);
+  console.log(detail);
+  console.log(JSON.stringify(fields));
+}
+
+let raw;
+try {
+  raw = fs.readFileSync(jsonFile, 'utf8');
+} catch (error) {
+  emit('fail', 'pm2 jlist falhou', {
+    classification: 'jlist_failed',
+    processName,
+    error: error.message,
+  });
+  process.exit(0);
+}
+
+let list;
+try {
+  list = JSON.parse(raw);
+  if (!Array.isArray(list)) throw new Error('pm2 jlist nao retornou uma lista');
+} catch (error) {
+  emit('fail', 'pm2 jlist JSON invalido', {
+    classification: 'invalid_json',
+    processName,
+    error: error.message,
+  });
+  process.exit(0);
+}
+
+const proc = list.find((item) => item && item.name === processName);
+if (!proc) {
+  emit('fail', `${processName} nao encontrado`, {
+    classification: 'not_found',
+    processName,
+    pm2Status: null,
+    pid: null,
+    uptime: null,
+    cwd: null,
+    scriptPath: null,
+  });
+  process.exit(0);
+}
+
+const env = proc.pm2_env || {};
+const pm2Status = typeof env.status === 'string' ? env.status : 'unknown';
+const pid = Number.isFinite(Number(proc.pid)) && Number(proc.pid) > 0 ? Number(proc.pid) : null;
+const pmUptime = Number.isFinite(Number(env.pm_uptime)) ? Number(env.pm_uptime) : null;
+const uptime = pmUptime ? formatUptime(Date.now() - pmUptime) : null;
+const cwd = typeof env.pm_cwd === 'string' && env.pm_cwd ? env.pm_cwd : null;
+const scriptPath = typeof env.pm_exec_path === 'string' && env.pm_exec_path ? env.pm_exec_path : null;
+const classification = pm2Status === 'online'
+  ? 'online'
+  : (pm2Status === 'stopped' || pm2Status === 'errored' ? pm2Status : 'not_online');
+const detailParts = [`${processName} ${pm2Status}`];
+if (pid !== null) detailParts.push(`pid=${pid}`);
+if (uptime) detailParts.push(`uptime=${uptime}`);
+if (cwd) detailParts.push(`cwd=${cwd}`);
+if (scriptPath) detailParts.push(`script=${scriptPath}`);
+
+emit(pm2Status === 'online' ? 'ok' : 'fail', detailParts.join(' '), {
+  classification,
+  processName,
+  pm2Status,
+  pid,
+  uptime,
+  cwd,
+  scriptPath,
+});
+NODE
+}
+
+check_pm2_process() {
+  if ! has_cmd pm2; then
+    add_result "pm2-process" "fail" "pm2 ausente" \
+      "{\"classification\":\"pm2_missing\",\"processName\":\"$PM2_PROCESS\"}"
+    return
+  fi
+
+  local jlist_file err_file code parsed_output
+  jlist_file="$(mktemp)"
+  err_file="$(mktemp)"
+  set +e
+  pm2 jlist >"$jlist_file" 2>"$err_file"
+  code=$?
+  set -e
+
+  if (( code != 0 )); then
+    rm -f -- "$jlist_file" "$err_file"
+    add_result "pm2-process" "fail" "pm2 jlist falhou" \
+      "{\"classification\":\"jlist_failed\",\"processName\":\"$PM2_PROCESS\",\"exitCode\":$code}"
+    return
+  fi
+
+  parsed_output="$(parse_pm2_jlist_file "$PM2_PROCESS" "$jlist_file")"
+  rm -f -- "$jlist_file" "$err_file"
+
+  local parsed_lines=()
+  mapfile -t parsed_lines <<<"$parsed_output"
+  local parsed_fields="${parsed_lines[2]:-}"
+  if [[ -z "$parsed_fields" ]]; then
+    parsed_fields="{\"classification\":\"invalid_json\",\"processName\":\"$PM2_PROCESS\"}"
+  fi
+  add_result "pm2-process" "${parsed_lines[0]:-fail}" "${parsed_lines[1]:-pm2 jlist JSON invalido}" "$parsed_fields"
+}
+
+run_pm2_mock_tests() {
+  local tmp expected_status expected_text output lines=()
+  tmp="$(mktemp)"
+
+  run_case() {
+    local name="$1" json="$2" want_status="$3" want_text="$4"
+    printf '%s' "$json" >"$tmp"
+    output="$(parse_pm2_jlist_file "$PM2_PROCESS" "$tmp")"
+    mapfile -t lines <<<"$output"
+    if [[ "${lines[0]:-}" != "$want_status" || "${lines[1]:-}" != *"$want_text"* ]]; then
+      echo "Mock PM2 falhou: $name" >&2
+      echo "Esperado: $want_status / $want_text" >&2
+      echo "Obtido: ${lines[0]:-} / ${lines[1]:-}" >&2
+      rm -f -- "$tmp"
+      exit 1
+    fi
+  }
+
+  run_case "online" '[{"name":"youtube-monitor-v3","pid":1590219,"pm2_env":{"status":"online","pm_uptime":1000,"pm_cwd":"/var/www/livemonitor","pm_exec_path":"/var/www/livemonitor/app.js"}}]' "ok" "youtube-monitor-v3 online"
+  run_case "stopped" '[{"name":"youtube-monitor-v3","pid":0,"pm2_env":{"status":"stopped","pm_cwd":"/var/www/livemonitor","pm_exec_path":"/var/www/livemonitor/app.js"}}]' "fail" "youtube-monitor-v3 stopped"
+  run_case "errored" '[{"name":"youtube-monitor-v3","pid":0,"pm2_env":{"status":"errored","pm_cwd":"/var/www/livemonitor","pm_exec_path":"/var/www/livemonitor/app.js"}}]' "fail" "youtube-monitor-v3 errored"
+  run_case "ausente" '[{"name":"outro-processo","pm2_env":{"status":"online"}}]' "fail" "youtube-monitor-v3 nao encontrado"
+  run_case "json-invalido" '{invalid json' "fail" "pm2 jlist JSON invalido"
+
+  rm -f -- "$tmp"
+  echo "PM2 health mock tests OK"
+}
+
+if (( SELF_TEST )); then
+  run_pm2_mock_tests
+  exit 0
+fi
 
 check_cmd node
 check_cmd pm2
@@ -92,27 +260,7 @@ if has_cmd yt-dlp; then
   fi
 fi
 
-if has_cmd pm2; then
-  if pm2 jlist 2>/dev/null | node - "$PM2_PROCESS" <<'NODE'
-const name = process.argv[2];
-let input = '';
-process.stdin.on('data', (chunk) => input += chunk);
-process.stdin.on('end', () => {
-  try {
-    const list = JSON.parse(input);
-    const proc = list.find((item) => item.name === name);
-    process.exit(proc && proc.pm2_env && proc.pm2_env.status === 'online' ? 0 : 1);
-  } catch {
-    process.exit(1);
-  }
-});
-NODE
-  then
-    add_result "pm2-process" "ok" "$PM2_PROCESS online"
-  else
-    add_result "pm2-process" "fail" "$PM2_PROCESS nao esta online"
-  fi
-fi
+check_pm2_process
 
 if [[ -x "$PROJECT_PATH/scripts/yt-dlp-manager/check-ytdlp-update.sh" ]]; then
   set +e
@@ -132,7 +280,7 @@ if [[ "$MODE" == "json" ]]; then
   printf '['
   first=1
   for row in "${RESULTS[@]}"; do
-    IFS='|' read -r name status detail <<<"$row"
+    IFS='|' read -r name status detail fields <<<"$row"
     (( first )) || printf ','
     first=0
     printf '{"name":'
@@ -141,20 +289,24 @@ if [[ "$MODE" == "json" ]]; then
     json_string "$status"
     printf ',"detail":'
     json_string "$detail"
+    if [[ -z "${fields:-}" ]]; then
+      fields="{}"
+    fi
+    printf ',"fields":%s' "$fields"
     printf '}'
   done
   printf ']\n'
 else
   if (( ! QUIET )); then
     for row in "${RESULTS[@]}"; do
-      IFS='|' read -r name status detail <<<"$row"
+      IFS='|' read -r name status detail _ <<<"$row"
       printf '%-24s %-6s %s\n' "$name" "$status" "$detail"
     done
   fi
 fi
 
 for row in "${RESULTS[@]}"; do
-  IFS='|' read -r _ status _ <<<"$row"
+  IFS='|' read -r _ status _ _ <<<"$row"
   if [[ "$status" == "fail" ]]; then
     exit 1
   fi
