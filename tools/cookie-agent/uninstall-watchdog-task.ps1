@@ -1,10 +1,11 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$TaskName = 'TecLive Cookie Sync Agent'
+    [string]$TaskName = 'TecLive Cookie Sync Watchdog'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Import-Module ScheduledTasks -ErrorAction Stop
 
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if (-not $task) {
@@ -12,10 +13,10 @@ if (-not $task) {
     exit 0
 }
 
-if ($PSCmdlet.ShouldProcess($TaskName, 'remover tarefa do agente')) {
+if ($PSCmdlet.ShouldProcess($TaskName, 'remover tarefa watchdog')) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     Write-Host "Tarefa removida: $TaskName"
 } else {
     Write-Host "Tarefa validada para remocao: $TaskName"
 }
-Write-Host "Config, state e logs nao foram apagados."
+Write-Host 'Config, state e logs nao foram apagados.'

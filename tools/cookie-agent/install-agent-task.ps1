@@ -4,12 +4,16 @@ param(
     [string]$ConfigPath,
     [switch]$Force,
     [switch]$RunAsAdmin,
-    [switch]$WakeToRun
+    [switch]$WakeToRun,
+    [switch]$StartAfterInstall,
+    [switch]$ValidateAfterStart,
+    [int]$ValidationTimeoutSeconds = 60
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module ScheduledTasks -ErrorAction Stop
+. (Join-Path $PSScriptRoot 'cookie-agent-common.ps1')
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $PSScriptRoot 'cookie-agent.config.json'
@@ -76,6 +80,44 @@ if ($PSCmdlet.ShouldProcess($TaskName, "criar tarefa agendada com RunLevel $runL
     Write-Host "Tarefa criada: $TaskName"
 } else {
     Write-Host "Tarefa validada: $TaskName"
+}
+
+if ($StartAfterInstall) {
+    if ($PSCmdlet.ShouldProcess($TaskName, 'iniciar tarefa apos instalacao')) {
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        Write-Host "Tarefa iniciada: $TaskName"
+    } else {
+        Write-Host "StartAfterInstall validado: $TaskName"
+    }
+}
+
+if ($ValidateAfterStart) {
+    if ($WhatIfPreference) {
+        Write-Host 'ValidateAfterStart pulado por WhatIf.'
+    } else {
+        $deadline = (Get-Date).AddSeconds([Math]::Max(1, $ValidationTimeoutSeconds))
+        $health = $null
+        do {
+            Start-Sleep -Seconds 2
+            $health = Get-CookieAgentTaskHealth `
+                -TaskName $TaskName `
+                -ConfigPath $ConfigPath `
+                -RuntimeStatePath (Get-CookieAgentRuntimeStatePath -ScriptRoot $PSScriptRoot) `
+                -LogPath (Join-Path $projectRoot 'logs\cookie-agent\agent.log') `
+                -StaleMinutes 2 `
+                -QueuedMinutes 1
+            if ($health.healthy) { break }
+        } while ((Get-Date) -lt $deadline)
+
+        if (-not $health -or -not $health.healthy) {
+            $reason = if ($health) { $health.reason } else { 'health_unavailable' }
+            $taskState = if ($health) { $health.taskState } else { 'unknown' }
+            $processFound = if ($health) { $health.processFound } else { $false }
+            $heartbeatAge = if ($health) { $health.heartbeatAgeSeconds } else { $null }
+            throw "Validacao da tarefa falhou: reason=$reason taskState=$taskState processFound=$processFound heartbeatAgeSeconds=$heartbeatAge"
+        }
+        Write-Host "Validacao OK: tarefa Running, processo encontrado e heartbeat recente."
+    }
 }
 
 Write-Host "Comando: $ps $arguments"

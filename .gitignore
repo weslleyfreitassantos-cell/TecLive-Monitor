@@ -54,6 +54,8 @@ data/*
 # Cookie Agent local secrets and state
 tools/cookie-agent/cookie-agent.config.json
 tools/cookie-agent/agent-state.json
+tools/cookie-agent/agent-runtime-state.json
+tools/cookie-agent/watchdog-state.json
 
 # Runtime logs
 logs/cookie-sync/*

@@ -9,6 +9,16 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'cookie-agent-common.ps1')
+
+$script:AgentStartedAt = Get-Date
+$script:AgentExitCode = 0
+$script:AgentExitReason = 'unknown'
+$script:AgentExitSummary = 'inicializando'
+$script:ShutdownRequested = $false
+$script:RuntimeStatePath = Get-CookieAgentRuntimeStatePath -ScriptRoot $PSScriptRoot
+$script:LifecycleLogPath = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'logs\cookie-agent\agent.log'
+$script:HasRuntimeOwnership = $false
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $PSScriptRoot 'cookie-agent.config.json'
@@ -99,8 +109,11 @@ function Redact-SensitiveText {
     param([string]$Text)
     $safe = [string]$Text
     $safe = $safe -replace '(Authorization:\s*Bearer\s+)[^\s]+', '$1[redacted]'
+    $safe = $safe -replace '(Bearer\s+)[A-Za-z0-9+/_=.-]{12,}', '$1[redacted]'
     $safe = $safe -replace '(token["":=\s]+)[^",\s]+', '$1[redacted]'
     $safe = $safe -replace '# Netscape HTTP Cookie File[\s\S]*', '[cookie content redacted]'
+    $safe = $safe -replace '[A-Za-z]:\\[^\s"'']+', '[path]'
+    $safe = $safe -replace '/(?:var|home|root|etc|opt)/[^\s"'']+', '[path]'
     return ($safe -replace '\s+', ' ').Trim()
 }
 
@@ -110,6 +123,73 @@ function Write-AgentLog {
     $line = '{0} {1}' -f (Get-Date -Format o), (Redact-SensitiveText $Message)
     Add-Content -LiteralPath $Path -Value $line -Encoding UTF8
     if ($VerboseOutput) { Write-Host $line }
+}
+
+function Write-LifecycleLog {
+    param([string]$Message)
+    try {
+        Write-AgentLog -Path $script:LifecycleLogPath -Message $Message
+    } catch {
+        try {
+            Write-CookieAgentLog -Path $script:LifecycleLogPath -Message $Message -VerboseOutput:$VerboseOutput
+        } catch {}
+    }
+}
+
+function Update-RuntimeState {
+    param([hashtable]$Patch)
+    if (-not $script:HasRuntimeOwnership -and -not $Patch.ContainsKey('lastExitAt')) {
+        return
+    }
+    try {
+        [void](Update-CookieAgentRuntimeState -Path $script:RuntimeStatePath -Patch $Patch)
+    } catch {
+        Write-LifecycleLog "Falha ao gravar runtime state: $($_.Exception.Message)"
+    }
+}
+
+function Register-AgentLifecycleHandlers {
+    try {
+        $script:CancelHandler = [System.ConsoleCancelEventHandler]{
+            param($sender, $eventArgs)
+            $script:ShutdownRequested = $true
+            $script:AgentExitReason = 'cancelled'
+            $script:AgentExitSummary = 'encerramento solicitado'
+            Write-LifecycleLog 'Encerramento solicitado por Console.CancelKeyPress/Ctrl+C.'
+        }
+        [Console]::add_CancelKeyPress($script:CancelHandler)
+    } catch {
+        Write-LifecycleLog "Nao foi possivel registrar Console.CancelKeyPress: $($_.Exception.Message)"
+    }
+    try {
+        Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+            $script:ShutdownRequested = $true
+            Write-LifecycleLog 'Evento PowerShell.Exiting recebido.'
+        } | Out-Null
+    } catch {
+        Write-LifecycleLog "Nao foi possivel registrar PowerShell.Exiting: $($_.Exception.Message)"
+    }
+}
+
+function Get-AgentMutex {
+    param([string]$AgentId, [int]$TimeoutMilliseconds = 2000)
+    $safeId = ([string]$AgentId -replace '[^a-zA-Z0-9_.-]', '_')
+    foreach ($prefix in @('Global', 'Local')) {
+        $name = "$prefix\TecLiveCookieSyncAgent-$safeId"
+        try {
+            $mutex = [System.Threading.Mutex]::new($false, $name)
+            try {
+                $acquired = $mutex.WaitOne($TimeoutMilliseconds)
+            } catch [System.Threading.AbandonedMutexException] {
+                Write-LifecycleLog "Mutex abandonado recuperado: $name"
+                $acquired = $true
+            }
+            return [pscustomobject]@{ Mutex = $mutex; Name = $name; Acquired = [bool]$acquired }
+        } catch {
+            if ($prefix -eq 'Local') { throw }
+            Write-LifecycleLog "Mutex Global indisponivel, tentando Local: $($_.Exception.Message)"
+        }
+    }
 }
 
 function Save-AgentState {
@@ -246,6 +326,7 @@ function Send-PendingReport {
         return $true
     }
 
+    Write-AgentLog -Path $LogPath -Message "Retry de pendingReport para job $jobId ($type)."
     $response = Invoke-AgentApi -Config $Config -Method POST -Path "/api/cookie-agent/jobs/$jobId/$type" -Body $body
     try {
         Assert-AgentApiSuccess -Response $response -Action "reenviar $type"
@@ -308,13 +389,19 @@ function Invoke-OneCycle {
         [string]$ProjectPath,
         [string]$CookieSyncScript,
         [string]$LogPath,
-        [string]$StatePath
+        [string]$StatePath,
+        [string]$RuntimeStatePath
     )
-    [void](Send-Heartbeat -Config $Config -Status ($(if ($DryRun) { 'dry-run' } else { 'idle' })))
+    $heartbeatStatus = if ($DryRun) { 'dry-run' } else { 'idle' }
+    [void](Send-Heartbeat -Config $Config -Status $heartbeatStatus)
+    Update-RuntimeState @{ lastHeartbeatAt = (Get-Date).ToString('o') }
+    Write-AgentLog -Path $LogPath -Message "Heartbeat enviado ($heartbeatStatus)."
     if (-not (Send-PendingReport -Config $Config -StatePath $StatePath -LogPath $LogPath)) {
         return $false
     }
 
+    Update-RuntimeState @{ lastQueueCheckAt = (Get-Date).ToString('o') }
+    Write-AgentLog -Path $LogPath -Message 'Consulta de fila iniciada.'
     $next = Invoke-AgentApi -Config $Config -Method GET -Path '/api/cookie-agent/jobs/next'
     if ($next.StatusCode -eq 204) {
         Write-AgentLog -Path $LogPath -Message 'Nenhuma tarefa pendente.'
@@ -329,6 +416,8 @@ function Invoke-OneCycle {
     if ($AllowedCookies -notcontains $cookie) {
         throw "Servidor retornou cookie invalido: $cookie"
     }
+    Update-RuntimeState @{ lastJobAt = (Get-Date).ToString('o') }
+    Write-AgentLog -Path $LogPath -Message "Job encontrado: $($job.id) para $cookie."
 
     if ($DryRun) {
         Write-AgentLog -Path $LogPath -Message "DryRun: executaria tarefa $($job.id) para $cookie sem claim/conclusao."
@@ -343,13 +432,19 @@ function Invoke-OneCycle {
     if ($claim.StatusCode -ne 200 -or $claim.Data.success -ne $true) {
         throw "Falha ao reivindicar tarefa: HTTP $($claim.StatusCode)"
     }
+    Write-AgentLog -Path $LogPath -Message "Job claimed: $($job.id)."
 
     $running = Invoke-AgentApi -Config $Config -Method POST -Path "/api/cookie-agent/jobs/$($job.id)/running"
     Assert-AgentApiSuccess -Response $running -Action 'marcar running'
+    Write-AgentLog -Path $LogPath -Message "Job running: $($job.id)."
     [void](Send-Heartbeat -Config $Config -Status "running:$cookie")
+    Update-RuntimeState @{ lastHeartbeatAt = (Get-Date).ToString('o') }
+    Write-AgentLog -Path $LogPath -Message "Heartbeat enviado (running:$cookie)."
+    Write-AgentLog -Path $LogPath -Message "Cookie Sync iniciado para $cookie (job $($job.id))."
     Write-AgentLog -Path $LogPath -Message "Executando Cookie Sync para $cookie (job $($job.id))."
 
     $result = Invoke-CookieSync -ProjectPath $ProjectPath -ScriptPath $CookieSyncScript -Cookie $cookie -TimeoutSeconds ([int]$Config.server.timeoutSeconds)
+    Write-AgentLog -Path $LogPath -Message "Cookie Sync concluido para $cookie com exitCode=$($result.ExitCode) durationMs=$($result.DurationMs)."
     $state = @{
         lastJobId = $job.id
         cookie = $cookie
@@ -369,6 +464,7 @@ function Invoke-OneCycle {
         Assert-AgentApiSuccess -Response $complete -Action 'marcar complete'
         $state.Remove('pendingReport')
         Save-AgentState -Path $StatePath -State $state
+        Write-AgentLog -Path $LogPath -Message "Complete reportado para job $($job.id)."
         Write-AgentLog -Path $LogPath -Message "Job $($job.id) concluido para $cookie."
         return $true
     }
@@ -384,45 +480,114 @@ function Invoke-OneCycle {
     Assert-AgentApiSuccess -Response $fail -Action 'marcar fail'
     $state.Remove('pendingReport')
     Save-AgentState -Path $StatePath -State $state
+    Write-AgentLog -Path $LogPath -Message "Fail reportado para job $($job.id)."
     Write-AgentLog -Path $LogPath -Message "Job $($job.id) falhou para ${cookie}: $($result.Summary)"
     return $false
 }
 
-$config = Get-Config -Path $ConfigPath
-Assert-BaseUrl -BaseUrl ([string]$config.server.baseUrl)
-Protect-ConfigAcl -Path $ConfigPath
-
-$projectPath = Resolve-AgentPath -ProjectPath (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) -Value ([string]$config.paths.projectPath)
-$cookieSyncScript = Resolve-AgentPath -ProjectPath $projectPath -Value ([string]$config.paths.cookieSyncScript)
-$logPath = Resolve-AgentPath -ProjectPath $projectPath -Value ([string]$config.paths.logPath)
-$statePath = Resolve-AgentPath -ProjectPath $projectPath -Value ([string]$config.paths.statePath)
-Initialize-Log -Path $logPath
-Assert-Prerequisites -Config $config -CookieSyncScript $cookieSyncScript
-
-$poll = if ($PollSeconds -gt 0) { $PollSeconds } else { [int]$config.server.pollSeconds }
-if ($poll -le 0) { $poll = 30 }
-
-$mutexName = 'Global\TecLiveCookieSyncAgent-' + ([string]$config.agent.id -replace '[^a-zA-Z0-9_.-]', '_')
-$created = $false
-$mutex = [System.Threading.Mutex]::new($true, $mutexName, [ref]$created)
-if (-not $created) {
-    throw 'Outra instancia local do agente ja esta em execucao.'
-}
-
+$mutexHandle = $null
+$config = $null
 try {
+    $config = Get-Config -Path $ConfigPath
+    Assert-BaseUrl -BaseUrl ([string]$config.server.baseUrl)
+    Protect-ConfigAcl -Path $ConfigPath
+
+    $projectPath = Resolve-AgentPath -ProjectPath (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) -Value ([string]$config.paths.projectPath)
+    $cookieSyncScript = Resolve-AgentPath -ProjectPath $projectPath -Value ([string]$config.paths.cookieSyncScript)
+    $logPath = Resolve-AgentPath -ProjectPath $projectPath -Value ([string]$config.paths.logPath)
+    $statePath = Resolve-AgentPath -ProjectPath $projectPath -Value ([string]$config.paths.statePath)
+    $script:LifecycleLogPath = $logPath
+    Initialize-Log -Path $logPath
+    Register-AgentLifecycleHandlers
+    Assert-Prerequisites -Config $config -CookieSyncScript $cookieSyncScript
+
+    $poll = if ($PollSeconds -gt 0) { $PollSeconds } else { [int]$config.server.pollSeconds }
+    if ($poll -le 0) { $poll = 30 }
+    $mode = if ($Once) { 'Once' } else { 'loop' }
+    if ($DryRun) { $mode = "$mode/DryRun" }
+
+    $mutexHandle = Get-AgentMutex -AgentId ([string]$config.agent.id)
+    if (-not $mutexHandle.Acquired) {
+        $runtime = Read-CookieAgentJsonFile -Path $script:RuntimeStatePath
+        $runtimePid = if ($runtime.ContainsKey('pid')) { $runtime.pid } else { $null }
+        if (Test-CookieAgentPidActive -Pid $runtimePid -ConfigPath $ConfigPath) {
+            Write-AgentLog -Path $logPath -Message "instancia ja em execucao; pid=$runtimePid."
+            $script:AgentExitCode = 0
+            $script:AgentExitReason = 'normal'
+            $script:AgentExitSummary = 'instancia ja em execucao'
+            return
+        }
+        Write-AgentLog -Path $logPath -Message 'State/lock orfao detectado, mas mutex ainda ocupado; saindo sem aguardar indefinidamente.'
+        $script:AgentExitCode = 0
+        $script:AgentExitReason = 'normal'
+        $script:AgentExitSummary = 'mutex ocupado sem instancia valida'
+        return
+    }
+
+    $script:HasRuntimeOwnership = $true
+    $previousRuntime = Read-CookieAgentJsonFile -Path $script:RuntimeStatePath
+    if ($previousRuntime.ContainsKey('invalidJson') -and $previousRuntime.invalidJson) {
+        Write-AgentLog -Path $logPath -Message 'Runtime state invalido recuperado automaticamente.'
+    } elseif ($previousRuntime.ContainsKey('pid') -and $previousRuntime.pid -and -not (Test-CookieAgentPidActive -Pid $previousRuntime.pid -ConfigPath $ConfigPath)) {
+        Write-AgentLog -Path $logPath -Message "Lock/state orfao recuperado; pid anterior morto ou nao era agente: $($previousRuntime.pid)."
+    }
+
+    Update-RuntimeState @{
+        pid = $PID
+        startedAt = $script:AgentStartedAt.ToString('o')
+        lastHeartbeatAt = $null
+        lastQueueCheckAt = $null
+        lastJobAt = $null
+        lastExitAt = $null
+        lastExitCode = $null
+        lastExitReason = 'unknown'
+        version = [string]$config.agent.version
+    }
+
+    Write-AgentLog -Path $logPath -Message ("Inicializacao do agente: timestamp={0}; version={1}; pid={2}; user={3}; hostname={4}; configPath={5}; mode={6}; pollSeconds={7}" -f (Get-Date -Format o), [string]$config.agent.version, $PID, [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, $env:COMPUTERNAME, $ConfigPath, $mode, $poll)
+
     $backoff = 30
     do {
         try {
-            $ok = Invoke-OneCycle -Config $config -ProjectPath $projectPath -CookieSyncScript $cookieSyncScript -LogPath $logPath -StatePath $statePath
+            $ok = Invoke-OneCycle -Config $config -ProjectPath $projectPath -CookieSyncScript $cookieSyncScript -LogPath $logPath -StatePath $statePath -RuntimeStatePath $script:RuntimeStatePath
             $backoff = if ($ok) { 30 } else { [Math]::Min([Math]::Max($backoff * 2, 60), 600) }
         } catch {
             Write-AgentLog -Path $logPath -Message "Erro do agente: $($_.Exception.Message)"
             $backoff = [Math]::Min([Math]::Max($backoff * 2, 60), 600)
+            if ($Once) {
+                $script:AgentExitCode = 1
+                $script:AgentExitReason = 'error'
+                $script:AgentExitSummary = $_.Exception.Message
+            }
         }
-        if ($Once) { break }
+        if ($Once -or $script:ShutdownRequested) { break }
         Start-Sleep -Seconds ([Math]::Max($poll, $backoff))
     } while ($true)
+
+    if ($script:AgentExitReason -eq 'unknown') {
+        $script:AgentExitReason = if ($script:ShutdownRequested) { 'cancelled' } else { 'normal' }
+        $script:AgentExitSummary = if ($script:ShutdownRequested) { 'encerramento solicitado' } else { 'encerramento normal' }
+    }
+} catch {
+    $script:AgentExitCode = 1
+    $script:AgentExitReason = if ($script:ShutdownRequested) { 'cancelled' } else { 'error' }
+    $script:AgentExitSummary = $_.Exception.Message
+    Write-LifecycleLog "Encerramento por excecao: $($_.Exception.Message)"
 } finally {
-    try { $mutex.ReleaseMutex() } catch {}
-    $mutex.Dispose()
+    $elapsedMs = [int]((Get-Date) - $script:AgentStartedAt).TotalMilliseconds
+    if ($script:HasRuntimeOwnership) {
+        Update-RuntimeState @{
+            lastExitAt = (Get-Date).ToString('o')
+            lastExitCode = $script:AgentExitCode
+            lastExitReason = $script:AgentExitReason
+            version = if ($config) { [string]$config.agent.version } else { 'unknown' }
+        }
+    }
+    Write-LifecycleLog ("Encerramento do agente: reason={0}; exitCode={1}; pid={2}; elapsedMs={3}; summary={4}" -f $script:AgentExitReason, $script:AgentExitCode, $PID, $elapsedMs, $script:AgentExitSummary)
+    if ($mutexHandle -and $mutexHandle.Acquired -and $mutexHandle.Mutex) {
+        try { $mutexHandle.Mutex.ReleaseMutex() } catch {}
+        try { $mutexHandle.Mutex.Dispose() } catch {}
+    }
 }
+
+exit $script:AgentExitCode
