@@ -53,6 +53,10 @@ try { systemState = require('../systemState'); } catch(e) {}
 const YTDLP_TIMEOUT = 180000; // 3 minutos (ajustado)
 const METADATA_TTL = 15000;
 const LIVE_STALL_TIME = 60000;
+const PUBLIC_COOKIE_RECHECK_INTERVAL_MS = Math.max(
+    60000,
+    (parseInt(process.env.YTDLP_PUBLIC_COOKIE_RECHECK_MINUTES, 10) || 15) * 60 * 1000
+);
 
 const LiveState = {
     ONLINE: 'online',
@@ -152,6 +156,7 @@ class LiveMonitor {
         this.lastSuccessfulExtractionSource = null;
         this._lastMetadataExtractionSource = null;
         this.lastExtractionSuccessAt = null;
+        this.lastPublicCookieRecheckAt = 0;
     }
 
     // ✅ MÉTODO CORRIGIDO (estava faltando)
@@ -201,7 +206,11 @@ class LiveMonitor {
     }
 
     _recordExtractionSuccess(cookieName, source = null) {
-        const recovered = resetExtractionBackoff(this.extractionBackoff, cookieName, Date.now(), source);
+        const now = Date.now();
+        const recovered = resetExtractionBackoff(this.extractionBackoff, cookieName, now, source);
+        if (source === 'public') {
+            this.lastPublicCookieRecheckAt = now;
+        }
         this._syncExtractionBackoffFields();
         if (recovered) {
             console.log(`[${this.videoId}] extracao recuperada com ${this.lastSuccessfulExtractionSource || this.lastSuccessfulCookie || 'origem desconhecida'}`);
@@ -305,9 +314,39 @@ class LiveMonitor {
             const attempts = cookieAttemptOrder;
             const failures = [];
             let publicFallbackFailure = null;
+            let publicAttempted = false;
+            const publicWasLastSuccess = this.lastSuccessfulExtractionSource === 'public' ||
+                this.extractionBackoff.lastSuccessfulExtractionSource === 'public';
+            const publicCookieRecheckDue = !this.lastPublicCookieRecheckAt ||
+                (Date.now() - this.lastPublicCookieRecheckAt) >= PUBLIC_COOKIE_RECHECK_INTERVAL_MS;
             console.log(`[${this.videoId}] ordem de cookies da rodada: ${attempts.join(' -> ') || 'sem cookies'}`);
 
             try {
+                if (publicWasLastSuccess && !publicCookieRecheckDue) {
+                    publicAttempted = true;
+                    try {
+                        console.log(`[${this.videoId}] ultima origem public; tentando public antes dos cookies.`);
+                        const result = await execWithCookie(null);
+                        this.lastSuccessfulExtractionSource = 'public';
+                        this._lastMetadataExtractionSource = 'public';
+                        this.extractionBackoff.lastSuccessfulExtractionSource = 'public';
+                        this._syncExtractionBackoffFields();
+                        resolve(result.stdout);
+                        return;
+                    } catch (publicErr) {
+                        const errorMsg = publicErr.message || '';
+                        const classification = publicErr.classification || classifyYtdlpError(errorMsg);
+                        publicFallbackFailure = {
+                            file: 'public',
+                            error: sanitizeYtdlpMessage(errorMsg),
+                            classification
+                        };
+                        console.log(`[${this.videoId}] public falhou: ${classification} - ${publicFallbackFailure.error}; tentando cookies nesta rodada.`);
+                    }
+                } else if (publicWasLastSuccess && publicCookieRecheckDue) {
+                    console.log(`[${this.videoId}] rechecagem periodica dos cookies apos sucesso public.`);
+                }
+
                 for (const cookieName of attempts) {
                     try {
                         const result = await execWithCookie(cookieName);
@@ -341,7 +380,8 @@ class LiveMonitor {
                     }
                 }
 
-                if (shouldAttemptPublicFallback(failures)) {
+                if (!publicAttempted && shouldAttemptPublicFallback(failures)) {
+                    publicAttempted = true;
                     try {
                         console.log(`[${this.videoId}] ordem de extracao final: ${attempts.join(' -> ') || 'sem cookies'} -> public`);
                         console.log(`[${this.videoId}] tentando extracao publica sem cookie...`);

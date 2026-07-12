@@ -445,6 +445,9 @@ class ConvertAPI {
         monitor.lastSuccessfulCookie = workingCookie;
         monitor.lastSuccessfulExtractionSource = extractionSource;
         monitor.lastExtractionSuccessAt = successState.lastExtractionSuccessAt;
+        if (extractionSource === 'public') {
+            monitor.lastPublicCookieRecheckAt = successState.lastExtractionSuccessAt || Date.now();
+        }
         if (monitor.extractionBackoff) {
             if (workingCookie) monitor.extractionBackoff.lastSuccessfulCookie = workingCookie;
             monitor.extractionBackoff.lastSuccessfulExtractionSource = extractionSource;

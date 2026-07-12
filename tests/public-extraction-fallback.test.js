@@ -167,6 +167,7 @@ async function testConvertPublicFallbackSuccess() {
         assert.equal(monitor.lastSuccessfulCookie, null);
         assert.equal(monitor.lastSuccessfulExtractionSource, 'public');
         assert.ok(monitor.lastExtractionSuccessAt);
+        assert.ok(monitor.lastPublicCookieRecheckAt);
         assert.ok(monitor.m3u8Url);
         assert.equal(api._getExtractionState(key).consecutiveExtractionFailures, 0);
         assert.equal(api._getExtractionState(key).lastSuccessfulExtractionSource, 'public');
@@ -441,6 +442,185 @@ async function testLiveMonitorPublicFallbackCreatesStream() {
     }
 }
 
+async function testLiveMonitorPublicSuccessIsTriedFirstNextRound() {
+    const capture = captureConsole();
+    const originalExistsSync = fs.existsSync;
+    fs.existsSync = function existsSyncStub(target) {
+        if (/[\\/]cookies[\\/]cookie[123]\.txt$/i.test(String(target || ''))) return true;
+        return originalExistsSync.apply(this, arguments);
+    };
+
+    const fakeSpawn = installFakeSpawn((args) => {
+        if (args.includes('--cookies')) {
+            return { code: 1, stderr: 'ERROR: No video formats found' };
+        }
+        return { code: 0, stdout: JSON.stringify(hlsMetadata(720)) };
+    });
+
+    try {
+        delete require.cache[require.resolve('../monitor/liveMonitor')];
+        const LiveMonitor = require('../monitor/liveMonitor');
+        const calls = [];
+        const monitor = new LiveMonitor(
+            'https://www.youtube.com/watch?v=PUBFIRST001',
+            null,
+            null,
+            null,
+            {
+                getNextCookiePath: () => path.join(process.cwd(), 'cookies', 'cookie1.txt'),
+                getFallbackCookiePath: () => null,
+                isCookieAuthError: () => false,
+                markFailure: (file) => {
+                    calls.push({ op: 'failure', file });
+                    return true;
+                },
+                markSuccess: (file) => {
+                    calls.push({ op: 'success', file });
+                    return true;
+                }
+            }
+        );
+        monitor.checkPlaylistProgress = async () => true;
+        monitor.extractionBackoff.lastSuccessfulExtractionSource = 'public';
+        monitor._syncExtractionBackoffFields();
+        monitor.lastPublicCookieRecheckAt = Date.now();
+
+        await monitor.checkAndRenew();
+
+        const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
+        assert.deepEqual(attemptCookies, [null]);
+        assert.equal(calls.length, 0);
+        assert.equal(monitor.lastSuccessfulCookie, null);
+        assert.equal(monitor.lastSuccessfulExtractionSource, 'public');
+        assert.equal(monitor.consecutiveExtractionFailures, 0);
+        assert.ok(monitor.m3u8Url);
+    } finally {
+        capture.restore();
+        fakeSpawn.restore();
+        fs.existsSync = originalExistsSync;
+        delete require.cache[require.resolve('../monitor/liveMonitor')];
+    }
+}
+
+async function testLiveMonitorPublicSuccessRechecksCookiesPeriodically() {
+    const capture = captureConsole();
+    const originalExistsSync = fs.existsSync;
+    fs.existsSync = function existsSyncStub(target) {
+        if (/[\\/]cookies[\\/]cookie[123]\.txt$/i.test(String(target || ''))) return true;
+        return originalExistsSync.apply(this, arguments);
+    };
+
+    const fakeSpawn = installFakeSpawn((args) => {
+        if (args.includes('--cookies')) {
+            return { code: 1, stderr: 'ERROR: No video formats found' };
+        }
+        return { code: 0, stdout: JSON.stringify(hlsMetadata(720)) };
+    });
+
+    try {
+        delete require.cache[require.resolve('../monitor/liveMonitor')];
+        const LiveMonitor = require('../monitor/liveMonitor');
+        const calls = [];
+        const monitor = new LiveMonitor(
+            'https://www.youtube.com/watch?v=PUBRECHK001',
+            null,
+            null,
+            null,
+            {
+                getNextCookiePath: () => path.join(process.cwd(), 'cookies', 'cookie1.txt'),
+                getFallbackCookiePath: () => null,
+                isCookieAuthError: () => false,
+                markFailure: (file) => {
+                    calls.push({ op: 'failure', file });
+                    return true;
+                },
+                markSuccess: (file) => {
+                    calls.push({ op: 'success', file });
+                    return true;
+                }
+            }
+        );
+        monitor.checkPlaylistProgress = async () => true;
+        monitor.extractionBackoff.lastSuccessfulExtractionSource = 'public';
+        monitor._syncExtractionBackoffFields();
+        monitor.lastPublicCookieRecheckAt = Date.now() - (16 * 60 * 1000);
+
+        await monitor.checkAndRenew();
+
+        const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
+        assert.deepEqual(attemptCookies, ['cookie1.txt', 'cookie2.txt', 'cookie3.txt', null]);
+        assert.equal(calls.length, 0);
+        assert.equal(monitor.lastSuccessfulCookie, null);
+        assert.equal(monitor.lastSuccessfulExtractionSource, 'public');
+        assert.equal(monitor.consecutiveExtractionFailures, 0);
+    } finally {
+        capture.restore();
+        fakeSpawn.restore();
+        fs.existsSync = originalExistsSync;
+        delete require.cache[require.resolve('../monitor/liveMonitor')];
+    }
+}
+
+async function testLiveMonitorPublicFailureFallsBackToCookies() {
+    const capture = captureConsole();
+    const originalExistsSync = fs.existsSync;
+    fs.existsSync = function existsSyncStub(target) {
+        if (/[\\/]cookies[\\/]cookie[123]\.txt$/i.test(String(target || ''))) return true;
+        return originalExistsSync.apply(this, arguments);
+    };
+
+    const fakeSpawn = installFakeSpawn((args) => {
+        const cookie = cookieFromArgs(args);
+        if (!cookie) {
+            return { code: 1, stderr: 'ERROR: No video formats found' };
+        }
+        return { code: 0, stdout: JSON.stringify(hlsMetadata(720)) };
+    });
+
+    try {
+        delete require.cache[require.resolve('../monitor/liveMonitor')];
+        const LiveMonitor = require('../monitor/liveMonitor');
+        const calls = [];
+        const monitor = new LiveMonitor(
+            'https://www.youtube.com/watch?v=PUBFAIL001',
+            null,
+            null,
+            null,
+            {
+                getNextCookiePath: () => path.join(process.cwd(), 'cookies', 'cookie1.txt'),
+                getFallbackCookiePath: () => null,
+                isCookieAuthError: () => false,
+                markFailure: (file) => {
+                    calls.push({ op: 'failure', file });
+                    return true;
+                },
+                markSuccess: (file) => {
+                    calls.push({ op: 'success', file });
+                    return true;
+                }
+            }
+        );
+        monitor.checkPlaylistProgress = async () => true;
+        monitor.extractionBackoff.lastSuccessfulExtractionSource = 'public';
+        monitor._syncExtractionBackoffFields();
+        monitor.lastPublicCookieRecheckAt = Date.now();
+
+        await monitor.checkAndRenew();
+
+        const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
+        assert.deepEqual(attemptCookies, [null, 'cookie1.txt']);
+        assert.deepEqual(calls, [{ op: 'success', file: 'cookie1.txt' }]);
+        assert.equal(monitor.lastSuccessfulCookie, 'cookie1.txt');
+        assert.equal(monitor.lastSuccessfulExtractionSource, 'cookie1');
+        assert.equal(monitor.consecutiveExtractionFailures, 0);
+    } finally {
+        capture.restore();
+        fakeSpawn.restore();
+        fs.existsSync = originalExistsSync;
+        delete require.cache[require.resolve('../monitor/liveMonitor')];
+    }
+}
+
 async function main() {
     await testPolicy();
     await testConvertPublicFallbackSuccess();
@@ -451,6 +631,9 @@ async function main() {
     await testMixedAuthAndExtractionCanUsePublicFallback();
     await testTwoLivesPublicFallbackAreIsolated();
     await testLiveMonitorPublicFallbackCreatesStream();
+    await testLiveMonitorPublicSuccessIsTriedFirstNextRound();
+    await testLiveMonitorPublicSuccessRechecksCookiesPeriodically();
+    await testLiveMonitorPublicFailureFallsBackToCookies();
     console.log('Public extraction fallback tests OK');
 }
 
