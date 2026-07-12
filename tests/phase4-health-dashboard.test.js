@@ -371,15 +371,21 @@ function testAdminHealthRouteRequiresAdminSession() {
 
 function testDashboardUsesOperationalHealth() {
     const html = fs.readFileSync(path.join(__dirname, '../public/dashboard.html'), 'utf8');
+    const appSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
     assert.ok(html.includes('/api/admin/health'));
-    assert.ok(html.includes('SAÚDE OPERACIONAL'));
-    assert.ok(html.includes('Autenticação'));
-    assert.ok(html.includes('Extração'));
-    assert.ok(html.includes('Manifesto'));
-    assert.ok(html.includes('Agente Windows'));
+    assert.ok(!html.includes('OPERACIONAL'));
+    assert.ok(html.includes('authentication'));
+    assert.ok(html.includes('extraction'));
+    assert.ok(html.includes('manifest'));
+    assert.ok(html.includes('agent'));
     assert.ok(html.includes('healthSummary || m.health'));
     assert.ok(html.includes('renderHealthChips'));
     assert.ok(html.includes('getHealthCssStatus'));
+    assert.ok(html.includes('Log do servidor'));
+    assert.ok(html.includes('/api/admin/logs/timeline'));
+    assert.ok(html.includes('serverLogContent'));
+    assert.ok(appSource.includes("app.get('/api/admin/logs/timeline', isAdminApiAuthenticated"));
+    assert.ok(appSource.includes('sanitizeServerLogLine'));
     assert.equal((html.match(/setInterval\(fetchData/g) || []).length, 1);
     assert.equal((html.match(/fetchAdminJson\('\/api\/admin\/health'/g) || []).length, 1);
     assert.ok(!html.includes('onclick="openClientDetailModal'));

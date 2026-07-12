@@ -1563,6 +1563,97 @@ function sanitizeApiText(value, max = 500) {
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+function sanitizeLogUrl(rawUrl) {
+    try {
+        const parsed = new URL(rawUrl);
+        const host = parsed.hostname.toLowerCase();
+        if ((host === 'www.youtube.com' || host === 'youtube.com' || host === 'm.youtube.com') && parsed.pathname === '/watch') {
+            const videoId = parsed.searchParams.get('v');
+            return videoId ? `${parsed.origin}/watch?v=${videoId}` : `${parsed.origin}${parsed.pathname}`;
+        }
+        if (host === 'youtu.be') return `${parsed.origin}${parsed.pathname}`;
+
+        let safePath = parsed.pathname || '/';
+        safePath = safePath.replace(/\/t\/[^/]+\.m3u8$/i, '/t/[token].m3u8');
+        if (host.includes('googlevideo.com') || safePath.includes('/manifest/') || safePath.toLowerCase().includes('.m3u8')) {
+            return `${parsed.origin}/[stream-url-redacted]`;
+        }
+        if (safePath.length > 80) safePath = `${safePath.slice(0, 77)}...`;
+        return `${parsed.origin}${safePath}`;
+    } catch (err) {
+        return '[url-redacted]';
+    }
+}
+
+function sanitizeServerLogLine(line) {
+    return String(line || '')
+        .replace(/authorization:\s*bearer\s+[^\s]+/ig, 'Authorization: Bearer [redacted]')
+        .replace(/\b(COOKIE_AGENT_TOKEN|SESSION_SECRET|ADMIN_PASSWORD|token|signature|sig|lsig|expire)=([^\s&]+)/ig, '$1=[redacted]')
+        .replace(/https?:\/\/[^\s"'<>]+/g, sanitizeLogUrl)
+        .replace(/[A-Z]:\\Users\\[^\s"'<>]+/g, '[path-redacted]')
+        .replace(/\/var\/www\/[^\s"'<>]+/g, '[path-redacted]')
+        .replace(/\/root\/[^\s"'<>]+/g, '[path-redacted]')
+        .replace(/# Netscape HTTP Cookie File[\s\S]*/ig, '[cookie content redacted]')
+        .slice(0, 1000);
+}
+
+function readLogTail(filePath, maxBytes) {
+    if (!fs.existsSync(filePath)) return '';
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size <= 0) return '';
+    const start = Math.max(0, stats.size - maxBytes);
+    const length = stats.size - start;
+    const buffer = Buffer.alloc(length);
+    const fd = fs.openSync(filePath, 'r');
+    try {
+        fs.readSync(fd, buffer, 0, length, start);
+    } finally {
+        fs.closeSync(fd);
+    }
+    const text = buffer.toString('utf8');
+    return start > 0 ? text.replace(/^[^\n]*(\n|$)/, '') : text;
+}
+
+function parseServerLogLine(line, source, index) {
+    const sanitized = sanitizeServerLogLine(line);
+    const match = sanitized.match(/^(\d{4}-\d{2}-\d{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3}Z|Z)?):?\s*(.*)$/);
+    const timestamp = match ? match[1].replace('T', ' ').replace('Z', '') : '';
+    const message = match ? match[2] : sanitized;
+    const sortTime = timestamp ? Date.parse(timestamp.replace(' ', 'T')) : 0;
+    return {
+        timestamp,
+        source,
+        message,
+        sortTime: Number.isFinite(sortTime) ? sortTime : 0,
+        index
+    };
+}
+
+function getServerLogTimeline(options = {}) {
+    const lineLimit = Math.max(20, Math.min(Number(options.lineLimit) || 160, 300));
+    const maxBytes = Math.max(32768, Math.min(Number(options.maxBytes) || 256 * 1024, 1024 * 1024));
+    const files = [
+        { source: 'out', filePath: path.join(__dirname, 'logs', 'pm2-out-0.log') },
+        { source: 'err', filePath: path.join(__dirname, 'logs', 'pm2-error-0.log') }
+    ];
+
+    let index = 0;
+    const entries = [];
+    for (const file of files) {
+        const text = readLogTail(file.filePath, maxBytes);
+        for (const line of text.split(/\r?\n/)) {
+            if (!line.trim()) continue;
+            entries.push(parseServerLogLine(line, file.source, index));
+            index += 1;
+        }
+    }
+
+    return entries
+        .sort((a, b) => (a.sortTime - b.sortTime) || (a.index - b.index))
+        .slice(-lineLimit)
+        .map(({ timestamp, source, message }) => ({ timestamp, source, message }));
+}
+
 function getBearerToken(req) {
     const header = req.get('authorization') || '';
     const match = header.match(/^Bearer\s+(.+)$/i);
@@ -1710,6 +1801,21 @@ app.get('/api/admin/health', isAdminApiAuthenticated, (req, res) => {
         health,
         timestamp: new Date().toISOString()
     });
+});
+
+app.use('/api/admin/logs', adminApiLimiter);
+
+app.get('/api/admin/logs/timeline', isAdminApiAuthenticated, (req, res) => {
+    try {
+        const lineLimit = parseInt(req.query.lines, 10);
+        res.json({
+            success: true,
+            logs: getServerLogTimeline({ lineLimit }),
+            timestamp: new Date().toISOString()
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: 'log_timeline_unavailable' });
+    }
 });
 
 // ============================================================

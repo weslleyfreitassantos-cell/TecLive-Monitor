@@ -641,6 +641,23 @@
             opacity: 0.45;
             cursor: not-allowed;
         }
+        .automation-log-row {
+            display: flex;
+            justify-content: flex-start;
+        }
+        .server-log-button {
+            background: rgba(93,173,226,0.12);
+            border: 1px solid rgba(93,173,226,0.32);
+            color: #5dade2;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            cursor: pointer;
+        }
+        .server-log-button:hover {
+            background: rgba(93,173,226,0.22);
+        }
         .automation-jobs {
             max-height: 150px;
             overflow-y: auto;
@@ -716,6 +733,83 @@
 
         .modal-box.wide {
             max-width: 1300px;
+        }
+
+        .server-log-modal-box {
+            max-width: 1100px;
+        }
+
+        .server-log-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 24px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            flex-wrap: wrap;
+        }
+
+        .server-log-status {
+            color: #7a8aa0;
+            font-size: 13px;
+        }
+
+        .server-log-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .server-log-controls button {
+            background: rgba(46,204,113,0.12);
+            border: 1px solid rgba(46,204,113,0.28);
+            color: #2ecc71;
+            border-radius: 6px;
+            padding: 7px 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .server-log-controls label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #9aa7b7;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .server-log-list {
+            max-height: 62vh;
+            overflow-y: auto;
+            padding: 12px 16px 18px 16px;
+            background: rgba(0,0,0,0.22);
+            font-family: Consolas, 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+
+        .server-log-line {
+            display: grid;
+            grid-template-columns: 170px 42px minmax(0, 1fr);
+            gap: 8px;
+            padding: 5px 4px;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+
+        .server-log-time { color: #5dade2; white-space: nowrap; }
+        .server-log-source { color: #f1c40f; text-transform: uppercase; }
+        .server-log-message {
+            color: #d7dde8;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+        }
+
+        .server-log-empty {
+            color: #7a8aa0;
+            text-align: center;
+            padding: 28px;
         }
 
         .modal-body-scroll {
@@ -1230,6 +1324,26 @@
     </div>
 </div>
 
+<!-- ===== MODAL LOG DO SERVIDOR ===== -->
+<div class="modal-overlay" id="serverLogModal">
+    <div class="modal-box wide server-log-modal-box">
+        <div class="modal-header">
+            <h3>Log do servidor</h3>
+            <button class="modal-close" id="serverLogClose">&times;</button>
+        </div>
+        <div class="server-log-toolbar">
+            <div class="server-log-status" id="serverLogStatus">Pronto</div>
+            <div class="server-log-controls">
+                <button type="button" id="serverLogRefresh">Atualizar</button>
+                <label><input type="checkbox" id="serverLogAuto" checked> Auto</label>
+            </div>
+        </div>
+        <div class="server-log-list" id="serverLogContent">
+            <div class="server-log-empty">Abra o log para carregar a linha do tempo.</div>
+        </div>
+    </div>
+</div>
+
 <!-- ===== MODAL IPs (COM BUSCA) ===== -->
 <div class="modal-overlay" id="ipModal">
     <div class="modal-box">
@@ -1354,12 +1468,20 @@
     const clientDetailClose = document.getElementById('clientDetailClose');
     const clientDetailTitle = document.getElementById('clientDetailTitle');
     const clientDetailContent = document.getElementById('clientDetailContent');
+    const serverLogModal = document.getElementById('serverLogModal');
+    const serverLogClose = document.getElementById('serverLogClose');
+    const serverLogRefresh = document.getElementById('serverLogRefresh');
+    const serverLogAuto = document.getElementById('serverLogAuto');
+    const serverLogStatus = document.getElementById('serverLogStatus');
+    const serverLogContent = document.getElementById('serverLogContent');
 
     const emergencyBanner = document.getElementById('emergencyBanner');
     const bannerMessage = document.getElementById('bannerMessage');
     let lastCookieAutomationStatus = null;
     let cookieAutomationBusy = false;
     let adminRedirectInProgress = false;
+    let serverLogTimer = null;
+    let serverLogLoading = false;
 
     function redirectToAdminLoginOnce() {
         if (adminRedirectInProgress) return;
@@ -1394,6 +1516,92 @@
         }
         modalList.innerHTML = ips.map(ip => `<div class="modal-ip-item">${escapeHtml(ip)}</div>`).join('');
     }
+
+    // ============================================================
+    // LOG DO SERVIDOR
+    // ============================================================
+    function stopServerLogPolling() {
+        if (serverLogTimer) {
+            clearInterval(serverLogTimer);
+            serverLogTimer = null;
+        }
+    }
+
+    function startServerLogPolling() {
+        stopServerLogPolling();
+        if (serverLogAuto && serverLogAuto.checked) {
+            serverLogTimer = setInterval(loadServerLogs, 5000);
+        }
+    }
+
+    function renderServerLogs(logs) {
+        serverLogContent.textContent = '';
+        if (!Array.isArray(logs) || logs.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'server-log-empty';
+            empty.textContent = 'Nenhuma linha de log encontrada.';
+            serverLogContent.appendChild(empty);
+            return;
+        }
+
+        const fragment = document.createDocumentFragment();
+        logs.forEach((item) => {
+            const row = document.createElement('div');
+            row.className = 'server-log-line';
+
+            const time = document.createElement('div');
+            time.className = 'server-log-time';
+            time.textContent = item.timestamp || '—';
+
+            const source = document.createElement('div');
+            source.className = 'server-log-source';
+            source.textContent = item.source || 'log';
+
+            const message = document.createElement('div');
+            message.className = 'server-log-message';
+            message.textContent = item.message || '';
+
+            row.appendChild(time);
+            row.appendChild(source);
+            row.appendChild(message);
+            fragment.appendChild(row);
+        });
+        serverLogContent.appendChild(fragment);
+        serverLogContent.scrollTop = serverLogContent.scrollHeight;
+    }
+
+    async function loadServerLogs() {
+        if (serverLogLoading || !serverLogModal.classList.contains('active')) return;
+        serverLogLoading = true;
+        serverLogStatus.textContent = 'Atualizando...';
+        try {
+            const data = await fetchAdminJson('/api/admin/logs/timeline?lines=180');
+            renderServerLogs(data.logs || []);
+            serverLogStatus.textContent = `${(data.logs || []).length} linhas · ${formatDateTime(data.timestamp)}`;
+        } catch (err) {
+            serverLogStatus.textContent = err.message;
+            if (err.redirectToLogin) redirectToAdminLoginOnce();
+        } finally {
+            serverLogLoading = false;
+        }
+    }
+
+    function openServerLogModal() {
+        serverLogModal.classList.add('active');
+        loadServerLogs();
+        startServerLogPolling();
+    }
+
+    function closeServerLogModal() {
+        serverLogModal.classList.remove('active');
+        stopServerLogPolling();
+    }
+
+    window.openServerLogModal = openServerLogModal;
+    serverLogClose.addEventListener('click', closeServerLogModal);
+    serverLogRefresh.addEventListener('click', loadServerLogs);
+    serverLogAuto.addEventListener('change', startServerLogPolling);
+    serverLogModal.addEventListener('click', (e) => { if (e.target === serverLogModal) closeServerLogModal(); });
 
     // ============================================================
     // DETALHES DO CLIENTE (AGRUPAMENTO)
@@ -2255,6 +2463,9 @@
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('all')">Atualizar Todos</button>
                 <button type="button" class="danger" ${cancelDisabledAttr} onclick="cancelPendingCookieRefresh()">Cancelar tarefa pendente</button>
                 <button type="button" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
+            </div>
+            <div class="automation-log-row">
+                <button type="button" class="server-log-button" onclick="openServerLogModal()">LOG</button>
             </div>
         `;
     }
