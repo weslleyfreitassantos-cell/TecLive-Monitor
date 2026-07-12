@@ -18,6 +18,34 @@ class EmailAlerts {
         console.log(`📧 EmailAlerts configurado. Admin: ${this.adminEmail}`);
     }
 
+    _safeText(value, fallback = 'N/A') {
+        const text = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!text) return fallback;
+        return text
+            .replace(/(Authorization:\s*Bearer\s+)[^\s]+/ig, '$1[redacted]')
+            .replace(/(token["':=\s]+)[^"',\s]+/ig, '$1[redacted]')
+            .replace(/https?:\/\/[^\s"'<>]+/ig, '[url-redacted]')
+            .replace(/# Netscape HTTP Cookie File[\s\S]*/ig, '[cookie content redacted]')
+            .replace(/[A-Za-z]:\\[^\s"'<>|]+/g, '[path]')
+            .replace(/\/(?:var|home|root|etc|opt)\/[^\s"'<>]+/g, '[path]')
+            .slice(0, 500);
+    }
+
+    _formatDate(value) {
+        const time = Date.parse(value || '');
+        if (!Number.isFinite(time)) return 'N/A';
+        return new Date(time).toISOString();
+    }
+
+    _formatDuration(seconds) {
+        const value = Number(seconds);
+        if (!Number.isFinite(value) || value < 0) return 'N/A';
+        const minutes = Math.floor(value / 60);
+        const remainingSeconds = Math.floor(value % 60);
+        if (minutes < 1) return `${remainingSeconds}s`;
+        return `${minutes}m ${remainingSeconds}s`;
+    }
+
     setCookieRotator(rotator) {
         this.cookieRotator = rotator;
         console.log('✅ [DIAG] CookieRotator vinculado ao EmailAlerts.');
@@ -114,15 +142,85 @@ class EmailAlerts {
         this.sendEmailAlert(subject, message, 'no_cookie');
     }
 
+    sendCookieAgentOfflineAlert(details = {}) {
+        const agent = details.agent || {};
+        const hostname = this._safeText(agent.hostname || details.hostname, 'desconhecido');
+        const agentId = this._safeText(agent.agentId || details.agentId, 'desconhecido');
+        const lastHeartbeatAt = this._formatDate(agent.lastSeen || agent.lastHeartbeatAt || details.lastHeartbeatAt);
+        const heartbeatAge = this._formatDuration(details.heartbeatAgeSeconds);
+        const subject = '🔴 Cookie Agent Offline - NeoNews Monitor';
+        const message = [
+            'Heartbeat do Agent Windows ausente.',
+            '',
+            `Host: ${hostname}`,
+            `Agent ID: ${agentId}`,
+            `Ultimo heartbeat: ${lastHeartbeatAt}`,
+            `Tempo sem heartbeat: ${heartbeatAge}`,
+            '',
+            'Acao recomendada:',
+            'Verificar o computador do agente, Task Scheduler, watchdog e conectividade.'
+        ].join('\n');
+        this.sendEmailAlert(subject, message, 'cookie_agent_offline');
+    }
+
+    sendCookieAgentRecoveredAlert(details = {}) {
+        const agent = details.agent || {};
+        const hostname = this._safeText(agent.hostname || details.hostname, 'desconhecido');
+        const agentId = this._safeText(agent.agentId || details.agentId, 'desconhecido');
+        const lastHeartbeatAt = this._formatDate(agent.lastSeen || agent.lastHeartbeatAt || details.lastHeartbeatAt);
+        const downtime = this._formatDuration(details.downtimeSeconds);
+        const subject = '🟢 Cookie Agent Online novamente - NeoNews Monitor';
+        const message = [
+            'O Agent Windows voltou a enviar heartbeat.',
+            '',
+            `Host: ${hostname}`,
+            `Agent ID: ${agentId}`,
+            `Heartbeat atual: ${lastHeartbeatAt}`,
+            `Tempo estimado offline: ${downtime}`,
+            '',
+            'Estado: recuperado.'
+        ].join('\n');
+        this.sendEmailAlert(subject, message, 'cookie_agent_recovered');
+    }
+
+    sendCookieRefreshFailedAlert(job = {}) {
+        const cookie = this._safeText(job.cookie || 'cookie', 'cookie').toUpperCase();
+        const attempts = Number.isFinite(Number(job.attempts)) ? Number(job.attempts) : 0;
+        const agentId = this._safeText(job.agentId, 'desconhecido');
+        const completedAt = this._formatDate(job.completedAt || job.updatedAt);
+        const error = this._safeText(job.lastError || job.result?.message, 'erro nao informado');
+        const subject = `🔴 Renovacao automatica falhou - ${cookie}`;
+        const message = [
+            'A renovacao automatica tentou resolver um cookie e falhou definitivamente.',
+            '',
+            `Cookie: ${cookie}`,
+            `Tentativas: ${attempts}`,
+            `Agent ID: ${agentId}`,
+            `Concluido em: ${completedAt}`,
+            `Ultimo erro: ${error}`,
+            '',
+            'Acao recomendada:',
+            'Verificar o Agent Windows e renovar o cookie manualmente se necessario.'
+        ].join('\n');
+        this.sendEmailAlert(subject, message, 'cookie_refresh_failed');
+    }
+
     // ========== Método base ==========
     sendEmailAlert(subject, message, type) {
         console.log(`📧 [EMAIL] Enviando e-mail tipo=${type}: "${subject}"`);
+        const safeMessage = String(message || '');
+        const htmlMessage = safeMessage
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
         const mailOptions = {
             from: `"YouTube Live Monitor V3" <${process.env.EMAIL_USER}>`,
             to: this.adminEmail,
             subject: subject,
-            text: message,
-            html: `<div style="font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px;"><pre>${message}</pre></div>`
+            text: safeMessage,
+            html: `<div style="font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px;"><pre>${htmlMessage}</pre></div>`
         };
         this.transporter.sendMail(mailOptions, (error, info) => {
             if (error) console.error(`❌ [EMAIL] Erro: ${error.message}`);

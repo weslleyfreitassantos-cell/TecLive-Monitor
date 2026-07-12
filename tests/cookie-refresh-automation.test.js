@@ -140,6 +140,34 @@ function testLeaseAndCooldown() {
     assert.equal(queue.getNextPending(), null);
 }
 
+function testFinalFailureOnlyAfterMaxAttempts() {
+    const dir = tempDir();
+    const file = path.join(dir, 'jobs.json');
+    const queue = new CookieRefreshQueue({
+        filePath: file,
+        leaseMs: 20,
+        cooldownMs: 20,
+        maxAttempts: 2
+    });
+    const job = queue.enqueue('cookie1', 'automatic', 'auth').job;
+    assert.equal(queue.claim(job.id, 'agent-a').ok, true);
+
+    const firstFailure = queue.fail(job.id, 'agent-a', 'Chrome nao abriu');
+    assert.equal(firstFailure.ok, true);
+    assert.equal(firstFailure.job.status, 'pending');
+
+    const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+    store.jobs[0].nextAttemptAt = new Date(Date.now() - 1000).toISOString();
+    fs.writeFileSync(file, JSON.stringify(store, null, 2));
+
+    assert.equal(queue.claim(job.id, 'agent-a').ok, true);
+    const finalFailure = queue.fail(job.id, 'agent-a', 'Playwright falhou');
+    assert.equal(finalFailure.ok, true);
+    assert.equal(finalFailure.job.status, 'failed');
+    assert.equal(finalFailure.job.attempts, 2);
+    assert.ok(finalFailure.job.completedAt);
+}
+
 function testInvalidJsonRecoveryAndHistory() {
     const dir = tempDir();
     const file = path.join(dir, 'jobs.json');
@@ -296,6 +324,70 @@ function testQueueCheckActivityIsPersisted() {
     assert.equal(status.reason, 'heartbeat_stale_queue_recent');
 }
 
+function testAgentOfflineAndRecoveryAlertTransitions() {
+    const dir = tempDir();
+    const file = path.join(dir, 'jobs.json');
+    const queue = new CookieRefreshQueue({ filePath: file });
+    const now = Date.parse('2026-07-12T15:00:00.000Z');
+    queue.recordHeartbeat('agent-a', {
+        hostname: 'ASUS_WESLLEY',
+        version: '1.0.0',
+        status: 'online'
+    });
+
+    const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+    store.agents['agent-a'].lastSeen = new Date(now - (11 * 60 * 1000)).toISOString();
+    fs.writeFileSync(file, JSON.stringify(store, null, 2));
+
+    const offline = queue.evaluateAgentOfflineAlert({
+        nowMs: now,
+        offlineMs: 10 * 60 * 1000
+    });
+    assert.equal(offline.action, 'offline');
+    assert.equal(offline.agent.agentId, 'agent-a');
+    assert.equal(offline.agent.hostname, 'ASUS_WESLLEY');
+    assert.ok(offline.heartbeatAgeSeconds >= 660);
+
+    const duplicate = queue.evaluateAgentOfflineAlert({
+        nowMs: now + 1000,
+        offlineMs: 10 * 60 * 1000
+    });
+    assert.equal(duplicate.action, 'none');
+    assert.equal(duplicate.active, true);
+
+    const recoveryStore = JSON.parse(fs.readFileSync(file, 'utf8'));
+    recoveryStore.agents['agent-a'].lastSeen = new Date(now + 2000).toISOString();
+    fs.writeFileSync(file, JSON.stringify(recoveryStore, null, 2));
+
+    const recovered = queue.evaluateAgentOfflineAlert({
+        nowMs: now + 3000,
+        offlineMs: 10 * 60 * 1000
+    });
+    assert.equal(recovered.action, 'recovered');
+    assert.equal(recovered.agent.agentId, 'agent-a');
+    assert.ok(recovered.downtimeSeconds >= 660);
+
+    const afterRecovery = queue.evaluateAgentOfflineAlert({
+        nowMs: now + 4000,
+        offlineMs: 10 * 60 * 1000
+    });
+    assert.equal(afterRecovery.action, 'none');
+    assert.equal(afterRecovery.active, false);
+}
+
+function testAgentWithoutHeartbeatDoesNotAlert() {
+    const dir = tempDir();
+    const queue = new CookieRefreshQueue({ filePath: path.join(dir, 'jobs.json') });
+    queue.recordQueueCheck('agent-a');
+
+    const transition = queue.evaluateAgentOfflineAlert({
+        nowMs: Date.parse('2026-07-12T15:00:00.000Z'),
+        offlineMs: 10 * 60 * 1000
+    });
+    assert.equal(transition.action, 'none');
+    assert.equal(transition.active, false);
+}
+
 async function testPhase1ProxyAndLimiterRuntime() {
     assert.equal(resolveBindHost({}), '127.0.0.1');
     assert.equal(resolveBindHost({ BIND_HOST: '0.0.0.0' }), '0.0.0.0');
@@ -418,6 +510,10 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(app.includes('activityAgeSeconds'));
     assert.ok(app.includes('lastQueueCheck'));
     assert.ok(app.includes('lastCookieUpdated'));
+    assert.ok(app.includes('startCookieAgentAlertWatcher()'));
+    assert.ok(app.includes('sendCookieAgentOfflineAlert'));
+    assert.ok(app.includes('sendCookieAgentRecoveredAlert'));
+    assert.ok(app.includes('sendCookieRefreshFailedAlert'));
 
     const dashboard = readDashboard();
     assert.ok(dashboard.includes('AUTOMAÇÃO DE COOKIES'));
@@ -452,6 +548,7 @@ function testSecurityAndDashboardStaticChecks() {
 async function main() {
     testQueueBasics();
     testLeaseAndCooldown();
+    testFinalFailureOnlyAfterMaxAttempts();
     testInvalidJsonRecoveryAndHistory();
     testSanitization();
     testRotatorIntegration();
@@ -459,6 +556,8 @@ async function main() {
     testRotatorIgnoresExtractionAndNetworkErrors();
     testAgentStatusClassification();
     testQueueCheckActivityIsPersisted();
+    testAgentOfflineAndRecoveryAlertTransitions();
+    testAgentWithoutHeartbeatDoesNotAlert();
     await testPhase1ProxyAndLimiterRuntime();
     testSecurityAndDashboardStaticChecks();
 

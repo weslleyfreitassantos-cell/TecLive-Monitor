@@ -1761,6 +1761,50 @@ function getCookieRefreshAdminStatus() {
     };
 }
 
+function notifyCookieRefreshFinalFailure(job) {
+    if (!job || job.status !== 'failed') return false;
+    if (!emailAlerts || typeof emailAlerts.sendCookieRefreshFailedAlert !== 'function') return false;
+    emailAlerts.sendCookieRefreshFailedAlert(job);
+    return true;
+}
+
+function checkCookieAgentEmailAlerts(nowMs = Date.now()) {
+    if (!process.env.COOKIE_AGENT_TOKEN) {
+        return { action: 'none', disabled: true };
+    }
+    if (!emailAlerts || !cookieRefreshQueue || typeof cookieRefreshQueue.evaluateAgentOfflineAlert !== 'function') {
+        return { action: 'none' };
+    }
+    const transition = cookieRefreshQueue.evaluateAgentOfflineAlert({
+        nowMs,
+        offlineMs: positiveNumber(process.env.COOKIE_AGENT_OFFLINE_ALERT_MS, 10 * 60 * 1000)
+    });
+
+    if (transition.action === 'offline' && typeof emailAlerts.sendCookieAgentOfflineAlert === 'function') {
+        emailAlerts.sendCookieAgentOfflineAlert(transition);
+    } else if (transition.action === 'recovered' && typeof emailAlerts.sendCookieAgentRecoveredAlert === 'function') {
+        emailAlerts.sendCookieAgentRecoveredAlert(transition);
+    }
+
+    return transition;
+}
+
+function startCookieAgentAlertWatcher() {
+    const intervalMs = positiveNumber(process.env.COOKIE_AGENT_ALERT_CHECK_INTERVAL_MS, 60 * 1000);
+    const run = () => {
+        try {
+            checkCookieAgentEmailAlerts();
+        } catch (err) {
+            console.warn('Falha ao verificar alertas do Agent Windows:', err.message);
+        }
+    };
+    const firstRun = setTimeout(run, Math.min(intervalMs, 15000));
+    if (typeof firstRun.unref === 'function') firstRun.unref();
+    const timer = setInterval(run, intervalMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    return timer;
+}
+
 app.get('/admin-login', (req, res) => {
     if (req.session.admin) return res.redirect('/dashboard');
     res.sendFile(path.join(__dirname, 'public/admin-login.html'));
@@ -1854,6 +1898,9 @@ app.post('/api/cookie-agent/jobs/:id/complete', (req, res) => {
 
 app.post('/api/cookie-agent/jobs/:id/fail', (req, res) => {
     const result = cookieRefreshQueue.fail(req.params.id, req.agentId, sanitizeApiText(req.body?.error || req.body?.message, 500));
+    if (result.ok && result.job?.status === 'failed' && result.idempotent !== true) {
+        notifyCookieRefreshFinalFailure(result.job);
+    }
     const status = mapQueueResultToStatus(result);
     res.status(status).json({ success: result.ok, code: result.code, idempotent: result.idempotent === true, job: result.job });
 });
@@ -2354,6 +2401,8 @@ if (emailAlerts && converter.cookieRotator) {
 } else {
     console.log('⚠️ Não foi possível injetar CookieRotator no EmailAlerts');
 }
+
+startCookieAgentAlertWatcher();
 
 // ============================================================
 // ✅ VALIDAÇÃO CORRIGIDA DOS COOKIES NA INICIALIZAÇÃO

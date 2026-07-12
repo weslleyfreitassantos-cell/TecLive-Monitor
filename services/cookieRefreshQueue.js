@@ -105,8 +105,37 @@ class CookieRefreshQueue {
         return {
             version: 1,
             jobs: [],
-            agents: {}
+            agents: {},
+            alerts: {
+                agentOffline: {
+                    active: false,
+                    sentAt: null,
+                    recoveredAt: null,
+                    agentId: null,
+                    hostname: null,
+                    lastHeartbeatAt: null,
+                    offlineSince: null
+                }
+            }
         };
+    }
+
+    _ensureStoreShape(store) {
+        if (!Array.isArray(store.jobs)) store.jobs = [];
+        if (!store.agents || typeof store.agents !== 'object') store.agents = {};
+        if (!store.alerts || typeof store.alerts !== 'object') store.alerts = {};
+        if (!store.alerts.agentOffline || typeof store.alerts.agentOffline !== 'object') {
+            store.alerts.agentOffline = {
+                active: false,
+                sentAt: null,
+                recoveredAt: null,
+                agentId: null,
+                hostname: null,
+                lastHeartbeatAt: null,
+                offlineSince: null
+            };
+        }
+        return store;
     }
 
     _ensureStore() {
@@ -121,9 +150,7 @@ class CookieRefreshQueue {
         this._ensureStore();
         try {
             const data = JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-            if (!Array.isArray(data.jobs)) data.jobs = [];
-            if (!data.agents || typeof data.agents !== 'object') data.agents = {};
-            return data;
+            return this._ensureStoreShape(data);
         } catch (err) {
             const corruptPath = `${this.filePath}.corrupt-${Date.now()}`;
             try { fs.copyFileSync(this.filePath, corruptPath); } catch (_) {}
@@ -418,12 +445,90 @@ class CookieRefreshQueue {
 
     getAgents() {
         const store = this._readStore();
+        return this._sortedAgents(store);
+    }
+
+    _sortedAgents(store) {
         return Object.values(store.agents || {})
             .sort((a, b) => {
                 const aLatest = CookieRefreshQueue._latestTimestamp(a.lastSeen, a.lastQueueCheckAt, a.lastQueueCheck);
                 const bLatest = CookieRefreshQueue._latestTimestamp(b.lastSeen, b.lastQueueCheckAt, b.lastQueueCheck);
                 return String(bLatest || '').localeCompare(String(aLatest || ''));
             });
+    }
+
+    _agentHeartbeatAgeSeconds(agent, nowMs) {
+        return CookieRefreshQueue._ageSeconds(agent?.lastSeen || agent?.lastHeartbeatAt, nowMs);
+    }
+
+    evaluateAgentOfflineAlert(options = {}) {
+        const configuredNowMs = Number(options.nowMs);
+        const nowMs = Number.isFinite(configuredNowMs) && configuredNowMs > 0 ? configuredNowMs : Date.now();
+        const configuredOfflineMs = Number(options.offlineMs);
+        const offlineMs = Number.isFinite(configuredOfflineMs) && configuredOfflineMs > 0
+            ? Math.max(60000, configuredOfflineMs)
+            : (10 * 60 * 1000);
+        const store = this._readStore();
+        const alert = store.alerts.agentOffline;
+        const agentsWithHeartbeat = this._sortedAgents(store)
+            .filter(agent => CookieRefreshQueue._timeMs(agent.lastSeen || agent.lastHeartbeatAt) !== null);
+        const recentAgent = agentsWithHeartbeat.find(agent => {
+            const ageSeconds = this._agentHeartbeatAgeSeconds(agent, nowMs);
+            return ageSeconds !== null && ageSeconds * 1000 <= offlineMs;
+        }) || null;
+
+        if (alert.active === true) {
+            if (!recentAgent) return { action: 'none', active: true };
+
+            const recoveredAt = new Date(nowMs).toISOString();
+            const offlineSince = alert.offlineSince || alert.sentAt || null;
+            const offlineSinceMs = CookieRefreshQueue._timeMs(offlineSince);
+            const downtimeSeconds = offlineSinceMs === null
+                ? null
+                : Math.max(0, Math.floor((nowMs - offlineSinceMs) / 1000));
+
+            alert.active = false;
+            alert.recoveredAt = recoveredAt;
+            alert.agentId = recentAgent.agentId || null;
+            alert.hostname = recentAgent.hostname || null;
+            alert.lastHeartbeatAt = recentAgent.lastSeen || recentAgent.lastHeartbeatAt || null;
+            alert.offlineSince = null;
+            this._writeStore(store);
+
+            return {
+                action: 'recovered',
+                agent: recentAgent,
+                offlineSince,
+                recoveredAt,
+                downtimeSeconds,
+                heartbeatAgeSeconds: this._agentHeartbeatAgeSeconds(recentAgent, nowMs)
+            };
+        }
+
+        const staleAgent = agentsWithHeartbeat.find(agent => {
+            const ageSeconds = this._agentHeartbeatAgeSeconds(agent, nowMs);
+            return ageSeconds !== null && ageSeconds * 1000 > offlineMs;
+        }) || null;
+
+        if (!staleAgent) return { action: 'none', active: false };
+
+        const sentAt = new Date(nowMs).toISOString();
+        alert.active = true;
+        alert.sentAt = sentAt;
+        alert.recoveredAt = null;
+        alert.agentId = staleAgent.agentId || null;
+        alert.hostname = staleAgent.hostname || null;
+        alert.lastHeartbeatAt = staleAgent.lastSeen || staleAgent.lastHeartbeatAt || null;
+        alert.offlineSince = alert.lastHeartbeatAt || sentAt;
+        this._writeStore(store);
+
+        return {
+            action: 'offline',
+            agent: staleAgent,
+            sentAt,
+            offlineSince: alert.offlineSince,
+            heartbeatAgeSeconds: this._agentHeartbeatAgeSeconds(staleAgent, nowMs)
+        };
     }
 
     _safeResult(result) {
