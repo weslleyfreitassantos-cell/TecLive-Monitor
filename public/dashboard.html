@@ -1159,16 +1159,6 @@
         <div class="stat-card"><div class="stat-value" id="mainUptime">0m</div><div class="stat-label">UPTIME</div></div>
     </div>
 
-    <div class="monitor-card">
-        <div class="card-header">
-            <h2>SAÚDE OPERACIONAL</h2>
-            <span class="badge" id="systemHealthBadge">CARREGANDO</span>
-        </div>
-        <div class="card-content">
-            <div class="health-overview-grid" id="healthOverviewGrid"></div>
-        </div>
-    </div>
-
     <!-- ===== MONITORES ATIVOS (full width) ===== -->
     <div class="monitor-card">
         <div class="card-header">
@@ -1494,7 +1484,6 @@
                     <td>
                         <div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>
                         <span class="health-score">${score}%</span>
-                        ${renderHealthChips(m)}
                     </td>
                     <td><span class="device-count" style="font-size: 18px;">${escapeHtml(m.viewers ?? 0)}</span></td>
                     <td><div class="ip-list">${ipHtml}</div></td>
@@ -2217,15 +2206,6 @@
             </div>`;
         }).join('');
 
-        const jobsHtml = recentJobs.length === 0
-            ? '<div class="automation-job">Nenhuma tarefa registrada.</div>'
-            : recentJobs.slice(0, 6).map(job => `<div class="automation-job ${escapeHtml(job.status)}">
-                <strong>${escapeHtml((job.cookie || '').toUpperCase())}</strong>
-                ${escapeHtml(getAutomationStage(job))}
-                <div style="color:#7a8aa0; font-size:11px;">${escapeHtml(formatDateTime(job.updatedAt))}</div>
-                ${job.lastError ? `<div style="color:#e74c3c; font-size:11px;">${escapeHtml(job.lastError)}</div>` : ''}
-            </div>`).join('');
-
         container.innerHTML = `
             <div class="automation-summary">
                 <div class="automation-pill ${agentClass}">
@@ -2276,7 +2256,6 @@
                 <button type="button" class="danger" ${cancelDisabledAttr} onclick="cancelPendingCookieRefresh()">Cancelar tarefa pendente</button>
                 <button type="button" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
             </div>
-            <div class="automation-jobs">${jobsHtml}</div>
         `;
     }
 
