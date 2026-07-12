@@ -478,8 +478,8 @@ class LiveMonitor {
     extractHlsUrl(metadata, maxHeight = null) {
         const effectiveMax = maxHeight !== null ? maxHeight : parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
         const selection = selectHlsStream(metadata, {
-            maxHeight: maxHeight !== null ? effectiveMax : null,
-            forceArtificial: maxHeight !== null
+            maxHeight: effectiveMax,
+            forceArtificial: true
         });
 
         this.lastExtractionDiagnostics = selection.diagnostics;

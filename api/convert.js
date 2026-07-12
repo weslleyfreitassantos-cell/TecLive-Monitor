@@ -25,6 +25,11 @@ const {
     createExtractionBackoffState
 } = require('../services/extractionRetryPolicy');
 
+function getDefaultMaxHeight() {
+    const value = parseInt(process.env.VIDEO_MAX_HEIGHT, 10);
+    return Number.isFinite(value) && value > 0 ? value : 720;
+}
+
 class ConvertAPI {
     constructor(emailAlerts, orchestrator, revokeTokenFn = null) {
         this.emailAlerts = emailAlerts;
@@ -295,7 +300,10 @@ class ConvertAPI {
                 const ytMetadata = JSON.parse(stdout);
                 const diagnostics = getYtdlpDiagnostics(ytMetadata);
                 console.log(`[${videoId}] yt-dlp JSON (${file}): formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
-                const selection = selectHlsStream(ytMetadata);
+                const selection = selectHlsStream(ytMetadata, {
+                    maxHeight: getDefaultMaxHeight(),
+                    forceArtificial: true
+                });
                 if (selection.ok) {
                     streamUrl = selection.url;
                     workingCookie = file;
@@ -337,7 +345,10 @@ class ConvertAPI {
                 const ytMetadata = JSON.parse(stdout);
                 const diagnostics = getYtdlpDiagnostics(ytMetadata);
                 console.log(`[${videoId}] yt-dlp JSON (public): formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
-                const selection = selectHlsStream(ytMetadata);
+                const selection = selectHlsStream(ytMetadata, {
+                    maxHeight: getDefaultMaxHeight(),
+                    forceArtificial: true
+                });
                 if (selection.ok) {
                     streamUrl = selection.url;
                     workingCookie = null;

@@ -68,6 +68,24 @@ function testManifestUrlSelection() {
     assert.equal(result.urlPreview, 'https://video.example.test/manifest/hls_playlist/abc');
 }
 
+function testForcedMaxHeightPrefersVariantsOverManifestUrl() {
+    const result = selectHlsStream({
+        live_status: 'is_live',
+        is_live: true,
+        manifest_url: 'https://manifest.googlevideo.com/api/manifest/hls_variant/expire/1783885887/sig/secret/index.m3u8?token=secret',
+        formats: [hlsFormat(144), hlsFormat(240), hlsFormat(360), hlsFormat(480), hlsFormat(720), hlsFormat(1080)]
+    }, { maxHeight: 720, forceArtificial: true });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.type, 'artificial_master');
+    assert.equal(result.selectedHeight, 720);
+    assert.ok(result.masterContent.includes('RESOLUTION=1280x720'));
+    assert.ok(!result.masterContent.includes('RESOLUTION=1920x1080'));
+    assert.ok(result.url.includes('/720/'));
+    const firstVariantUrl = result.masterContent.split('\n')[2];
+    assert.ok(firstVariantUrl.includes('/720/'));
+}
+
 function testSignedGooglevideoPreviewIsRedacted() {
     const result = selectHlsStream({
         protocol: 'm3u8_native',
@@ -158,6 +176,7 @@ function testMaxHeightFallbackAndDiagnostics() {
 testClassifications();
 testHlsSelectionFromFormatsWithoutM3u8Extension();
 testManifestUrlSelection();
+testForcedMaxHeightPrefersVariantsOverManifestUrl();
 testSignedGooglevideoPreviewIsRedacted();
 testYtdlpMessageSanitization();
 testTopLevelProtocolSelection();

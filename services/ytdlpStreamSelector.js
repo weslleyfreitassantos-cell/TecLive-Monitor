@@ -203,7 +203,7 @@ function makeBandwidth(height) {
 }
 
 function buildArtificialMaster(formats) {
-    const lines = formats.map(format => {
+    const lines = formats.slice().sort((a, b) => (b.height || 0) - (a.height || 0)).map(format => {
         const height = format.height || 360;
         const width = format.width || Math.round(height * 16 / 9);
         const fps = format.fps || 30;
@@ -218,6 +218,31 @@ function buildArtificialMaster(formats) {
 
 function sortByHeightAsc(a, b) {
     return (a.height || 0) - (b.height || 0);
+}
+
+function selectVariantStream(formats, maxHeight, diagnostics) {
+    let variants = formats.filter(isPlayableHlsVariant);
+    if (variants.length === 0) return null;
+
+    variants = variants.slice().sort(sortByHeightAsc);
+    let selectedVariants = variants;
+    if (maxHeight !== null) {
+        selectedVariants = variants.filter(format => (format.height || 0) <= maxHeight);
+        if (selectedVariants.length === 0) selectedVariants = [variants[0]];
+    }
+
+    const best = selectedVariants[selectedVariants.length - 1];
+    return {
+        ok: true,
+        type: selectedVariants.length > 1 ? 'artificial_master' : 'variant',
+        url: best.url,
+        urlPreview: safeUrlPreview(best.url),
+        masterContent: selectedVariants.length > 1 ? buildArtificialMaster(selectedVariants) : null,
+        playlistUrls: Object.fromEntries(selectedVariants.map(format => [format.height || 360, format.url])),
+        selectedHeight: best.height || null,
+        classification: null,
+        diagnostics
+    };
 }
 
 function selectHlsStream(metadata, options = {}) {
@@ -238,6 +263,9 @@ function selectHlsStream(metadata, options = {}) {
     if (diagnostics.formatCount === 0 && requested.length === 0 && !metadata?.url && !metadata?.manifest_url) {
         return { ok: false, classification: CLASSIFICATION.NO_FORMATS, diagnostics };
     }
+
+    const forcedVariantSelection = forceArtificial ? selectVariantStream(formats, maxHeight, diagnostics) : null;
+    if (forcedVariantSelection) return forcedVariantSelection;
 
     if (!forceArtificial && metadata?.manifest_url && hasHlsUrlShape(metadata.manifest_url)) {
         return {
@@ -298,28 +326,8 @@ function selectHlsStream(metadata, options = {}) {
         };
     }
 
-    let variants = formats.filter(isPlayableHlsVariant);
-    if (variants.length > 0) {
-        variants = variants.slice().sort(sortByHeightAsc);
-        let selectedVariants = variants;
-        if (maxHeight !== null) {
-            selectedVariants = variants.filter(format => (format.height || 0) <= maxHeight);
-            if (selectedVariants.length === 0) selectedVariants = [variants[0]];
-        }
-
-        const best = selectedVariants[selectedVariants.length - 1];
-        return {
-            ok: true,
-            type: selectedVariants.length > 1 ? 'artificial_master' : 'variant',
-            url: best.url,
-            urlPreview: safeUrlPreview(best.url),
-            masterContent: selectedVariants.length > 1 ? buildArtificialMaster(selectedVariants) : null,
-            playlistUrls: Object.fromEntries(selectedVariants.map(format => [format.height || 360, format.url])),
-            selectedHeight: best.height || null,
-            classification: null,
-            diagnostics
-        };
-    }
+    const variantSelection = selectVariantStream(formats, maxHeight, diagnostics);
+    if (variantSelection) return variantSelection;
 
     if (diagnostics.hasDash && !diagnostics.hasHls) {
         return { ok: false, classification: CLASSIFICATION.DASH_ONLY, diagnostics };
