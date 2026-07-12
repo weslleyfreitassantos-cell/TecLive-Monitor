@@ -8,6 +8,11 @@ const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const CookieRefreshQueue = require('./services/cookieRefreshQueue');
 const { parseTrustProxyConfig, resolveBindHost } = require('./services/httpRuntimeConfig');
+const {
+    buildMonitorHealth,
+    buildSystemHealth,
+    getMonitorDisplayStatus
+} = require('./services/healthSnapshot');
 require('dotenv').config();
 
 // ============================================================
@@ -1426,12 +1431,53 @@ app.post('/api/client/sync', (req, res) => {
     res.json({ success: true, message: 'Clientes sincronizados' });
 });
 
+function getCookieFunctionalStatusSafe() {
+    try {
+        return converter?.cookieRotator?.getFunctionalStatus ? converter.cookieRotator.getFunctionalStatus() : {};
+    } catch (err) {
+        console.warn('Falha ao montar status funcional dos cookies:', err.message);
+        return {};
+    }
+}
+
+function getCookieRefreshStatusSafe() {
+    try {
+        return getCookieRefreshAdminStatus();
+    } catch (err) {
+        console.warn('Falha ao montar status do agente Windows:', err.message);
+        return { enabled: false, agent: { status: 'offline', reason: 'status_unavailable' } };
+    }
+}
+
+function buildOperationalHealthSnapshot(req = null) {
+    return buildSystemHealth({
+        converter,
+        cookieFunctionalStatus: getCookieFunctionalStatusSafe(),
+        cookieRefreshStatus: getCookieRefreshStatusSafe(),
+        auth: {
+            sessionAdmin: req ? req.session?.admin === true : undefined,
+            adminPasswordConfigured: Boolean(process.env.ADMIN_PASSWORD)
+        }
+    });
+}
+
+function publicHealthView(snapshot) {
+    return {
+        operationalStatus: snapshot.status,
+        score: snapshot.score,
+        summary: snapshot.summary,
+        timestamp: snapshot.timestamp
+    };
+}
+
 app.get('/health', (req, res) => {
+    const operational = buildOperationalHealthSnapshot();
     res.json({
         status: 'ok',
         version: '3.0.0',
         uptime: process.uptime(),
-        activeMonitors: converter?.activeMonitors?.size || 0
+        activeMonitors: converter?.activeMonitors?.size || 0,
+        ...publicHealthView(operational)
     });
 });
 
@@ -1656,6 +1702,16 @@ app.get('/api/cookie/functional-status', isAuthenticated, (req, res) => {
     res.json({ functional, timestamp: new Date().toISOString() });
 });
 
+app.get('/api/admin/health', isAdminApiAuthenticated, (req, res) => {
+    const health = buildOperationalHealthSnapshot(req);
+    res.json({
+        success: true,
+        uptime: process.uptime(),
+        health,
+        timestamp: new Date().toISOString()
+    });
+});
+
 // ============================================================
 // COOKIE AGENT API (Bearer token, sem sessão de dashboard)
 // ============================================================
@@ -1761,6 +1817,7 @@ app.post('/api/admin/cookie-refresh/cancel/:jobId', isAdminApiAuthenticated, (re
 
 app.get('/api/monitors', isAuthenticated, (req, res) => {
     const monitors = [];
+    const nowMs = Date.now();
     if (converter && converter.activeMonitors) {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             const [videoId, owner] = key.split(':');
@@ -1785,16 +1842,29 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
             const activeDevices = owner ? getActiveDevicesForOwnerAndVideo(owner, videoId) : 0;
             const deviceIPs = owner ? getActiveViewerIPsForOwnerAndVideo(owner, videoId) : [];
             const token = getOrCreateToken(videoId, owner || null);
+            const healthSummary = buildMonitorHealth(monitor, { nowMs });
+            const rawStatus = monitor.liveState || (monitor.isLive ? 'online' : 'offline');
+            const displayStatus = getMonitorDisplayStatus(monitor, healthSummary);
             monitors.push({
                 videoId,
                 youtubeUrl: monitor.youtubeUrl,
                 owner: owner || null,
                 token,
-                status: monitor.liveState || (monitor.isLive ? 'online' : 'offline'),
-                isLive: monitor.liveState === 'online',
+                status: displayStatus,
+                rawStatus,
+                isLive: displayStatus === 'online',
                 failCount: monitor.failCount || 0,
                 lastRenewSuccess: monitor.lastSuccessTime || monitor.lastUpdate,
                 health: monitor.health,
+                healthSummary,
+                extractionBackoff: {
+                    active: Boolean(healthSummary.components?.extraction?.retryAfterSeconds),
+                    retryAfterSeconds: healthSummary.components?.extraction?.retryAfterSeconds || 0,
+                    nextRetryAt: monitor.nextRetryAt || 0,
+                    backoffSeconds: monitor.backoffSeconds || 0,
+                    classification: monitor.lastFailureClassification || monitor.lastExtractionFailureClassification || null,
+                    consecutiveFailures: monitor.consecutiveExtractionFailures || 0
+                },
                 stalledCount: monitor.stalledCount,
                 lastMediaSequence: monitor.lastMediaSequence,
                 viewers: activeDevices,

@@ -107,13 +107,79 @@
         .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 28px; }
         .stat-card { background: #0f1322; border: 1px solid rgba(46,204,113,0.12); border-radius: 16px; padding: 20px; text-align: center; }
         .stat-value { font-size: 52px; font-weight: 700; color: #2ecc71; }
+        .stat-value.status-degraded { color: #f1c40f; }
+        .stat-value.status-error,
+        .stat-value.status-critical { color: #e74c3c; }
+        .stat-value.status-unknown { color: #7a8aa0; }
         .stat-label { font-size: 15px; letter-spacing: 1.5px; text-transform: uppercase; color: #7a8aa0; margin-top: 4px; }
+
+        .health-overview-grid {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(130px, 1fr));
+            gap: 12px;
+        }
+        .health-component {
+            background: rgba(0,0,0,0.25);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-left: 4px solid #2ecc71;
+            border-radius: 8px;
+            padding: 12px;
+            min-height: 86px;
+        }
+        .health-component.warning,
+        .health-component.degraded { border-left-color: #f1c40f; }
+        .health-component.error,
+        .health-component.critical { border-left-color: #e74c3c; }
+        .health-component.unknown { border-left-color: #7a8aa0; }
+        .health-component-label {
+            color: #7a8aa0;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 5px;
+        }
+        .health-component-status {
+            color: #e0e0e0;
+            font-size: 18px;
+            font-weight: 800;
+        }
+        .health-component-message {
+            color: #9aa7b7;
+            font-size: 12px;
+            line-height: 1.35;
+            margin-top: 4px;
+        }
+        .health-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            justify-content: center;
+            margin-top: 6px;
+        }
+        .health-chip {
+            border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 2px 7px;
+            font-size: 10px;
+            font-weight: 800;
+            color: #2ecc71;
+            background: rgba(46,204,113,0.08);
+        }
+        .health-chip.warning,
+        .health-chip.degraded { color: #f1c40f; background: rgba(241,196,15,0.08); }
+        .health-chip.error,
+        .health-chip.critical { color: #e74c3c; background: rgba(231,76,60,0.08); }
+        .health-chip.unknown { color: #7a8aa0; background: rgba(122,138,160,0.08); }
 
         /* ===== MONITORES ATIVOS (full width) ===== */
         .monitor-card { background: #0f1322; border: 1px solid rgba(46,204,113,0.1); border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; margin-bottom: 24px; }
         .card-header { padding: 14px 20px; background: rgba(0,0,0,0.25); border-bottom: 1px solid rgba(46,204,113,0.1); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
         .card-header h2 { font-size: 18px; font-weight: 600; color: #2ecc71; text-transform: uppercase; }
         .card-header .badge { background: rgba(46,204,113,0.1); padding: 4px 12px; border-radius: 16px; font-size: 13px; color: #2ecc71; }
+        .card-header .badge.warning,
+        .card-header .badge.degraded { background: rgba(241,196,15,0.1); color: #f1c40f; }
+        .card-header .badge.error,
+        .card-header .badge.critical { background: rgba(231,76,60,0.1); color: #e74c3c; }
         .card-content { padding: 18px 20px; flex: 1; display: flex; flex-direction: column; }
 
         /* ===== GERADOR DE LINK ===== */
@@ -1005,6 +1071,7 @@
             .container { padding: 16px; }
             .bottom-grid { grid-template-columns: 1fr; }
             .automation-detail-grid { grid-template-columns: 1fr; }
+            .health-overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .footer { padding: 8px 16px; flex-direction: column; text-align: center; }
             .footer-right { justify-content: center; }
@@ -1027,6 +1094,7 @@
         }
         @media (max-width: 600px) {
             .stats-grid { grid-template-columns: 1fr; }
+            .health-overview-grid { grid-template-columns: 1fr; }
             .header { flex-direction: column; align-items: stretch; text-align: center; }
             .header-right { justify-content: center; flex-wrap: wrap; }
             .monitor-table td, .monitor-table th { font-size: 13px; padding: 10px 4px; }
@@ -1089,6 +1157,16 @@
         <div class="stat-card"><div class="stat-value" id="mainStatus">---</div><div class="stat-label">SERVIDOR</div></div>
         <div class="stat-card"><div class="stat-value" id="activeLivesCard">0</div><div class="stat-label">LIVES ATIVAS</div></div>
         <div class="stat-card"><div class="stat-value" id="mainUptime">0m</div><div class="stat-label">UPTIME</div></div>
+    </div>
+
+    <div class="monitor-card">
+        <div class="card-header">
+            <h2>SAÚDE OPERACIONAL</h2>
+            <span class="badge" id="systemHealthBadge">CARREGANDO</span>
+        </div>
+        <div class="card-content">
+            <div class="health-overview-grid" id="healthOverviewGrid"></div>
+        </div>
     </div>
 
     <!-- ===== MONITORES ATIVOS (full width) ===== -->
@@ -1303,8 +1381,8 @@
     // FUNÇÕES DO MODAL IP
     // ============================================================
     function openModal(ips) {
-        currentIps = ips;
-        renderIpList(ips);
+        currentIps = Array.isArray(ips) ? ips.map(item => String(item || '—')) : [];
+        renderIpList(currentIps);
         ipSearchInput.value = '';
         modal.classList.add('active');
         ipSearchInput.focus();
@@ -1315,7 +1393,7 @@
 
     ipSearchInput.addEventListener('input', () => {
         const term = ipSearchInput.value.toLowerCase().trim();
-        const filtered = currentIps.filter(ip => ip.toLowerCase().includes(term));
+        const filtered = currentIps.filter(ip => String(ip).toLowerCase().includes(term));
         renderIpList(filtered);
     });
 
@@ -1324,7 +1402,7 @@
             modalList.innerHTML = '<div style="color:#7a8aa0; text-align:center; padding:20px;">Nenhum IP encontrado</div>';
             return;
         }
-        modalList.innerHTML = ips.map(ip => `<div class="modal-ip-item">${ip}</div>`).join('');
+        modalList.innerHTML = ips.map(ip => `<div class="modal-ip-item">${escapeHtml(ip)}</div>`).join('');
     }
 
     // ============================================================
@@ -1377,8 +1455,8 @@
             html += `<tr><td colspan="8" style="text-align:center; padding:30px; color:#7a8aa0;">Nenhuma live encontrada para este filtro.</td></tr>`;
         } else {
             monitors.forEach(m => {
-                const score = computeHealthScore(m.health);
-                const statusDisp = getStatusDisplay(m.status, m.health);
+                const score = computeHealthScore(m.healthSummary || m.health);
+                const statusDisp = getStatusDisplay(m.status, m.healthSummary);
                 const mainCause = getMainCause(m);
                 const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
                 const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
@@ -1394,37 +1472,58 @@
                     return d;
                 };
                 if (devices.length === 1) {
-                    ipHtml = `<span class="ip-item">${formatDevice(devices[0])}</span>`;
+                    ipHtml = `<span class="ip-item">${escapeHtml(formatDevice(devices[0]) || '—')}</span>`;
                 } else if (devices.length > 1) {
                     const firstLabel = formatDevice(devices[0]);
                     const extra = devices.length - 1;
                     const allLabels = devices.map(formatDevice);
-                    ipHtml = `<span class="ip-item">${firstLabel}</span> <button class="ip-extra" onclick="event.stopPropagation(); openModal(${JSON.stringify(allLabels).replace(/"/g, '&quot;')})">+${extra}</button>`;
+                    const encodedIps = encodeURIComponent(JSON.stringify(allLabels));
+                    ipHtml = `<span class="ip-item">${escapeHtml(firstLabel || '—')}</span> <button class="ip-extra modal-ip-extra" data-ips="${escapeHtml(encodedIps)}">+${extra}</button>`;
                 }
 
                 const liveTitle = m.title || 'Título não disponível';
+                const ownerValue = m.owner || '';
 
                 html += `<tr class="${statusDisp.class}">
-                    <td style="color: #f1c40f; font-weight: 700; text-align: left;" title="${m.channel || ''}">${m.channel || '—'}</td>
-                    <td class="video-id" title="${liveTitle.replace(/"/g, '&quot;')}">${m.videoId || 'N/A'}</td>
+                    <td style="color: #f1c40f; font-weight: 700; text-align: left;" title="${escapeHtml(m.channel || '—')}">${escapeHtml(m.channel || '—')}</td>
+                    <td class="video-id" title="${escapeHtml(liveTitle)}">${escapeHtml(m.videoId || 'N/A')}</td>
                     <td class="${statusDisp.class}">
-                        <div>${statusDisp.label}</div>
-                        ${mainCause ? `<div style="font-size: 0.7rem; opacity:0.8;">[${mainCause}]</div>` : ''}
+                        <div>${escapeHtml(statusDisp.label)}</div>
+                        ${mainCause ? `<div style="font-size: 0.7rem; opacity:0.8;">[${escapeHtml(mainCause)}]</div>` : ''}
                     </td>
                     <td>
                         <div class="health-bar-container"><div class="health-bar" style="width: ${score}%; background: ${healthColor};"></div></div>
                         <span class="health-score">${score}%</span>
+                        ${renderHealthChips(m)}
                     </td>
-                    <td><span class="device-count" style="font-size: 18px;">${m.viewers ?? 0}</span></td>
+                    <td><span class="device-count" style="font-size: 18px;">${escapeHtml(m.viewers ?? 0)}</span></td>
                     <td><div class="ip-list">${ipHtml}</div></td>
-                    <td><span class="renew-time" style="font-size: 16px;">${lastRenew}</span></td>
-                    <td><button class="stop-monitor-btn" onclick="event.stopPropagation(); stopMonitor('${m.videoId}', ${m.owner ? `'${m.owner}'` : 'null'})">FINALIZAR</button></td>
+                    <td><span class="renew-time" style="font-size: 16px;">${escapeHtml(lastRenew)}</span></td>
+                    <td><button class="stop-monitor-btn modal-stop-monitor-btn" data-video-id="${escapeHtml(m.videoId || '')}" data-owner="${escapeHtml(ownerValue)}">FINALIZAR</button></td>
                 </tr>`;
             });
         }
 
         html += `</tbody></table>`;
         clientDetailContent.innerHTML = html;
+        clientDetailContent.querySelectorAll('.modal-ip-extra').forEach(btn => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                try {
+                    openModal(JSON.parse(decodeURIComponent(btn.getAttribute('data-ips') || '[]')));
+                } catch (err) {
+                    openModal([]);
+                }
+            });
+        });
+        clientDetailContent.querySelectorAll('.modal-stop-monitor-btn').forEach(btn => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const videoId = btn.getAttribute('data-video-id');
+                const owner = btn.getAttribute('data-owner') || null;
+                stopMonitor(videoId, owner || null);
+            });
+        });
     }
 
     // Listener para a busca no modal
@@ -1575,8 +1674,8 @@
         let filtrados = clientes;
         if (termo) {
             filtrados = clientes.filter(c => 
-                c.login.toLowerCase().includes(termo) ||
-                c.email.toLowerCase().includes(termo) ||
+                String(c.login || '').toLowerCase().includes(termo) ||
+                String(c.email || '').toLowerCase().includes(termo) ||
                 String(c.lives).includes(termo) ||
                 String(c.dispositivos).includes(termo)
             );
@@ -1587,29 +1686,33 @@
         }
         clientesListContent.innerHTML = filtrados.map((c, idx) => {
             const originalIndex = clientes.indexOf(c);
-            const activeLives = countActiveLivesForUser(c.login);
-            const livesDisplay = `${activeLives} ativas (limite: ${c.lives})`;
-            const deviceInfo = deviceStatus[c.login] || { active: 0, limit: c.dispositivos };
-            const activeDevices = deviceInfo.active;
-            const limitDevices = c.dispositivos;
+            const login = String(c.login || '');
+            const email = String(c.email || '');
+            const liveLimit = c.lives ?? '—';
+            const configuredDeviceLimit = c.dispositivos ?? '—';
+            const activeLives = countActiveLivesForUser(login);
+            const livesDisplay = `${activeLives} ativas (limite: ${liveLimit})`;
+            const deviceInfo = deviceStatus[login] || { active: 0, limit: configuredDeviceLimit };
+            const activeDevices = deviceInfo.active ?? 0;
+            const limitDevices = deviceInfo.limit ?? configuredDeviceLimit;
             const devicesDisplay = `${activeDevices} ativo (limite: ${limitDevices})`;
             return `
             <div class="cliente-item">
                 <div class="info-line">
                     <span class="label"><span class="icon">👤</span> Login</span>
-                    <span class="value">${c.login}</span>
+                    <span class="value">${escapeHtml(login || '—')}</span>
                 </div>
                 <div class="info-line">
                     <span class="label"><span class="icon">📧</span> E-mail</span>
-                    <span class="value email">${c.email}</span>
+                    <span class="value email">${escapeHtml(email || '—')}</span>
                 </div>
                 <div class="info-line">
                     <span class="label"><span class="icon">📱</span> Dispositivos</span>
-                    <span class="value disp">${devicesDisplay}</span>
+                    <span class="value disp">${escapeHtml(devicesDisplay)}</span>
                 </div>
                 <div class="info-line">
                     <span class="label"><span class="icon">📺</span> Lives</span>
-                    <span class="value lives">${livesDisplay}</span>
+                    <span class="value lives">${escapeHtml(livesDisplay)}</span>
                 </div>
                 <div class="actions">
                     <button class="btn-edit" data-index="${originalIndex}">Editar</button>
@@ -1790,7 +1893,42 @@
     // ============================================================
     // FUNÇÕES DO DASHBOARD
     // ============================================================
+    const healthComponentLabels = {
+        authentication: 'Autenticação',
+        cookies: 'Cookies',
+        extraction: 'Extração',
+        manifest: 'Manifesto',
+        stream: 'Stream',
+        agent: 'Agente Windows',
+        network: 'Rede',
+        metadata: 'Metadados',
+        playlist: 'Playlist'
+    };
+
+    const healthComponentOrder = ['authentication', 'cookies', 'extraction', 'manifest', 'stream', 'agent'];
+    const monitorComponentOrder = ['extraction', 'manifest', 'stream', 'cookies'];
+
+    function getHealthCssStatus(status) {
+        if (status === 'ok') return 'ok';
+        if (status === 'warning' || status === 'degraded') return 'degraded';
+        if (status === 'error' || status === 'critical' || status === 'offline') return 'error';
+        return 'unknown';
+    }
+
+    function getHealthStatusLabel(status) {
+        if (status === 'ok') return 'OK';
+        if (status === 'degraded' || status === 'warning') return 'DEGRADADO';
+        if (status === 'error' || status === 'critical' || status === 'offline') return 'ERRO';
+        return 'DESCONHECIDO';
+    }
+
+    function getHealthComponents(monitor) {
+        return monitor?.healthSummary?.components || monitor?.health || {};
+    }
+
     function computeHealthScore(health) {
+        if (health?.score !== undefined) return Math.max(0, Math.min(100, Number(health.score) || 0));
+        if (health?.components) return computeHealthScore(health.components);
         const weights = { network: 25, metadata: 25, playlist: 25, cookies: 25 };
         let score = 0;
         for (const [comp, weight] of Object.entries(weights)) {
@@ -1801,42 +1939,83 @@
         return score;
     }
 
-    function getStatusDisplay(status, health) {
-        switch (status) {
+    function getStatusDisplay(status, healthSummary) {
+        const effectiveStatus = status === 'online' && healthSummary?.status && healthSummary.status !== 'ok'
+            ? 'degraded'
+            : status;
+        switch (effectiveStatus) {
+            case 'ok': return { icon: '', label: 'OK', class: 'status-online' };
             case 'online': return { icon: '', label: 'ONLINE', class: 'status-online' };
             case 'degraded': return { icon: '', label: 'INSTÁVEL', class: 'status-degraded' };
+            case 'warning': return { icon: '', label: 'INSTÁVEL', class: 'status-degraded' };
+            case 'error': return { icon: '', label: 'ERRO', class: 'status-offline' };
+            case 'critical': return { icon: '', label: 'CRÍTICO', class: 'status-ended' };
             case 'offline': return { icon: '', label: 'OFFLINE', class: 'status-offline' };
             case 'ended': return { icon: '', label: 'ENCERRADA', class: 'status-ended' };
-            default: return { icon: '', label: status || 'DESCONHECIDO', class: 'status-offline' };
+            default: return { icon: '', label: effectiveStatus || 'DESCONHECIDO', class: 'status-offline' };
         }
     }
 
     function getMainCause(monitor) {
-        if (monitor.status !== 'degraded') return '';
-        const health = monitor.health;
-        const order = ['playlist', 'cookies', 'network', 'metadata'];
+        if (monitor.status !== 'degraded' && monitor.healthSummary?.status === 'ok') return '';
+        const health = getHealthComponents(monitor);
+        const order = monitor.healthSummary?.components ? monitorComponentOrder : ['playlist', 'cookies', 'network', 'metadata'];
         for (const comp of order) {
-            if (health?.[comp]?.status !== 'ok') return comp.toUpperCase();
+            const status = health?.[comp]?.status;
+            if (status && status !== 'ok') return healthComponentLabels[comp] || comp.toUpperCase();
         }
         return '';
     }
 
     function buildTooltipContent(monitor) {
-        const health = monitor.health;
+        const health = getHealthComponents(monitor);
         const problems = [];
         for (const [comp, data] of Object.entries(health || {})) {
             if (data?.status !== 'ok' && data?.message) {
-                const labels = { network: 'Rede', metadata: 'Metadados', playlist: 'Playlist', cookies: 'Cookies' };
-                problems.push(`${labels[comp] || comp.toUpperCase()}: ${data.message}`);
+                problems.push(`${healthComponentLabels[comp] || comp.toUpperCase()}: ${data.message}`);
             }
         }
         if (problems.length === 0) return 'Todos os componentes saudáveis';
         return problems.join('\n');
     }
 
+    function renderHealthChips(monitor) {
+        const components = getHealthComponents(monitor);
+        const order = monitor.healthSummary?.components ? monitorComponentOrder : ['playlist', 'cookies', 'network', 'metadata'];
+        return `<div class="health-chip-row">${order.map((key) => {
+            const status = components?.[key]?.status || 'ok';
+            const cssStatus = getHealthCssStatus(status);
+            const label = healthComponentLabels[key] || key.toUpperCase();
+            return `<span class="health-chip ${cssStatus}" title="${escapeHtml(components?.[key]?.message || '')}">${escapeHtml(label)}</span>`;
+        }).join('')}</div>`;
+    }
+
+    function renderSystemHealth(health) {
+        const badge = document.getElementById('systemHealthBadge');
+        const grid = document.getElementById('healthOverviewGrid');
+        if (!badge || !grid) return;
+
+        const status = health?.status || 'unknown';
+        const cssStatus = getHealthCssStatus(status);
+        badge.textContent = getHealthStatusLabel(status);
+        badge.className = `badge ${cssStatus}`;
+
+        const components = health?.components || {};
+        grid.innerHTML = healthComponentOrder.map((key) => {
+            const component = components[key] || { status: 'unknown', message: '—' };
+            const componentCssStatus = getHealthCssStatus(component.status);
+            const statusLabel = getHealthStatusLabel(component.status);
+            return `<div class="health-component ${componentCssStatus}">
+                <div class="health-component-label">${escapeHtml(healthComponentLabels[key] || key)}</div>
+                <div class="health-component-status">${escapeHtml(statusLabel)}</div>
+                <div class="health-component-message">${escapeHtml(component.message || '—')}</div>
+            </div>`;
+        }).join('');
+    }
+
     function updateChart(monitors) {
         const totalLives = monitors.length;
-        const totalOnline = monitors.filter(m => m.status === 'online').length;
+        const totalOnline = monitors.filter(m => m.status === 'online' || m.status === 'degraded').length;
         const totalFailures = monitors.reduce((sum, m) => sum + (m.failCount || 0), 0);
         const maxVal = Math.max(totalLives, totalOnline, totalFailures, renewalCount, 5);
         document.getElementById('chartContent').innerHTML = `
@@ -2168,31 +2347,31 @@
             const degradedLives = clientMonitors.filter(m => m.status === 'degraded').length;
             
             // Cálculos agregados
-            const avgScore = Math.round(clientMonitors.reduce((acc, m) => acc + computeHealthScore(m.health), 0) / totalLives);
-            const totalViewers = clientMonitors.reduce((acc, m) => acc + (m.viewers || 0), 0);
+            const avgScore = Math.round(clientMonitors.reduce((acc, m) => acc + computeHealthScore(m.healthSummary || m.health), 0) / totalLives);
+            const totalViewers = clientMonitors.reduce((acc, m) => acc + (Number(m.viewers) || 0), 0);
             
             // Determinar status visual do grupo
             let statusLabel = 'ONLINE';
             let statusClass = 'status-online';
-            if (onlineLives === 0) {
-                statusLabel = 'OFFLINE';
-                statusClass = 'status-offline';
-            } else if (degradedLives > 0) {
+            if (degradedLives > 0) {
                 statusLabel = 'INSTÁVEL';
                 statusClass = 'status-degraded';
+            } else if (onlineLives === 0) {
+                statusLabel = 'OFFLINE';
+                statusClass = 'status-offline';
             }
 
             const healthColor = avgScore >= 80 ? '#2ecc71' : (avgScore >= 50 ? '#f1c40f' : '#e74c3c');
             
-            html += `<tr class="client-group-row" style="cursor: pointer;" onclick="openClientDetailModal('${owner.replace(/'/g, "\\'")}')">`;
-            html += `<td class="cliente-cell" style="font-size: 1.1rem; color: #fff; text-align: left; padding-left: 20px;"><strong>${owner}</strong></td>`;
+            html += `<tr class="client-group-row" style="cursor: pointer;" data-owner="${escapeHtml(owner)}">`;
+            html += `<td class="cliente-cell" style="font-size: 1.1rem; color: #fff; text-align: left; padding-left: 20px;"><strong>${escapeHtml(owner)}</strong></td>`;
             html += `<td style="text-align: center;"><span class="badge" style="background: rgba(46,204,113,0.2); color: #2ecc71; padding: 5px 12px; border-radius: 20px; display: inline-block;">${totalLives} live(s)</span></td>`;
-            html += `<td class="${statusClass}" style="text-align: center;"><strong>${statusLabel}</strong></td>`;
+            html += `<td class="${statusClass}" style="text-align: center;"><strong>${escapeHtml(statusLabel)}</strong></td>`;
             html += `<td style="text-align: center;">
                         <div class="health-bar-container"><div class="health-bar" style="width: ${avgScore}%; background: ${healthColor};"></div></div>
                         <span class="health-score">${avgScore}%</span>
                      </td>`;
-            html += `<td style="text-align: center;"><span class="device-count">${totalViewers}</span></td>`;
+            html += `<td style="text-align: center;"><span class="device-count">${escapeHtml(totalViewers)}</span></td>`;
             html += `</tr>`;
         });
 
@@ -2202,16 +2381,22 @@
         // Salvar os dados agrupados globalmente para o modal acessar
         window.currentGroups = groups;
 
+        container.querySelectorAll('.client-group-row').forEach(row => {
+            row.addEventListener('click', () => {
+                openClientDetailModal(row.getAttribute('data-owner') || 'Sem Cliente');
+            });
+        });
+
         if (typeof tippy !== 'undefined') {
             tippy('.video-id[data-tippy-content]', {
                 content: (reference) => reference.getAttribute('data-tippy-content'),
-                allowHTML: true,
+                allowHTML: false,
                 placement: 'top',
                 theme: 'translucent'
             });
             tippy('[data-tippy-content]', {
                 content: (reference) => reference.getAttribute('data-tippy-content'),
-                allowHTML: true,
+                allowHTML: false,
                 placement: 'top',
                 theme: 'translucent'
             });
@@ -2372,20 +2557,24 @@
     async function fetchData() {
         try {
             const [healthRes, monitors] = await Promise.all([
-                fetch('/health', { credentials: 'same-origin', cache: 'no-store' }),
+                fetchAdminJson('/api/admin/health'),
                 fetchAdminJson('/api/monitors')
             ]);
-            const health = await healthRes.json();
-            const isOnline = (health.status === 'healthy' || health.status === 'ok');
-            document.getElementById('mainStatus').innerHTML = isOnline ? 'ONLINE' : 'OFFLINE';
+            const healthPayload = healthRes.health || {};
+            const mainStatus = document.getElementById('mainStatus');
+            const displayStatus = getHealthStatusLabel(healthPayload.status || 'unknown');
+            const cssStatus = getHealthCssStatus(healthPayload.status || 'unknown');
+            mainStatus.textContent = displayStatus;
+            mainStatus.className = `stat-value status-${cssStatus}`;
+            renderSystemHealth(healthPayload);
             const activeCount = monitors.monitors?.filter(m => m.status === 'online' || m.status === 'degraded').length || 0;
-            document.getElementById('activeLivesCard').innerHTML = activeCount;
+            document.getElementById('activeLivesCard').textContent = activeCount;
             allMonitorsData = monitors.monitors || [];
             filterAndDisplayMonitors();
-            const uptimeSec = health.uptime || 0;
+            const uptimeSec = healthPayload.uptime || healthRes.uptime || 0;
             const hours = Math.floor(uptimeSec / 3600);
             const minutes = Math.floor((uptimeSec % 3600) / 60);
-            document.getElementById('mainUptime').innerHTML = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+            document.getElementById('mainUptime').textContent = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
             await loadFunctionalCookieStatus();
             await loadCookieAutomationStatus();
             updateChart(monitors.monitors || []);
