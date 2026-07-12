@@ -4,6 +4,14 @@ const fs = require('fs');
 const https = require('https');
 const GlobalScheduler = require('../globalScheduler');
 const CookieRotator = require('../cookieRotator');
+const {
+    CLASSIFICATION,
+    classifyYtdlpError,
+    isCookieAuthClassification,
+    getYtdlpDiagnostics,
+    selectHlsStream,
+    sanitizeYtdlpMessage
+} = require('../services/ytdlpStreamSelector');
 
 class ConvertAPI {
     constructor(emailAlerts, orchestrator, revokeTokenFn = null) {
@@ -20,11 +28,7 @@ class ConvertAPI {
             this.cookieRotator.setEmailAlerts(this.emailAlerts);
         }
         
-        // ============================================================
-        // 🔧 ALTERADO: Aumentado o intervalo do scheduler para 60s
-        // ============================================================
         this.scheduler = new GlobalScheduler(60000, 6, this.cookieRotator);
-        this.pendingConversions = new Map();
     }
 
     removeMonitor(videoId, owner) {
@@ -41,15 +45,6 @@ class ConvertAPI {
             return true;
         }
         return false;
-    }
-
-    getCookiePath() {
-        const cookiePath = this.cookieRotator.getNextCookiePath();
-        if (!cookiePath) {
-            return { path: null, name: null };
-        }
-        const name = path.basename(cookiePath);
-        return { path: cookiePath, name };
     }
 
     _getCompositeKey(videoId, owner) {
@@ -76,14 +71,6 @@ class ConvertAPI {
             delete map[key];
             fs.writeFileSync(mappingFile, JSON.stringify(map, null, 2));
         } catch (e) {}
-    }
-
-    _getPersistedEntry(videoId, owner) {
-        try {
-            const map = JSON.parse(fs.readFileSync(path.join(__dirname, '../cookies/monitors.json'), 'utf8'));
-            const key = this._getCompositeKey(videoId, owner);
-            return map[key] || null;
-        } catch (e) { return null; }
     }
 
     _runYtdlp(args, timeout = 60000) {
@@ -195,11 +182,6 @@ class ConvertAPI {
         const videoId = this.extractVideoId(youtubeUrl);
         const key = this._getCompositeKey(videoId, owner);
         
-        if (this.pendingConversions.has(key)) {
-            console.log(`[${videoId}:${owner}] Conversão em andamento, aguardando...`);
-            return this.pendingConversions.get(key);
-        }
-
         if (this.activeMonitors.has(key)) {
             const monitor = this.activeMonitors.get(key);
             return {
@@ -221,14 +203,12 @@ class ConvertAPI {
             console.log(`📺 Canal: ${metadata.channel}`);
         }
 
-        // ============================================================
-        // 🔧 CORREÇÃO: Fallback local com markSuccess apenas para o cookie que funcionou
-        // ============================================================
         const cookiesDir = path.join(__dirname, '../cookies');
         const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
-        const args = ['-g', youtubeUrl];
         let streamUrl = null;
         let workingCookie = null;
+        let streamSelection = null;
+        let streamMetadata = null;
         const failedCookies = [];
 
         // Tenta cada cookie em ordem
@@ -238,29 +218,42 @@ class ConvertAPI {
                 console.log(`⚠️ ${file} não encontrado, pulando.`);
                 continue;
             }
-            const argsWithCookie = ['--cookies', fullPath, ...args];
+            const argsWithCookie = ['--cookies', fullPath, '--dump-json', '--skip-download', '--no-playlist', youtubeUrl];
             try {
                 console.log(`🍪 Tentando ${file}...`);
                 const stdout = await this._runYtdlp(argsWithCookie, 60000);
-                const url = stdout.trim().split('\n')[0];
-                if (url && (url.includes('.m3u8') || url.includes('manifest'))) {
-                    streamUrl = url;
+                const ytMetadata = JSON.parse(stdout);
+                const diagnostics = getYtdlpDiagnostics(ytMetadata);
+                console.log(`[${videoId}] yt-dlp JSON (${file}): formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
+                const selection = selectHlsStream(ytMetadata);
+                if (selection.ok) {
+                    streamUrl = selection.url;
                     workingCookie = file;
-                    console.log(`✅ Sucesso com ${file}`);
+                    streamSelection = selection;
+                    streamMetadata = ytMetadata;
+                    console.log(`Sucesso com ${file}: HLS ${selection.type} (${selection.urlPreview})`);
                     break;
-                } else {
-                    throw new Error('URL retornada não é um stream HLS válido');
                 }
+                const extractionError = new Error(`Falha de extração de stream: ${selection.classification}`);
+                extractionError.classification = selection.classification;
+                extractionError.diagnostics = selection.diagnostics;
+                throw extractionError;
             } catch (error) {
-                console.log(`❌ ${file} falhou: ${error.message}`);
-                failedCookies.push({ file, error: error.message });
+                const classification = error.classification || classifyYtdlpError(error.message);
+                const safeErrorMessage = sanitizeYtdlpMessage(error.message);
+                console.log(`${file} falhou: ${classification} - ${safeErrorMessage}`);
+                if (error.diagnostics) {
+                    console.log(`[${videoId}] Diagnóstico seguro (${file}): ${JSON.stringify(error.diagnostics)}`);
+                }
+                failedCookies.push({ file, error: safeErrorMessage, classification });
                 const isCookieError = this.cookieRotator &&
-                    this.cookieRotator.isCookieAuthError(error.message);
+                    (isCookieAuthClassification(classification) || this.cookieRotator.isCookieAuthError(error.message));
                 if (isCookieError && this.cookieRotator) {
                     this.cookieRotator.markFailure(file, error.message, videoId);
                 } else {
-                    console.log(`[COOKIE] ${file}: erro nao classificado como falha de cookie; estado preservado.`);
+                    console.log(`[COOKIE] ${file}: ${classification} nao altera estado do cookie.`);
                 }
+                continue;
             }
         }
 
@@ -268,14 +261,19 @@ class ConvertAPI {
         if (!streamUrl || !workingCookie) {
             console.error(`❌ Todos os cookies falharam para ${videoId}`);
             const cookieErrorCount = this.cookieRotator
-                ? failedCookies.filter(({ error }) => this.cookieRotator.isCookieAuthError(error)).length
+                ? failedCookies.filter(({ error, classification }) =>
+                    isCookieAuthClassification(classification) || this.cookieRotator.isCookieAuthError(error)
+                ).length
                 : 0;
             const onlyCookieAuthFailures = failedCookies.length > 0 &&
                 cookieErrorCount === failedCookies.length;
+            const primaryClassification = failedCookies[0]?.classification || CLASSIFICATION.UNKNOWN;
             return {
                 success: false,
                 videoId: videoId,
                 error: 'Todos os cookies falharam para obter a stream',
+                classification: onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification,
+                failedCookies,
                 metadata: metadata,
                 message: onlyCookieAuthFailures
                     ? 'Falha de autenticacao/cookie. Verifique os cookies.'
@@ -283,13 +281,11 @@ class ConvertAPI {
             };
         }
 
-        // ✅ Marca sucesso APENAS para o cookie que realmente funcionou
         if (this.cookieRotator) {
             console.log(`✅ Cookie ${workingCookie} funcionou para obtenção da stream.`);
             this.cookieRotator.markSuccess(workingCookie);
         }
 
-        // Cria o monitor com a stream obtida
         console.log(`✅ Stream capturada para ${videoId}:${owner}`);
         const LiveMonitor = require('../monitor/liveMonitor');
         
@@ -306,10 +302,18 @@ class ConvertAPI {
         monitor.m3u8Url = streamUrl;
         monitor.isLive = true;
         monitor.owner = owner;
-        monitor.metadata = metadata;
-        // ============================================================
-        // 🔧 ALTERADO: Aumentado o intervalo de verificação do monitor para 60s
-        // ============================================================
+        monitor.metadata = metadata || streamMetadata;
+        if (streamSelection) {
+            monitor.lastExtractionDiagnostics = streamSelection.diagnostics;
+            monitor._playlistUrls = streamSelection.playlistUrls || {};
+            if (streamSelection.masterContent) {
+                monitor._masterContent = {
+                    isMaster: true,
+                    content: streamSelection.masterContent,
+                    urls: Object.values(streamSelection.playlistUrls || {})
+                };
+            }
+        }
         monitor.startMonitoring(60);
         
         this.activeMonitors.set(key, monitor);

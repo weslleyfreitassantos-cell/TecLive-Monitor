@@ -5,6 +5,16 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const CookieRotator = require('../cookieRotator');
+const {
+    CLASSIFICATION,
+    classifyYtdlpError,
+    isCookieAuthClassification,
+    getYtdlpDiagnostics,
+    selectHlsStream,
+    safeUrlPreview,
+    sanitizeYtdlpMessage,
+    isPotentialHlsFormat
+} = require('../services/ytdlpStreamSelector');
 
 // ============================================================
 // ✅ AGENTES HTTP COM KEEPALIVE E MAX SOCKETS ALTO
@@ -118,6 +128,8 @@ class LiveMonitor {
         this._playlistUrls = {};
         // Armazenar master artificial (se gerado)
         this._masterContent = null;
+        this.lastExtractionFailureClassification = null;
+        this.lastExtractionDiagnostics = null;
     }
 
     // ✅ MÉTODO CORRIGIDO (estava faltando)
@@ -153,13 +165,7 @@ class LiveMonitor {
                 return true;
             });
 
-            const isMetadataCall = filteredArgs.includes('--dump-json') && 
-                                  filteredArgs.some(a => a.includes('youtube.com/watch') || a.includes('youtube.com/live'));
             let finalArgs = [...filteredArgs];
-            if (isMetadataCall) {
-                if (!finalArgs.includes('--flat-playlist')) finalArgs.push('--flat-playlist');
-                if (!finalArgs.includes('--playlist-end')) finalArgs.push('--playlist-end', '1');
-            }
 
             let cookieIndex = finalArgs.indexOf('--cookies');
             let cookiePath = null;
@@ -185,7 +191,7 @@ class LiveMonitor {
                     const argsWithCookie = [...finalArgs];
                     const idx = argsWithCookie.indexOf('--cookies');
                     if (idx !== -1) argsWithCookie.splice(idx, 2);
-                    argsWithCookie.unshift('--cookies', cookieFile);
+                    if (cookieFile) argsWithCookie.unshift('--cookies', cookieFile);
 
                     const child = spawn(ytCmd, argsWithCookie);
                     let stdout = '', stderr = '';
@@ -232,16 +238,16 @@ class LiveMonitor {
                 resolve(result.stdout);
             } catch (err) {
                 const errorMsg = err.message || '';
-                const isNoFormats = errorMsg.includes('No video formats found');
-                const isCookieAuth = this._isCookieAuthError(errorMsg);
+                const classification = classifyYtdlpError(errorMsg);
+                const isCookieAuth = isCookieAuthClassification(classification) || this._isCookieAuthError(errorMsg);
 
                 if (isCookieAuth && this._cookieRotator && cookieName) {
-                    console.log(`🔴 Marcando falha para ${cookieName}: ${errorMsg.slice(0, 100)}`);
+                    console.log(`🔴 Marcando falha para ${cookieName}: ${sanitizeYtdlpMessage(errorMsg).slice(0, 100)}`);
                     cookieFailureAlreadyHandled = this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId) ||
                         cookieFailureAlreadyHandled;
                 }
 
-                if (isNoFormats || isCookieAuth) {
+                if (isCookieAuth) {
                     console.log(`⚠️ Falha com cookie ${cookieName}, tentando alternativos...`);
                     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
                     let tried = false;
@@ -260,27 +266,30 @@ class LiveMonitor {
                             break;
                         } catch (innerErr) {
                             const innerMsg = innerErr.message || '';
-                            const isInnerNoFormats = innerMsg.includes('No video formats found');
-                            const isInnerCookieAuth = this._isCookieAuthError(innerMsg);
+                            const innerClassification = classifyYtdlpError(innerMsg);
+                            const isInnerCookieAuth = isCookieAuthClassification(innerClassification) || this._isCookieAuthError(innerMsg);
                             if (isInnerCookieAuth && this._cookieRotator) {
                                 cookieFailureAlreadyHandled = this._cookieRotator.markFailure(file, innerMsg, this.videoId) ||
                                     cookieFailureAlreadyHandled;
                             }
-                            if (isInnerNoFormats || isInnerCookieAuth) {
+                            if (isInnerCookieAuth) {
                                 console.log(`❌ ${file} também falhou.`);
                             } else {
+                                innerErr.classification = innerClassification;
                                 throw innerErr;
                             }
                         }
                     }
                     if (!tried) {
-                        const finalError = new Error(isCookieAuth ? 'Todos os cookies falharam por autenticação/cookie' : errorMsg);
+                        const finalError = new Error('Todos os cookies falharam por autenticação/cookie');
+                        finalError.classification = CLASSIFICATION.AUTH_COOKIE;
                         if (cookieFailureAlreadyHandled) {
                             finalError.cookieFailureAlreadyHandled = true;
                         }
                         reject(finalError);
                     }
                 } else {
+                    err.classification = classification;
                     reject(err);
                 }
             }
@@ -296,10 +305,13 @@ class LiveMonitor {
         let cookiePath = null;
         try {
             cookiePath = this.getCookiePath();
-            const args = ['--dump-json', '--flat-playlist', '--playlist-end', '1', this.youtubeUrl];
+            const args = ['--dump-json', '--skip-download', '--no-playlist', this.youtubeUrl];
             if (cookiePath) args.unshift('--cookies', cookiePath);
             const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
             const metadata = JSON.parse(stdout);
+            const diagnostics = getYtdlpDiagnostics(metadata);
+            this.lastExtractionDiagnostics = diagnostics;
+            console.log(`[${this.videoId}] 📊 yt-dlp JSON: formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
             this._cachedMetadata = metadata;
             this._metadataCacheTime = agora;
             this.updateHealthComponent('metadata', ComponentStatus.OK, 'Metadados obtidos com sucesso');
@@ -308,14 +320,16 @@ class LiveMonitor {
             
             return { success: true, metadata };
         } catch (error) {
-            console.error(`[${this.videoId}] ❌ Erro spawn: ${error.message}`);
+            const safeErrorMessage = sanitizeYtdlpMessage(error.message);
+            console.error(`[${this.videoId}] ❌ Erro spawn: ${safeErrorMessage}`);
             const errorMsg = error.message.toLowerCase();
+            const classification = error.classification || classifyYtdlpError(error.message);
             const isLiveEnded = errorMsg.includes('video unavailable') || 
                                errorMsg.includes('not available') || 
                                errorMsg.includes('recording is not available') ||
                                errorMsg.includes('this live event has ended');
             
-            if (this._isCookieAuthError(error.message)) {
+            if (isCookieAuthClassification(classification) || this._isCookieAuthError(error.message)) {
                 if (this._cookieRotator && cookiePath) {
                     const cookieName = path.basename(cookiePath);
                     if (!error.cookieFailureAlreadyHandled) {
@@ -326,14 +340,14 @@ class LiveMonitor {
                 this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Erro de autenticação');
             } else if (isLiveEnded) {
                 this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada');
-            } else if (errorMsg.includes('timeout')) {
+            } else if (classification === CLASSIFICATION.TIMEOUT) {
                 this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Timeout');
             } else {
-                this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Erro: ${error.message}`);
+                this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Erro ${classification}: ${safeErrorMessage}`);
             }
             
             this.metadataFails++;
-            return { success: false, error: error.message, isLiveEnded };
+            return { success: false, error: safeErrorMessage, errorType: classification, classification, isLiveEnded };
         }
     }
 
@@ -366,99 +380,43 @@ class LiveMonitor {
     // extractHlsUrl – recebe maxHeight por parâmetro (não armazena)
     // ============================================================
     extractHlsUrl(metadata, maxHeight = null) {
-        if (!metadata.formats || !Array.isArray(metadata.formats)) return null;
-
         const effectiveMax = maxHeight !== null ? maxHeight : parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
-        const forceArtificial = (maxHeight !== null);
+        const selection = selectHlsStream(metadata, {
+            maxHeight: maxHeight !== null ? effectiveMax : null,
+            forceArtificial: maxHeight !== null
+        });
 
-        // 1. Tenta usar master original (se existir) APENAS se não for forçado
-        if (!forceArtificial) {
-            const masterFormat = metadata.formats.find(f =>
-                f.protocol === 'm3u8_native' &&
-                f.url &&
-                !f.height &&
-                f.format_note && f.format_note.toLowerCase().includes('master')
-            );
-            if (masterFormat) {
-                this._masterContent = null;
-                console.log(`[${this.videoId}] 📺 Usando master original do YouTube.`);
-                this._populatePlaylistUrls(metadata.formats);
-                return masterFormat.url;
-            }
-        } else {
-            console.log(`[${this.videoId}] 📺 Forçando construção artificial devido ao parâmetro max.`);
-        }
-
-        // 2. Construir master artificial a partir das variantes
-        let hlsFormats = metadata.formats.filter(f => 
-            (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && 
-            f.vcodec !== 'none' && 
-            f.acodec !== 'none' &&
-            f.height
-        );
-
-        if (hlsFormats.length === 0) return null;
-
-        hlsFormats = hlsFormats.filter(f => (f.height || 0) <= effectiveMax);
-        if (hlsFormats.length === 0) {
-            hlsFormats = metadata.formats.filter(f => 
-                (f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))) && 
-                f.vcodec !== 'none' && 
-                f.acodec !== 'none' &&
-                f.height
-            );
-            hlsFormats.sort((a, b) => (a.height || 0) - (b.height || 0));
-            const fallback = hlsFormats[0];
-            console.log(`[${this.videoId}] ⚠️ Nenhum formato ≤ ${effectiveMax}p, usando fallback ${fallback.height}p.`);
+        this.lastExtractionDiagnostics = selection.diagnostics;
+        if (!selection.ok) {
             this._masterContent = null;
-            this._populatePlaylistUrls(hlsFormats);
-            return fallback.url;
+            this._playlistUrls = {};
+            this.lastExtractionFailureClassification = selection.classification;
+            console.log(`[${this.videoId}] ⚠️ HLS não selecionado: ${selection.classification} | diagnostics=${JSON.stringify(selection.diagnostics)}`);
+            return null;
         }
 
-        hlsFormats.sort((a, b) => (a.height || 0) - (b.height || 0));
+        this.lastExtractionFailureClassification = null;
+        this._playlistUrls = selection.playlistUrls || {};
+        if (selection.masterContent) {
+            this._masterContent = {
+                isMaster: true,
+                content: selection.masterContent,
+                urls: Object.values(this._playlistUrls)
+            };
+            console.log(`[${this.videoId}] 🛠️ Manifesto master artificial (${selection.type}) selecionado; height=${selection.selectedHeight || 'n/a'}; url=${selection.urlPreview}`);
+        } else {
+            this._masterContent = null;
+            this._populatePlaylistUrls(metadata.formats);
+            console.log(`[${this.videoId}] 📺 Stream HLS selecionada (${selection.type}); height=${selection.selectedHeight || 'n/a'}; url=${selection.urlPreview}`);
+        }
 
-        console.log(`[${this.videoId}] 🛠️ Construindo manifesto master artificial com ${hlsFormats.length} qualidades (max ${effectiveMax}p).`);
-
-        // Preencher playlistUrls
-        const playlistUrls = {};
-        hlsFormats.forEach(f => {
-            const height = f.height || 360;
-            playlistUrls[height] = f.url;
-        });
-        this._playlistUrls = playlistUrls;
-
-        const bestVariant = hlsFormats[hlsFormats.length - 1];
-        const bestUrl = bestVariant.url;
-
-        const masterLines = hlsFormats.map(f => {
-            const height = f.height || 360;
-            const width = f.width || Math.round(height * 16/9);
-            const fps = f.fps || 30;
-            let bandwidth = 0;
-            if (height <= 240) bandwidth = 300000;
-            else if (height <= 360) bandwidth = 600000;
-            else if (height <= 480) bandwidth = 1200000;
-            else if (height <= 720) bandwidth = 2500000;
-            else if (height <= 1080) bandwidth = 5000000;
-            else bandwidth = 8000000;
-            return `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${width}x${height},FRAME-RATE=${fps}\n${f.url}`;
-        });
-
-        const masterContent = '#EXTM3U\n' + masterLines.join('\n');
-
-        this._masterContent = {
-            isMaster: true,
-            content: masterContent,
-            urls: hlsFormats.map(f => f.url)
-        };
-
-        return bestUrl;
+        return selection.url;
     }
 
     _populatePlaylistUrls(formats) {
         const playlistUrls = {};
         (formats || []).forEach(f => {
-            if (f.url && (f.protocol === 'm3u8_native' || f.url.includes('.m3u8')) && f.height) {
+            if (f.url && isPotentialHlsFormat(f) && f.height) {
                 const height = f.height || 360;
                 playlistUrls[height] = f.url;
             }
@@ -623,12 +581,12 @@ class LiveMonitor {
             if (!newUrl) throw new Error('Nova URL não encontrada');
             if (newUrl !== this.m3u8Url) {
                 this.m3u8Url = newUrl;
-                console.log(`[${this.videoId}] ✅ URL HLS forçada: ${newUrl.substring(0, 100)}...`);
+                console.log(`[${this.videoId}] ✅ URL HLS forçada: ${safeUrlPreview(newUrl)}`);
             }
             this.lastRefreshFailedAt = 0;
             return true;
         } catch (err) {
-            console.error(`[${this.videoId}] ❌ Falha na renovação forçada:`, err.message);
+            console.error(`[${this.videoId}] ❌ Falha na renovação forçada:`, sanitizeYtdlpMessage(err.message));
             this.lastRefreshFailedAt = Date.now();
             return false;
         }
@@ -709,9 +667,10 @@ class LiveMonitor {
         }
         const newUrl = this.extractHlsUrl(metadata, null);
         if (!newUrl) {
-            console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada`);
+            const classification = this.lastExtractionFailureClassification || CLASSIFICATION.INVALID_HLS;
+            console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada (${classification})`);
             this.urlFails++;
-            this.updateHealthComponent('playlist', ComponentStatus.WARNING, 'URL não encontrada');
+            this.updateHealthComponent('playlist', ComponentStatus.WARNING, `Extração falhou: ${classification}`);
             if (this.urlFails >= this.maxFails) this.updateHealthComponent('playlist', ComponentStatus.ERROR, `${this.urlFails} falhas consecutivas`);
             this.applyDerivedState();
             return;

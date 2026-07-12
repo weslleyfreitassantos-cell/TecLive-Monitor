@@ -214,6 +214,31 @@ function testRotatorDoesNotCancelClaimedOrRunning() {
     assert.equal(runningAfter.status, 'running');
 }
 
+function testRotatorIgnoresExtractionAndNetworkErrors() {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'cookie1.txt'), '# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\ta\tb\n');
+    const queue = new CookieRefreshQueue({ filePath: path.join(dir, 'jobs.json') });
+    const rotator = new CookieRotator(dir, path.join(dir, 'status.json'));
+    rotator.setRefreshQueue(queue);
+
+    const ignored = [
+        'No video formats found',
+        'This live event has ended',
+        'Video unavailable',
+        'Timeout apos 90000ms',
+        'HTTP Error 503: Service Unavailable'
+    ];
+
+    for (const message of ignored) {
+        assert.equal(rotator.markFailure('cookie1.txt', message, 'video-a'), false);
+    }
+
+    const status = rotator.status['cookie1.txt'];
+    assert.equal(status.state, 'valid');
+    assert.equal(status.failCount, 0);
+    assert.equal(queue.list({ limit: 10 }).length, 0);
+}
+
 function testAgentStatusClassification() {
     const now = Date.parse('2026-07-11T12:00:00.000Z');
     const heartbeatRecent = CookieRefreshQueue.computeAgentStatus({
@@ -431,6 +456,7 @@ async function main() {
     testSanitization();
     testRotatorIntegration();
     testRotatorDoesNotCancelClaimedOrRunning();
+    testRotatorIgnoresExtractionAndNetworkErrors();
     testAgentStatusClassification();
     testQueueCheckActivityIsPersisted();
     await testPhase1ProxyAndLimiterRuntime();
