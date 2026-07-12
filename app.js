@@ -2004,6 +2004,9 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
 
         monitorFound.stopMonitoring();
         converter.activeMonitors.delete(keyFound);
+        if (converter.clearExtractionBackoff) {
+            converter.clearExtractionBackoff(videoId, actualOwner);
+        }
         removePersistedMapping(videoId, actualOwner);
 
         if (actualOwner) {

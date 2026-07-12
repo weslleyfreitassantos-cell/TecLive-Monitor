@@ -111,12 +111,25 @@ class GlobalScheduler extends EventEmitter {
 
         const monitorsToRun = [];
         for (const monitor of this.monitors.values()) {
+            if (monitor._monitorStopped || monitor._liveEnded) {
+                continue;
+            }
+
+            const retryDelayMs = typeof monitor.getExtractionBackoffDelayMs === 'function'
+                ? monitor.getExtractionBackoffDelayMs(now)
+                : 0;
+            if (retryDelayMs > 0) {
+                monitor.nextCheck = now + retryDelayMs;
+                if (typeof monitor.logExtractionBackoffSuppressed === 'function') {
+                    monitor.logExtractionBackoffSuppressed(now);
+                }
+                continue;
+            }
+
             if (
                 monitor.nextCheck &&
                 monitor.nextCheck <= now &&
-                !monitor._running &&
-                !monitor._monitorStopped &&
-                !monitor._liveEnded
+                !monitor._running
             ) {
                 monitorsToRun.push(monitor);
             }
@@ -148,6 +161,13 @@ class GlobalScheduler extends EventEmitter {
                     nextInterval = Math.max(8000, nextInterval * 0.8);
                 } else if (monitor.liveState !== 'online') {
                     nextInterval = 30000;
+                }
+
+                const retryDelayMs = typeof monitor.getExtractionBackoffDelayMs === 'function'
+                    ? monitor.getExtractionBackoffDelayMs(Date.now())
+                    : 0;
+                if (retryDelayMs > 0) {
+                    nextInterval = Math.max(nextInterval, retryDelayMs);
                 }
 
                 monitor.nextCheck = Date.now() + nextInterval;

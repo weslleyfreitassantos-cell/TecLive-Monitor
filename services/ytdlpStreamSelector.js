@@ -11,6 +11,7 @@ const CLASSIFICATION = Object.freeze({
     RATE_LIMIT: 'rate_limit',
     NETWORK: 'network',
     TIMEOUT: 'timeout',
+    SERVER_5XX: 'server_5xx',
     PLAYER_RESPONSE_INVALID: 'player_response_invalid',
     YOUTUBE_CHANGED: 'youtube_changed',
     UNKNOWN: 'unknown'
@@ -38,6 +39,9 @@ function classifyYtdlpError(error) {
         return CLASSIFICATION.LIVE_ENDED;
     }
     if (/no video formats found/i.test(text)) return CLASSIFICATION.NO_FORMATS;
+    if (/http error 5\d\d|5\d\d server|service unavailable|bad gateway|gateway timeout/i.test(text)) {
+        return CLASSIFICATION.SERVER_5XX;
+    }
     if (/video unavailable|this video is unavailable|not available|unavailable/i.test(text)) return CLASSIFICATION.VIDEO_UNAVAILABLE;
     if (/url retornada.*hls|not a valid hls|invalid hls|hls invalido|hls inválido/i.test(text)) {
         return CLASSIFICATION.INVALID_HLS;

@@ -32,6 +32,7 @@ function testClassifications() {
     assert.equal(classifyYtdlpError('Video unavailable'), CLASSIFICATION.VIDEO_UNAVAILABLE);
     assert.equal(classifyYtdlpError('socket hang up ECONNRESET'), CLASSIFICATION.NETWORK);
     assert.equal(classifyYtdlpError('Timeout apos 90000ms'), CLASSIFICATION.TIMEOUT);
+    assert.equal(classifyYtdlpError('HTTP Error 503: Service Unavailable'), CLASSIFICATION.SERVER_5XX);
     assert.equal(classifyYtdlpError('URL expired: HTTP Error 403 Forbidden'), CLASSIFICATION.EXPIRED_STREAM_URL);
     assert.notEqual(classifyYtdlpError('HTTP Error 403: Forbidden'), CLASSIFICATION.AUTH_COOKIE);
     assert.equal(classifyYtdlpError('ERROR: login required to confirm access'), CLASSIFICATION.AUTH_COOKIE);

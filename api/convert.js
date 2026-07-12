@@ -12,6 +12,17 @@ const {
     selectHlsStream,
     sanitizeYtdlpMessage
 } = require('../services/ytdlpStreamSelector');
+const {
+    DEFAULT_COOKIE_FILES,
+    buildCookieAttemptOrder,
+    resolveCookiePath,
+    applyExtractionFailure,
+    resetExtractionBackoff,
+    getBackoffDelayMs,
+    shouldApplyExtractionBackoff,
+    shouldLogBackoffSuppression,
+    createExtractionBackoffState
+} = require('../services/extractionRetryPolicy');
 
 class ConvertAPI {
     constructor(emailAlerts, orchestrator, revokeTokenFn = null) {
@@ -29,6 +40,7 @@ class ConvertAPI {
         }
         
         this.scheduler = new GlobalScheduler(60000, 6, this.cookieRotator);
+        this.extractionBackoff = new Map();
     }
 
     removeMonitor(videoId, owner) {
@@ -37,6 +49,7 @@ class ConvertAPI {
             const monitor = this.activeMonitors.get(key);
             monitor.stopMonitoring();
             this.activeMonitors.delete(key);
+            this.clearExtractionBackoff(videoId, owner);
             this._removePersistedMapping(videoId, owner);
             if (this._revokeTokenFn) {
                 this._revokeTokenFn(videoId, owner);
@@ -49,6 +62,40 @@ class ConvertAPI {
 
     _getCompositeKey(videoId, owner) {
         return owner ? `${videoId}:${owner}` : videoId;
+    }
+
+    _getExtractionState(key) {
+        if (!this.extractionBackoff.has(key)) {
+            this.extractionBackoff.set(key, createExtractionBackoffState());
+        }
+        return this.extractionBackoff.get(key);
+    }
+
+    clearExtractionBackoff(videoId, owner) {
+        return this.extractionBackoff.delete(this._getCompositeKey(videoId, owner));
+    }
+
+    _logConvertBackoff(key, videoId, state, now = Date.now()) {
+        if (!shouldLogBackoffSuppression(state, now)) return;
+        const retrySeconds = Math.ceil(getBackoffDelayMs(state, now) / 1000);
+        console.log(`[${videoId}] em backoff; proxima tentativa em ${retrySeconds}s (${state.lastFailureClassification})`);
+    }
+
+    _recordConvertFailure(key, videoId, classification, now = Date.now()) {
+        const state = this._getExtractionState(key);
+        if (!shouldApplyExtractionBackoff(classification)) return state;
+        applyExtractionFailure(state, classification || CLASSIFICATION.UNKNOWN, now);
+        const retryIso = state.nextRetryAt ? new Date(state.nextRetryAt).toISOString() : 'n/a';
+        console.log(`[${videoId}] todos os cookies falharam [${state.lastFailureClassification}] falhasConsecutivas=${state.consecutiveExtractionFailures} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
+        return state;
+    }
+
+    _recordConvertSuccess(key, videoId, cookieName, now = Date.now()) {
+        const state = this._getExtractionState(key);
+        const recovered = resetExtractionBackoff(state, cookieName, now);
+        if (recovered) {
+            console.log(`[${videoId}] extracao recuperada com ${state.lastSuccessfulCookie}`);
+        }
     }
 
     _persistMapping(videoId, youtubeUrl, owner, metadata) {
@@ -195,6 +242,20 @@ class ConvertAPI {
             };
         }
         
+        const extractionState = this._getExtractionState(key);
+        const backoffDelayMs = getBackoffDelayMs(extractionState);
+        if (backoffDelayMs > 0) {
+            this._logConvertBackoff(key, videoId, extractionState);
+            return {
+                success: false,
+                videoId: videoId,
+                error: 'Extracao em backoff',
+                classification: extractionState.lastFailureClassification || CLASSIFICATION.UNKNOWN,
+                retryAfterSeconds: Math.ceil(backoffDelayMs / 1000),
+                message: 'A extracao desta live esta em backoff temporario; tente novamente apos o proximo retry.'
+            };
+        }
+
         console.log(`[${new Date().toISOString()}] Requisição: ${youtubeUrl} (owner: ${owner})`);
         
         const metadata = await this._getVideoMetadata(youtubeUrl);
@@ -204,20 +265,25 @@ class ConvertAPI {
         }
 
         const cookiesDir = path.join(__dirname, '../cookies');
-        const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
+        const selectedCookiePath = this.cookieRotator ? this.cookieRotator.getNextCookiePath() : null;
+        const cookieAttemptOrder = buildCookieAttemptOrder({
+            lastSuccessfulCookie: extractionState.lastSuccessfulCookie,
+            selectedCookiePath,
+            cookieFiles: DEFAULT_COOKIE_FILES,
+            cookieExists: cookieName => {
+                const cookiePath = resolveCookiePath(cookiesDir, cookieName);
+                return Boolean(cookiePath && fs.existsSync(cookiePath));
+            }
+        });
         let streamUrl = null;
         let workingCookie = null;
         let streamSelection = null;
         let streamMetadata = null;
         const failedCookies = [];
 
-        // Tenta cada cookie em ordem
-        for (const file of cookieFiles) {
-            const fullPath = path.join(cookiesDir, file);
-            if (!fs.existsSync(fullPath)) {
-                console.log(`⚠️ ${file} não encontrado, pulando.`);
-                continue;
-            }
+        console.log(`[${videoId}] ordem de cookies da rodada: ${cookieAttemptOrder.join(' -> ') || 'nenhum cookie disponivel'}`);
+        for (const file of cookieAttemptOrder) {
+            const fullPath = resolveCookiePath(cookiesDir, file);
             const argsWithCookie = ['--cookies', fullPath, '--dump-json', '--skip-download', '--no-playlist', youtubeUrl];
             try {
                 console.log(`🍪 Tentando ${file}...`);
@@ -267,12 +333,16 @@ class ConvertAPI {
                 : 0;
             const onlyCookieAuthFailures = failedCookies.length > 0 &&
                 cookieErrorCount === failedCookies.length;
-            const primaryClassification = failedCookies[0]?.classification || CLASSIFICATION.UNKNOWN;
+            const primaryClassification = failedCookies.find(({ classification }) =>
+                !isCookieAuthClassification(classification)
+            )?.classification || failedCookies[0]?.classification || CLASSIFICATION.UNKNOWN;
+            const responseClassification = onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification;
+            this._recordConvertFailure(key, videoId, responseClassification);
             return {
                 success: false,
                 videoId: videoId,
                 error: 'Todos os cookies falharam para obter a stream',
-                classification: onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification,
+                classification: responseClassification,
                 failedCookies,
                 metadata: metadata,
                 message: onlyCookieAuthFailures
@@ -285,6 +355,7 @@ class ConvertAPI {
             console.log(`✅ Cookie ${workingCookie} funcionou para obtenção da stream.`);
             this.cookieRotator.markSuccess(workingCookie);
         }
+        this._recordConvertSuccess(key, videoId, workingCookie);
 
         console.log(`✅ Stream capturada para ${videoId}:${owner}`);
         const LiveMonitor = require('../monitor/liveMonitor');
@@ -303,6 +374,13 @@ class ConvertAPI {
         monitor.isLive = true;
         monitor.owner = owner;
         monitor.metadata = metadata || streamMetadata;
+        monitor.lastSuccessfulCookie = workingCookie;
+        if (monitor.extractionBackoff) {
+            monitor.extractionBackoff.lastSuccessfulCookie = workingCookie;
+            if (typeof monitor._syncExtractionBackoffFields === 'function') {
+                monitor._syncExtractionBackoffFields();
+            }
+        }
         if (streamSelection) {
             monitor.lastExtractionDiagnostics = streamSelection.diagnostics;
             monitor._playlistUrls = streamSelection.playlistUrls || {};

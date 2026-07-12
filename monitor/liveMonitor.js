@@ -15,6 +15,17 @@ const {
     sanitizeYtdlpMessage,
     isPotentialHlsFormat
 } = require('../services/ytdlpStreamSelector');
+const {
+    DEFAULT_COOKIE_FILES,
+    buildCookieAttemptOrder,
+    resolveCookiePath,
+    applyExtractionFailure,
+    resetExtractionBackoff,
+    getBackoffDelayMs,
+    shouldApplyExtractionBackoff,
+    shouldLogBackoffSuppression,
+    createExtractionBackoffState
+} = require('../services/extractionRetryPolicy');
 
 // ============================================================
 // ✅ AGENTES HTTP COM KEEPALIVE E MAX SOCKETS ALTO
@@ -130,6 +141,14 @@ class LiveMonitor {
         this._masterContent = null;
         this.lastExtractionFailureClassification = null;
         this.lastExtractionDiagnostics = null;
+        this.extractionBackoff = createExtractionBackoffState();
+        this.consecutiveExtractionFailures = 0;
+        this.lastExtractionFailureAt = null;
+        this.lastFailureClassification = null;
+        this.nextRetryAt = 0;
+        this.backoffSeconds = 0;
+        this.lastSuccessfulCookie = null;
+        this.lastExtractionSuccessAt = null;
     }
 
     // ✅ MÉTODO CORRIGIDO (estava faltando)
@@ -154,9 +173,52 @@ class LiveMonitor {
             this._cookieRotator.isCookieAuthError(errorMsg));
     }
 
-    // ============================================================
-    // _runYtdlp (mantido igual)
-    // ============================================================
+    _syncExtractionBackoffFields() {
+        this.consecutiveExtractionFailures = this.extractionBackoff.consecutiveExtractionFailures;
+        this.lastExtractionFailureAt = this.extractionBackoff.lastExtractionFailureAt;
+        this.lastFailureClassification = this.extractionBackoff.lastFailureClassification;
+        this.nextRetryAt = this.extractionBackoff.nextRetryAt;
+        this.backoffSeconds = this.extractionBackoff.backoffSeconds;
+        this.lastSuccessfulCookie = this.extractionBackoff.lastSuccessfulCookie;
+        this.lastExtractionSuccessAt = this.extractionBackoff.lastExtractionSuccessAt;
+    }
+
+    _recordExtractionFailure(classification) {
+        if (!shouldApplyExtractionBackoff(classification)) {
+            this._syncExtractionBackoffFields();
+            return;
+        }
+        applyExtractionFailure(this.extractionBackoff, classification || CLASSIFICATION.UNKNOWN, Date.now(), {
+            terminalBackoffSeconds: 120
+        });
+        this._syncExtractionBackoffFields();
+        const retryIso = this.nextRetryAt ? new Date(this.nextRetryAt).toISOString() : 'n/a';
+        console.log(`[${this.videoId}] extracao falhou [${this.lastFailureClassification}] falhasConsecutivas=${this.consecutiveExtractionFailures} backoff=${this.backoffSeconds}s proximoRetry=${retryIso}`);
+    }
+
+    _recordExtractionSuccess(cookieName) {
+        const recovered = resetExtractionBackoff(this.extractionBackoff, cookieName);
+        this._syncExtractionBackoffFields();
+        if (recovered) {
+            console.log(`[${this.videoId}] extracao recuperada com ${this.lastSuccessfulCookie || 'cookie desconhecido'}`);
+        }
+    }
+
+    getExtractionBackoffDelayMs(now = Date.now()) {
+        return getBackoffDelayMs(this.extractionBackoff, now);
+    }
+
+    logExtractionBackoffSuppressed(now = Date.now()) {
+        if (!shouldLogBackoffSuppression(this.extractionBackoff, now)) return false;
+        const retrySeconds = Math.ceil(getBackoffDelayMs(this.extractionBackoff, now) / 1000);
+        console.log(`[${this.videoId}] em backoff; proxima tentativa em ${retrySeconds}s`);
+        return true;
+    }
+
+    isExtractionBackoffActive(now = Date.now()) {
+        return this.getExtractionBackoffDelayMs(now) > 0;
+    }
+
     _runYtdlp(args, timeout = YTDLP_TIMEOUT) {
         return new Promise(async (resolve, reject) => {
             const filteredArgs = args.filter((arg, index) => {
@@ -166,32 +228,38 @@ class LiveMonitor {
             });
 
             let finalArgs = [...filteredArgs];
-
             let cookieIndex = finalArgs.indexOf('--cookies');
-            let cookiePath = null;
+            let selectedCookiePath = null;
             if (cookieIndex !== -1 && finalArgs.length > cookieIndex + 1) {
-                cookiePath = finalArgs[cookieIndex + 1];
+                selectedCookiePath = finalArgs[cookieIndex + 1];
+                finalArgs.splice(cookieIndex, 2);
             }
-            if (!cookiePath) {
+
+            if (!selectedCookiePath) {
                 const defaultCookie = path.join(this.cookiesDir, 'cookie1.txt');
                 if (fs.existsSync(defaultCookie)) {
-                    finalArgs.unshift('--cookies', defaultCookie);
-                    cookiePath = defaultCookie;
+                    selectedCookiePath = defaultCookie;
                 }
             }
 
-            console.log(`🔧 _runYtdlp args: ${finalArgs.join(' ')}`);
+            const cookieAttemptOrder = buildCookieAttemptOrder({
+                lastSuccessfulCookie: this.lastSuccessfulCookie,
+                selectedCookiePath,
+                cookieFiles: DEFAULT_COOKIE_FILES,
+                cookieExists: cookieName => {
+                    const cookiePath = resolveCookiePath(this.cookiesDir, cookieName);
+                    return Boolean(cookiePath && fs.existsSync(cookiePath));
+                }
+            });
 
             const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
-            const cookieName = cookiePath ? path.basename(cookiePath) : null;
             let cookieFailureAlreadyHandled = false;
 
-            const execWithCookie = (cookieFile) => {
+            const execWithCookie = (cookieName) => {
                 return new Promise((resolveExec, rejectExec) => {
                     const argsWithCookie = [...finalArgs];
-                    const idx = argsWithCookie.indexOf('--cookies');
-                    if (idx !== -1) argsWithCookie.splice(idx, 2);
-                    if (cookieFile) argsWithCookie.unshift('--cookies', cookieFile);
+                    const cookiePath = resolveCookiePath(this.cookiesDir, cookieName);
+                    if (cookiePath) argsWithCookie.unshift('--cookies', cookiePath);
 
                     const child = spawn(ytCmd, argsWithCookie);
                     let stdout = '', stderr = '';
@@ -230,68 +298,52 @@ class LiveMonitor {
                 });
             };
 
+            const attempts = cookieAttemptOrder.length > 0 ? cookieAttemptOrder : [null];
+            console.log(`[${this.videoId}] ordem de cookies da rodada: ${attempts.filter(Boolean).join(' -> ') || 'sem cookie'}`);
+
             try {
-                const result = await execWithCookie(cookiePath);
-                if (this._cookieRotator && cookieName) {
-                    this._cookieRotator.markSuccess(cookieName);
+                for (const cookieName of attempts) {
+                    try {
+                        const result = await execWithCookie(cookieName);
+                        if (this._cookieRotator && cookieName) {
+                            this._cookieRotator.markSuccess(cookieName);
+                        }
+                        if (cookieName) {
+                            this.lastSuccessfulCookie = cookieName;
+                            this.extractionBackoff.lastSuccessfulCookie = cookieName;
+                            this._syncExtractionBackoffFields();
+                        }
+                        resolve(result.stdout);
+                        return;
+                    } catch (err) {
+                        const errorMsg = err.message || '';
+                        const classification = classifyYtdlpError(errorMsg);
+                        const isCookieAuth = isCookieAuthClassification(classification) || this._isCookieAuthError(errorMsg);
+
+                        if (isCookieAuth && this._cookieRotator && cookieName) {
+                            console.log(`🔴 Marcando falha para ${cookieName}: ${sanitizeYtdlpMessage(errorMsg).slice(0, 100)}`);
+                            cookieFailureAlreadyHandled = this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId) ||
+                                cookieFailureAlreadyHandled;
+                        }
+
+                        if (isCookieAuth) {
+                            console.log(`${cookieName || 'sem cookie'} falhou: ${classification}`);
+                            continue;
+                        }
+
+                        err.classification = classification;
+                        reject(err);
+                        return;
+                    }
                 }
-                resolve(result.stdout);
+                const finalError = new Error('Todos os cookies falharam por autenticação/cookie');
+                finalError.classification = CLASSIFICATION.AUTH_COOKIE;
+                if (cookieFailureAlreadyHandled) {
+                    finalError.cookieFailureAlreadyHandled = true;
+                }
+                reject(finalError);
             } catch (err) {
-                const errorMsg = err.message || '';
-                const classification = classifyYtdlpError(errorMsg);
-                const isCookieAuth = isCookieAuthClassification(classification) || this._isCookieAuthError(errorMsg);
-
-                if (isCookieAuth && this._cookieRotator && cookieName) {
-                    console.log(`🔴 Marcando falha para ${cookieName}: ${sanitizeYtdlpMessage(errorMsg).slice(0, 100)}`);
-                    cookieFailureAlreadyHandled = this._cookieRotator.markFailure(cookieName, errorMsg, this.videoId) ||
-                        cookieFailureAlreadyHandled;
-                }
-
-                if (isCookieAuth) {
-                    console.log(`⚠️ Falha com cookie ${cookieName}, tentando alternativos...`);
-                    const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
-                    let tried = false;
-                    for (const file of cookieFiles) {
-                        const fullPath = path.join(this.cookiesDir, file);
-                        if (fullPath === cookiePath || !fs.existsSync(fullPath)) continue;
-                        try {
-                            console.log(`🔄 Tentando com ${file}...`);
-                            const result = await execWithCookie(fullPath);
-                            console.log(`✅ Sucesso com ${file}`);
-                            if (this._cookieRotator) {
-                                this._cookieRotator.markSuccess(file);
-                            }
-                            resolve(result.stdout);
-                            tried = true;
-                            break;
-                        } catch (innerErr) {
-                            const innerMsg = innerErr.message || '';
-                            const innerClassification = classifyYtdlpError(innerMsg);
-                            const isInnerCookieAuth = isCookieAuthClassification(innerClassification) || this._isCookieAuthError(innerMsg);
-                            if (isInnerCookieAuth && this._cookieRotator) {
-                                cookieFailureAlreadyHandled = this._cookieRotator.markFailure(file, innerMsg, this.videoId) ||
-                                    cookieFailureAlreadyHandled;
-                            }
-                            if (isInnerCookieAuth) {
-                                console.log(`❌ ${file} também falhou.`);
-                            } else {
-                                innerErr.classification = innerClassification;
-                                throw innerErr;
-                            }
-                        }
-                    }
-                    if (!tried) {
-                        const finalError = new Error('Todos os cookies falharam por autenticação/cookie');
-                        finalError.classification = CLASSIFICATION.AUTH_COOKIE;
-                        if (cookieFailureAlreadyHandled) {
-                            finalError.cookieFailureAlreadyHandled = true;
-                        }
-                        reject(finalError);
-                    }
-                } else {
-                    err.classification = classification;
-                    reject(err);
-                }
+                reject(err);
             }
         });
     }
@@ -316,7 +368,7 @@ class LiveMonitor {
             this._metadataCacheTime = agora;
             this.updateHealthComponent('metadata', ComponentStatus.OK, 'Metadados obtidos com sucesso');
             this.metadataFails = 0;
-            if (cookiePath) this.updateHealthComponent('cookies', ComponentStatus.OK, 'Cookie funcionando');
+            if (this.lastSuccessfulCookie) this.updateHealthComponent('cookies', ComponentStatus.OK, 'Cookie funcionando');
             
             return { success: true, metadata };
         } catch (error) {
@@ -324,6 +376,7 @@ class LiveMonitor {
             console.error(`[${this.videoId}] ❌ Erro spawn: ${safeErrorMessage}`);
             const errorMsg = error.message.toLowerCase();
             const classification = error.classification || classifyYtdlpError(error.message);
+            this._recordExtractionFailure(classification);
             const isLiveEnded = errorMsg.includes('video unavailable') || 
                                errorMsg.includes('not available') || 
                                errorMsg.includes('recording is not available') ||
@@ -573,12 +626,26 @@ class LiveMonitor {
     }
 
     async _forceRenew() {
+        if (this.isExtractionBackoffActive()) {
+            this.logExtractionBackoffSuppressed();
+            return false;
+        }
         console.log(`[${this.videoId}] 🔄 Forçando renovação da URL HLS...`);
         try {
             const metadataResult = await this.getLiveMetadata(true);
-            if (!metadataResult.success) throw new Error(metadataResult.error);
+            if (!metadataResult.success) {
+                const metadataError = new Error(metadataResult.error);
+                metadataError.classification = metadataResult.classification || metadataResult.errorType;
+                metadataError.extractionFailureAlreadyRecorded = true;
+                throw metadataError;
+            }
             const newUrl = this.extractHlsUrl(metadataResult.metadata, null);
-            if (!newUrl) throw new Error('Nova URL não encontrada');
+            if (!newUrl) {
+                const selectionError = new Error('Nova URL não encontrada');
+                selectionError.classification = this.lastExtractionFailureClassification || CLASSIFICATION.INVALID_HLS;
+                throw selectionError;
+            }
+            this._recordExtractionSuccess(this.lastSuccessfulCookie);
             if (newUrl !== this.m3u8Url) {
                 this.m3u8Url = newUrl;
                 console.log(`[${this.videoId}] ✅ URL HLS forçada: ${safeUrlPreview(newUrl)}`);
@@ -587,6 +654,9 @@ class LiveMonitor {
             return true;
         } catch (err) {
             console.error(`[${this.videoId}] ❌ Falha na renovação forçada:`, sanitizeYtdlpMessage(err.message));
+            if (!err.extractionFailureAlreadyRecorded) {
+                this._recordExtractionFailure(err.classification || classifyYtdlpError(err.message));
+            }
             this.lastRefreshFailedAt = Date.now();
             return false;
         }
@@ -603,12 +673,18 @@ class LiveMonitor {
 
     async checkAndRenew() {
         if (this._monitorStopped || this._liveEnded) return;
+
+        if (this.isExtractionBackoffActive()) {
+            this.logExtractionBackoffSuppressed();
+            return;
+        }
         
         if (this.m3u8Url && this._isUrlNearExpiry(this.m3u8Url)) {
             console.log(`[${this.videoId}] ⏰ URL próxima do vencimento, invalidando cache e renovando...`);
             this._cachedMetadata = null;
             this._metadataCacheTime = 0;
             await this._forceRenew();
+            return;
         }
         
         if (this.needsRefresh) {
@@ -616,6 +692,7 @@ class LiveMonitor {
             this._cachedMetadata = null;
             this._metadataCacheTime = 0;
             await this._forceRenew();
+            return;
         }
 
         console.log(`[${this.videoId}] 🔍 Ciclo de verificação (spawn)...`);
@@ -669,12 +746,14 @@ class LiveMonitor {
         if (!newUrl) {
             const classification = this.lastExtractionFailureClassification || CLASSIFICATION.INVALID_HLS;
             console.log(`[${this.videoId}] ⚠️ URL HLS não encontrada (${classification})`);
+            this._recordExtractionFailure(classification);
             this.urlFails++;
             this.updateHealthComponent('playlist', ComponentStatus.WARNING, `Extração falhou: ${classification}`);
             if (this.urlFails >= this.maxFails) this.updateHealthComponent('playlist', ComponentStatus.ERROR, `${this.urlFails} falhas consecutivas`);
             this.applyDerivedState();
             return;
         }
+        this._recordExtractionSuccess(this.lastSuccessfulCookie);
         this.urlFails = 0;
         if (newUrl !== this.m3u8Url) {
             this.m3u8Url = newUrl;
