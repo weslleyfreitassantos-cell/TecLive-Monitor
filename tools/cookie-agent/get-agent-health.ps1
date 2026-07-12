@@ -62,7 +62,14 @@ if ($Human) {
     Write-Host "Heartbeat: $(Format-AgentAge $health.heartbeatAgeSeconds)"
     Write-Host "Queue check: $(Format-AgentAge $health.queueCheckAgeSeconds)"
     Write-Host "Last result: $result"
-    Write-Host "Health: $(if ($health.healthy) { 'OK' } else { 'FAIL' })"
+    $healthLabel = if ($health.healthy) {
+        'OK'
+    } elseif ($health.classification -eq 'degraded') {
+        'DEGRADED'
+    } else {
+        'FAIL'
+    }
+    Write-Host "Health: $healthLabel"
     if (-not $health.healthy) {
         Write-Host "Reason: $($health.reason)"
         Write-Host "Recommended action: $($health.recommendedAction)"

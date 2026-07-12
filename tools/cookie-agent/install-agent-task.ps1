@@ -72,6 +72,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
+    -Hidden `
     -WakeToRun:$WakeToRun.IsPresent
 $runLevel = Get-ScheduledTaskRunLevel -Elevated:$RunAsAdmin.IsPresent
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel $runLevel
@@ -131,5 +132,6 @@ Write-Host "DisallowStartIfOnBatteries: $($settings.DisallowStartIfOnBatteries)"
 Write-Host "StopIfGoingOnBatteries: $($settings.StopIfGoingOnBatteries)"
 Write-Host "StartWhenAvailable: $($settings.StartWhenAvailable)"
 Write-Host "RunOnlyIfNetworkAvailable: $($settings.RunOnlyIfNetworkAvailable)"
+Write-Host "Hidden: $($settings.Hidden)"
 Write-Host "WakeToRun: $($settings.WakeToRun)"
 Write-Host "A tarefa nao foi iniciada automaticamente por este instalador."

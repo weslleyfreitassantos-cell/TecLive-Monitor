@@ -252,30 +252,52 @@ function Get-CookieAgentTaskHealth {
         $statePidDead = -not (Test-CookieAgentPidActive -Pid $runtimePid -ConfigPath $ConfigPath -ProcessList $processes)
     }
     $heartbeatRecent = ($null -ne $heartbeatAge -and $heartbeatAge -le ($StaleMinutes * 60))
-    $healthy = ($taskState -eq 'Running' -and $processFound -and $heartbeatRecent -and -not $statePidDead)
+    $queueRecent = ($null -ne $queueAge -and $queueAge -le ($QueuedMinutes * 60))
+    $activityAgeCandidates = @()
+    if ($null -ne $heartbeatAge) { $activityAgeCandidates += [int]$heartbeatAge }
+    if ($null -ne $queueAge) { $activityAgeCandidates += [int]$queueAge }
+    $activityAge = if ($activityAgeCandidates.Count -gt 0) { [int](($activityAgeCandidates | Measure-Object -Minimum).Minimum) } else { $null }
+    $activityRecent = ($heartbeatRecent -or $queueRecent)
+    $healthy = ($taskState -eq 'Running' -and $processFound -and $activityRecent -and -not $statePidDead)
+    $degraded = $false
     $reason = 'ok'
     $recommended = 'none'
 
     if (-not $task) {
-        $reason = 'task-missing'; $recommended = 'recreate-task'
+        if ($activityRecent) {
+            $reason = 'task-missing-recent-activity'; $recommended = 'observe'; $degraded = $true
+        } else {
+            $reason = 'task-missing'; $recommended = 'recreate-task'
+        }
     } elseif ($taskState -eq 'Disabled') {
-        $reason = 'task-disabled'; $recommended = 'recreate-task'
-    } elseif ($lastTaskResultHex -eq '0xC000013A') {
+        if ($activityRecent) {
+            $reason = 'task-disabled-recent-activity'; $recommended = 'observe'; $degraded = $true
+        } else {
+            $reason = 'task-disabled'; $recommended = 'recreate-task'
+        }
+    } elseif ($healthy) {
+        $reason = 'ok'; $recommended = 'none'
+    } elseif ($lastTaskResultHex -eq '0xC000013A' -and $activityRecent) {
+        $reason = 'interrupted-recent-activity'; $recommended = 'observe'; $degraded = $true
+    } elseif ($lastTaskResultHex -eq '0xC000013A' -and -not $processFound) {
         $reason = 'interrupted-0xC000013A'; $recommended = 'recreate-task'
+    } elseif (-not $processFound -and $activityRecent) {
+        $reason = 'recent-activity-without-process'; $recommended = 'observe'; $degraded = $true
     } elseif ($taskState -eq 'Running' -and -not $processFound) {
         $reason = 'running-without-process'; $recommended = 'stop-start'
     } elseif ($taskState -eq 'Queued' -and -not $processFound) {
         $reason = 'queued-without-process'; $recommended = 'stop-start'
-    } elseif ($taskState -eq 'Ready' -and -not $processFound -and -not $heartbeatRecent) {
+    } elseif ($taskState -eq 'Ready' -and -not $processFound -and -not $activityRecent) {
         $reason = 'ready-stale'; $recommended = 'start-task'
     } elseif ($statePidDead) {
         $reason = 'state-pid-dead'; $recommended = 'cleanup-state'
     } elseif ($processFound -and $taskState -ne 'Running') {
-        $reason = 'process-task-not-running'; $recommended = 'observe'
-    } elseif (-not $heartbeatRecent) {
+        $reason = 'process-task-not-running'; $recommended = 'observe'; $degraded = $true
+    } elseif (-not $activityRecent) {
         $reason = 'stale-heartbeat'; $recommended = 'stop-start'
     }
-    if ($healthy) { $reason = 'ok'; $recommended = 'none' }
+    if ($healthy) { $reason = 'ok'; $recommended = 'none'; $degraded = $false }
+    $classification = if ($healthy) { 'ok' } elseif ($degraded) { 'degraded' } else { 'fail' }
 
     return [pscustomobject]@{
         taskName = $TaskName
@@ -291,8 +313,12 @@ function Get-CookieAgentTaskHealth {
         statePidDead = $statePidDead
         heartbeatAgeSeconds = $heartbeatAge
         queueCheckAgeSeconds = $queueAge
+        activityAgeSeconds = $activityAge
+        activityRecent = $activityRecent
         logAgeSeconds = $logAge
         healthy = $healthy
+        degraded = $degraded
+        classification = $classification
         reason = $reason
         recommendedAction = $recommended
         observedAt = $Now.ToString('o')

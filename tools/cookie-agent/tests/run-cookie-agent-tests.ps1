@@ -73,24 +73,38 @@ Assert-True ($installContent -match 'ValidateAfterStart') 'ValidateAfterStart au
 Assert-True ($installContent -match 'Get-CookieAgentTaskHealth') 'Validacao pos-start deve usar health real'
 Assert-True ($installContent -match 'SupportsShouldProcess') 'Instalador deve suportar WhatIf'
 Assert-True ($installContent -match 'New-ScheduledTaskTrigger\s+-AtLogOn') 'Trigger no logon deve ser mantido'
+Assert-True ($installContent -match '-Hidden') 'Tarefa do agente deve ser criada oculta'
 Assert-True ($installContent -notmatch '-Password|LogonType\s+Password') 'Instalador nao deve armazenar senha'
 Assert-True ($uninstallContent -match 'SupportsShouldProcess' -and $uninstallContent -match 'ShouldProcess') 'Uninstall do agente deve suportar WhatIf'
 Assert-True ($commonContent -match 'Win32_Process') 'Health deve verificar processo via Win32_Process'
 Assert-True ($commonContent -match 'CommandLine') 'Health deve validar CommandLine do processo'
+Assert-True ($commonContent -match 'activityRecent') 'Health deve considerar heartbeat ou fila recentes como atividade'
 Assert-True ($watchdogContent -match 'Stop-ScheduledTask') 'Watchdog deve tentar Stop-ScheduledTask'
 Assert-True ($watchdogContent -match 'Start-ScheduledTask') 'Watchdog deve tentar Start-ScheduledTask'
 Assert-True ($watchdogContent -match 'install-agent-task\.ps1') 'Watchdog deve recriar via instalador existente'
 Assert-True ($watchdogContent -match 'Cooldown') 'Watchdog deve ter cooldown'
-Assert-True ($watchdogContent -match 'Recriacao bloqueada porque existe processo real saudavel') 'Watchdog deve bloquear recriacao com processo saudavel'
+Assert-True ($watchdogContent -match 'ProcessStartInfo') 'Watchdog deve iniciar recriacao sem janela visivel'
+Assert-True ($watchdogContent -match 'CreateNoWindow\s*=\s*\$true') 'Watchdog deve usar CreateNoWindow'
+Assert-True ($watchdogContent -match 'UseShellExecute\s*=\s*\$false') 'Watchdog deve desabilitar ShellExecute'
+Assert-True ($watchdogContent -match 'WindowStyle\s*=\s*\[System\.Diagnostics\.ProcessWindowStyle\]::Hidden') 'Watchdog deve usar WindowStyle Hidden'
+Assert-True ($watchdogContent -match 'ReadToEndAsync') 'Watchdog deve ler stdout/stderr sem deadlock'
+Assert-True ($watchdogContent -match 'WaitForExit\(\$timeoutMs\)') 'Watchdog deve impor timeout no processo filho'
+Assert-True ($watchdogContent -match 'Assert-HiddenPowerShellResult') 'Watchdog deve validar exit code do processo filho'
+Assert-True ($watchdogContent -notmatch '&\s+\$psExe\s+@installArgs') 'Watchdog nao deve usar chamada PowerShell visivel na recriacao'
+Assert-True ($watchdogContent -match 'Recriacao bloqueada porque existe processo real ou atividade recente') 'Watchdog deve bloquear recriacao com processo ou atividade recente'
 Assert-True ($watchdogContent -match 'Recuperacao por \$action concluida com sucesso') 'Watchdog deve reportar recuperacao bem-sucedida'
 Assert-True ($watchdogContent -match 'Recuperacao falhou') 'Watchdog deve reportar recuperacao falha'
-Assert-True ($watchdogContent -notmatch 'Kill\(|Stop-Process|taskkill|Restart-Service') 'Watchdog nao deve matar processos nem reiniciar servicos'
+Assert-True ($watchdogContent -notmatch 'Stop-Process|taskkill|Restart-Service') 'Watchdog nao deve matar processos genericos nem reiniciar servicos'
+Assert-True ($watchdogContent -match '\$Process\.Kill\(\)') 'Timeout deve encerrar somente o processo filho controlado'
+Assert-True ($watchdogContent -match 'Stop/Start nao recuperou; health=\$\(\$afterStart\.reason\)\.' -and $watchdogContent -match 'return 30') 'Stop/start nao deve escalar para recreate-task na mesma execucao'
 Assert-True ($healthContent -match 'ConvertTo-Json') 'Health JSON ausente'
+Assert-True ($healthContent -match 'DEGRADED') 'Health Human deve expor estado DEGRADED'
 Assert-True ($installWatchdogContent -match 'TecLive Cookie Sync Watchdog') 'Instalador do watchdog ausente'
 Assert-True ($installWatchdogContent -match 'RepetitionInterval') 'Watchdog deve rodar periodicamente'
 Assert-True ($installWatchdogContent -match 'Get-Date\)\.AddMinutes\(1\)') 'Trigger repetitivo deve iniciar a partir de agora'
 Assert-True ($installWatchdogContent -match 'New-ScheduledTaskTrigger\s+-AtLogOn') 'Watchdog deve iniciar no logon'
 Assert-True ($installWatchdogContent -match "'Limited'") 'Watchdog deve usar Limited por padrao'
+Assert-True ($installWatchdogContent -match '-Hidden') 'Tarefa do watchdog deve ser criada oculta'
 Assert-True ($installWatchdogContent -notmatch '-RunLevel\s+LeastPrivilege|-Password|LogonType\s+Password') 'Watchdog nao deve usar LeastPrivilege nem senha'
 
 $now = Get-Date
@@ -111,23 +125,51 @@ Assert-True ($healthy.healthy -eq $true) 'Watchdog saudavel deveria ser healthy'
 Assert-True ($healthy.lastTaskResult -eq 267009) 'LastTaskResult 267009 deve ser preservado'
 Assert-True ($healthy.lastTaskResultHex -eq '0x00041301') '267009 deve virar 0x00041301'
 Assert-True ($healthy.reason -eq 'ok') '267009/0x41301 nao deve ser tratado como erro'
+Assert-True ($healthy.classification -eq 'ok') 'Health saudavel deve ter classificacao ok'
 
 $runningNoProcess = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $runningTask -MockTaskInfo $okInfo -MockProcesses @() -MockRuntimeState $freshState -Now $now
-Assert-True ($runningNoProcess.reason -eq 'running-without-process') 'Running sem processo nao detectado'
+Assert-True ($runningNoProcess.reason -eq 'recent-activity-without-process') 'Running sem processo com atividade recente deve degradar sem recuperar'
+Assert-True ($runningNoProcess.recommendedAction -eq 'observe') 'Atividade recente sem processo nao deve disparar recuperacao'
+Assert-True ($runningNoProcess.classification -eq 'degraded') 'Atividade recente sem processo deve ser degradada'
+
+$limitState = @{ pid = 1234; lastHeartbeatAt = $now.AddMinutes(-5).ToString('o'); lastQueueCheckAt = $now.AddMinutes(-20).ToString('o') }
+$limitHealth = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $runningTask -MockTaskInfo $okInfo -MockProcesses @($agentProcess) -MockRuntimeState $limitState -Now $now -StaleMinutes 5 -QueuedMinutes 2
+Assert-True ($limitHealth.activityRecent -eq $true) 'Atividade exatamente no limite deve ser recente'
+Assert-True ($limitHealth.healthy -eq $true) 'Heartbeat exatamente no limite deve manter health OK'
+
+$invalidTimestamp = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $runningTask -MockTaskInfo $okInfo -MockProcesses @($agentProcess) -MockRuntimeState @{ pid = 1234; lastHeartbeatAt = 'not-a-date'; lastQueueCheckAt = 'also-not-a-date' } -Now $now
+Assert-True ($null -eq $invalidTimestamp.activityAgeSeconds) 'Timestamp invalido nao deve gerar activityAgeSeconds'
+Assert-True ($invalidTimestamp.activityRecent -eq $false) 'Timestamp invalido nao deve ser atividade recente'
+Assert-True ($invalidTimestamp.classification -eq 'fail') 'Timestamp invalido deve falhar de forma controlada'
 
 $queuedNoProcess = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $queuedTask -MockTaskInfo $okInfo -MockProcesses @() -MockRuntimeState $staleState -Now $now
 Assert-True ($queuedNoProcess.reason -eq 'queued-without-process') 'Queued sem processo nao detectado'
 
 $readyStale = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $readyTask -MockTaskInfo $okInfo -MockProcesses @() -MockRuntimeState $staleState -Now $now
 Assert-True ($readyStale.reason -eq 'ready-stale') 'Ready stale nao detectado'
+Assert-True ($readyStale.classification -eq 'fail') 'Ready stale sem processo deve falhar'
+Assert-True ($readyStale.recommendedAction -eq 'start-task') 'Ready stale sem processo deve recomendar start-task'
+
+$readyRecent = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $readyTask -MockTaskInfo $okInfo -MockProcesses @() -MockRuntimeState $freshState -Now $now
+Assert-True ($readyRecent.reason -eq 'recent-activity-without-process') 'Ready com atividade recente deve degradar sem recuperar'
+Assert-True ($readyRecent.recommendedAction -eq 'observe') 'Ready recente nao deve recomendar recuperacao destrutiva'
+Assert-True ($readyRecent.classification -eq 'degraded') 'Ready recente deve ser DEGRADED'
 
 $processHealthyTaskInconsistent = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $readyTask -MockTaskInfo $okInfo -MockProcesses @($agentProcess) -MockRuntimeState $freshState -Now $now
 Assert-True ($processHealthyTaskInconsistent.reason -eq 'process-task-not-running') 'Processo saudavel com task inconsistente nao detectado'
 Assert-True ($processHealthyTaskInconsistent.recommendedAction -eq 'observe') 'Processo saudavel nao deve disparar recriacao'
+Assert-True ($processHealthyTaskInconsistent.classification -eq 'degraded') 'Processo saudavel com task inconsistente deve ser degradado'
+
+$ctrlCRecent = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $readyTask -MockTaskInfo $ctrlCInfo -MockProcesses @() -MockRuntimeState $freshState -Now $now
+Assert-True ($ctrlCRecent.reason -eq 'interrupted-recent-activity') '0xC000013A com atividade recente deve ser observado'
+Assert-True ($ctrlCRecent.recommendedAction -eq 'observe') '0xC000013A recente nao deve recriar tarefa'
+Assert-True ($ctrlCRecent.classification -eq 'degraded') '0xC000013A recente deve ser degradado'
 
 $ctrlC = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $readyTask -MockTaskInfo $ctrlCInfo -MockProcesses @() -MockRuntimeState $staleState -Now $now
 Assert-True ($ctrlC.reason -eq 'interrupted-0xC000013A') '0xC000013A nao detectado'
 Assert-True ($ctrlC.lastTaskResultHex -eq '0xC000013A') 'Hex de LastTaskResult incorreto'
+Assert-True ($ctrlC.recommendedAction -eq 'recreate-task') '0xC000013A stale sem processo deve recriar'
+Assert-True ($ctrlC.classification -eq 'fail') '0xC000013A stale deve falhar'
 
 $missingTask = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $null -MockTaskInfo $null -MockProcesses @() -MockRuntimeState $staleState -Now $now
 Assert-True ($missingTask.reason -eq 'task-missing') 'Tarefa ausente nao detectada'
@@ -163,6 +205,45 @@ function Import-AgentFunctionDefinitions {
         Invoke-Expression ("function script:$($function.Name) $($function.Body.Extent.Text)")
     }
 }
+
+Import-AgentFunctionDefinitions -Path $watchdog
+$spaceArgs = @('-File', 'C:\Program Files\TecLive Agent\install-agent-task.ps1', '-ConfigPath', 'C:\Users\Weslley\TecLive Config\cookie-agent.config.json')
+$joinedSpaceArgs = Join-WatchdogProcessArguments -Arguments $spaceArgs
+Assert-True ($joinedSpaceArgs -match '"C:\\Program Files\\TecLive Agent\\install-agent-task\.ps1"') 'Argumentos com espacos devem ser preservados entre aspas'
+Assert-True ($joinedSpaceArgs -match '"C:\\Users\\Weslley\\TecLive Config\\cookie-agent\.config\.json"') 'ConfigPath com espacos deve ser preservado entre aspas'
+$hiddenStartInfo = New-HiddenPowerShellStartInfo -PowerShellPath 'C:\Program Files\PowerShell\7\pwsh.exe' -Arguments $spaceArgs
+Assert-True ($hiddenStartInfo.FileName -eq 'C:\Program Files\PowerShell\7\pwsh.exe') 'ProcessStartInfo deve aceitar caminho do PowerShell com espacos'
+Assert-True ($hiddenStartInfo.UseShellExecute -eq $false) 'ProcessStartInfo deve usar UseShellExecute=false'
+Assert-True ($hiddenStartInfo.CreateNoWindow -eq $true) 'ProcessStartInfo deve usar CreateNoWindow=true'
+Assert-True ($hiddenStartInfo.WindowStyle -eq [System.Diagnostics.ProcessWindowStyle]::Hidden) 'ProcessStartInfo deve usar WindowStyle Hidden'
+Assert-True ($hiddenStartInfo.RedirectStandardOutput -and $hiddenStartInfo.RedirectStandardError) 'ProcessStartInfo deve redirecionar stdout/stderr'
+
+$nonZeroMessage = $null
+try {
+    Assert-HiddenPowerShellResult -Result ([pscustomobject]@{
+        ExitCode = 7
+        StdOut = 'token:abc C:\Users\Weslley\secret.json'
+        StdErr = 'Authorization: Bearer secret-token'
+        TimedOut = $false
+    })
+} catch {
+    $nonZeroMessage = $_.Exception.Message
+}
+Assert-True ($nonZeroMessage -match 'retornou 7') 'Exit code diferente de zero deve falhar'
+Assert-True ($nonZeroMessage -notmatch 'secret-token|token:abc|C:\\Users\\Weslley') 'Erro do processo filho deve ser redigido'
+
+$timeoutMessage = $null
+try {
+    Assert-HiddenPowerShellResult -Result ([pscustomobject]@{
+        ExitCode = $null
+        StdOut = ''
+        StdErr = ''
+        TimedOut = $true
+    })
+} catch {
+    $timeoutMessage = $_.Exception.Message
+}
+Assert-True ($timeoutMessage -match 'timeout') 'Timeout do processo filho deve falhar claramente'
 
 Import-AgentFunctionDefinitions -Path $agent
 $script:DryRun = $false
@@ -254,10 +335,12 @@ try {
     Assert-OutputMatch $defaultInstall 'StopIfGoingOnBatteries:\s+False' 'StopIfGoingOnBatteries deve ser False'
     Assert-OutputMatch $defaultInstall 'StartWhenAvailable:\s+True' 'StartWhenAvailable deve ser True'
     Assert-OutputMatch $defaultInstall 'RunOnlyIfNetworkAvailable:\s+False' 'RunOnlyIfNetworkAvailable deve ser False'
+    Assert-OutputMatch $defaultInstall 'Hidden:\s+True' 'Tarefa do agente deve ser Hidden=True'
     Assert-OutputMatch $defaultInstall 'WakeToRun:\s+False' 'WakeToRun padrao deve ser False'
     Assert-OutputMatch $wakeInstall 'WakeToRun:\s+True' 'WakeToRun explicito deve ser True'
     Assert-OutputMatch $watchdogInstall 'RunLevel:\s+Limited' 'Watchdog deve usar Limited por padrao'
     Assert-OutputMatch $watchdogInstall 'ExecutionTimeLimit:\s+PT2M' 'Watchdog deve limitar execucao a 2 minutos'
+    Assert-OutputMatch $watchdogInstall 'Hidden:\s+True' 'Tarefa do watchdog deve ser Hidden=True'
     Assert-OutputMatch $watchdogInstall 'WakeToRun:\s+False' 'Watchdog WakeToRun padrao deve ser False'
     Assert-True ($watchdogUninstall -match 'Tarefa nao encontrada|What if|validada') 'Uninstall watchdog deve ser seguro em WhatIf'
     $createdInstallTasks = Get-ScheduledTask -TaskName $defaultTaskName, $adminTaskName, $wakeTaskName, $watchdogTaskName -ErrorAction SilentlyContinue

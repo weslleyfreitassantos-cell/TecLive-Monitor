@@ -61,6 +61,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
+    -Hidden `
     -WakeToRun:$WakeToRun.IsPresent
 $runLevel = Get-ScheduledTaskRunLevel -Elevated:$RunAsAdmin.IsPresent
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel $runLevel
@@ -79,5 +80,6 @@ Write-Host "RestartCount: $($settings.RestartCount)"
 Write-Host "RestartInterval: $($settings.RestartInterval)"
 Write-Host "ExecutionTimeLimit: $($settings.ExecutionTimeLimit)"
 Write-Host "StartWhenAvailable: $($settings.StartWhenAvailable)"
+Write-Host "Hidden: $($settings.Hidden)"
 Write-Host "WakeToRun: $($settings.WakeToRun)"
 Write-Host 'O watchdog executa uma checagem por disparo e termina.'

@@ -78,6 +78,102 @@ function Get-WatchdogInstallArgs {
     return $args
 }
 
+function Join-WatchdogProcessArguments {
+    param([string[]]$Arguments)
+    return (@($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -notmatch '[\s"]') {
+            $value
+        } else {
+            '"' + ($value -replace '"', '\"') + '"'
+        }
+    }) -join ' ')
+}
+
+function New-HiddenPowerShellStartInfo {
+    param(
+        [string[]]$Arguments,
+        [string]$PowerShellPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PowerShellPath)) {
+        $PowerShellPath = (Get-Process -Id $PID).Path
+    }
+    if ([string]::IsNullOrWhiteSpace($PowerShellPath)) {
+        $PowerShellPath = Join-Path $PSHOME 'powershell.exe'
+    }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $PowerShellPath
+    $psi.Arguments = Join-WatchdogProcessArguments -Arguments $Arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    return $psi
+}
+
+function Wait-HiddenPowerShellProcess {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutSeconds = 120
+    )
+
+    $stdoutTask = $Process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $Process.StandardError.ReadToEndAsync()
+    $timeoutMs = [Math]::Max(1, $TimeoutSeconds) * 1000
+
+    if (-not $Process.WaitForExit($timeoutMs)) {
+        try { $Process.Kill() } catch {}
+        try { [void]$Process.WaitForExit(5000) } catch {}
+        return [pscustomobject]@{
+            ExitCode = $null
+            StdOut = ''
+            StdErr = ''
+            TimedOut = $true
+        }
+    }
+
+    $Process.WaitForExit()
+    return [pscustomobject]@{
+        ExitCode = $Process.ExitCode
+        StdOut = $stdoutTask.Result
+        StdErr = $stderrTask.Result
+        TimedOut = $false
+    }
+}
+
+function Assert-HiddenPowerShellResult {
+    param(
+        [pscustomobject]$Result,
+        [string]$Operation = 'install-agent-task.ps1'
+    )
+
+    if ($Result.TimedOut) {
+        throw "$Operation excedeu timeout ao executar em janela oculta"
+    }
+    if ($Result.ExitCode -ne 0) {
+        throw "$Operation retornou $($Result.ExitCode): $(Redact-CookieAgentText ($Result.StdErr + ' ' + $Result.StdOut))"
+    }
+}
+
+function Invoke-HiddenPowerShell {
+    param(
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 120
+    )
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = New-HiddenPowerShellStartInfo -Arguments $Arguments
+    try {
+        [void]$process.Start()
+        return Wait-HiddenPowerShellProcess -Process $process -TimeoutSeconds $TimeoutSeconds
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-WatchdogRecovery {
     param([pscustomobject]$Health)
 
@@ -101,6 +197,11 @@ function Invoke-WatchdogRecovery {
     try { $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
 
     try {
+        if (-not $ForceRecreate -and $Health.activityRecent) {
+            Write-WatchdogLog "Recuperacao bloqueada porque ha atividade recente; reason=$($Health.reason) action=$action."
+            return 0
+        }
+
         if ($action -in @('stop-start', 'start-task', 'cleanup-state')) {
             if ($task -and $action -eq 'stop-start' -and $PSCmdlet.ShouldProcess($TaskName, 'parar tarefa para recuperacao')) {
                 Write-WatchdogLog "Acao: Stop-ScheduledTask $TaskName."
@@ -119,20 +220,20 @@ function Invoke-WatchdogRecovery {
                 return 10
             }
             Write-WatchdogLog "Stop/Start nao recuperou; health=$($afterStart.reason)."
-            $action = 'recreate-task'
+            Save-WatchdogRecovery -Reason $Health.reason -Action $action -Result "failed:$($afterStart.reason)"
+            return 30
         }
 
         if ($action -eq 'recreate-task') {
-            if ($Health.processFound -and $Health.heartbeatAgeSeconds -ne $null -and $Health.heartbeatAgeSeconds -le ($StaleMinutes * 60)) {
-                Write-WatchdogLog 'Recriacao bloqueada porque existe processo real saudavel.'
+            if (-not $ForceRecreate -and ($Health.processFound -or $Health.activityRecent)) {
+                Write-WatchdogLog 'Recriacao bloqueada porque existe processo real ou atividade recente.'
                 return 0
             }
             if ($PSCmdlet.ShouldProcess($TaskName, 'recriar tarefa do agente')) {
                 Write-WatchdogLog "Acao: recriar tarefa usando install-agent-task.ps1."
-                $psExe = (Get-Process -Id $PID).Path
                 $installArgs = Get-WatchdogInstallArgs -Task $task
-                & $psExe @installArgs *> $null
-                if ($LASTEXITCODE -ne 0) { throw "install-agent-task.ps1 retornou $LASTEXITCODE" }
+                $installResult = Invoke-HiddenPowerShell -Arguments $installArgs
+                Assert-HiddenPowerShellResult -Result $installResult
             }
             if ($PSCmdlet.ShouldProcess($TaskName, 'iniciar tarefa recriada')) {
                 Write-WatchdogLog "Acao: Start-ScheduledTask apos recriacao."
@@ -173,8 +274,8 @@ try {
         exit 0
     }
 
-    if ($health.processFound -and $health.heartbeatAgeSeconds -ne $null -and $health.heartbeatAgeSeconds -le ($StaleMinutes * 60) -and -not $ForceRecreate) {
-        Write-WatchdogLog "Inconsistencia detectada ($($health.reason)), mas processo e heartbeat estao saudaveis; nao recriar."
+    if ($health.classification -eq 'degraded' -and -not $ForceRecreate) {
+        Write-WatchdogLog "Estado degradado observado ($($health.reason)); atividade recente impede recuperacao nesta execucao."
         exit 0
     }
 
