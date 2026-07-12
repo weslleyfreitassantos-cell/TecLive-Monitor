@@ -245,8 +245,9 @@ async function testConvertBackoffAndIsolation() {
         const fail = await api.convert('https://www.youtube.com/watch?v=LIVEAAAAAA1', 'http://127.0.0.1', 'live-a');
         assert.equal(fail.success, false);
         assert.equal(fail.classification, CLASSIFICATION.NO_FORMATS);
-        assert.deepEqual(attempts.map(item => item.cookie), ['cookie1.txt', 'cookie2.txt', 'cookie3.txt']);
-        assert.equal(new Set(attempts.map(item => item.cookie)).size, 3);
+        assert.deepEqual(attempts.map(item => item.cookie), ['cookie1.txt', 'cookie2.txt', 'cookie3.txt', null]);
+        assert.equal(new Set(attempts.map(item => item.cookie).filter(Boolean)).size, 3);
+        assert.equal(attempts.filter(item => item.cookie === null).length, 1);
         assert.equal(fakes.fakeCalls.filter(call => call.op === 'failure').length, 0);
 
         const keyA = api._getCompositeKey('LIVEAAAAAA1', 'live-a');

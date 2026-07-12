@@ -1863,7 +1863,8 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
                     nextRetryAt: monitor.nextRetryAt || 0,
                     backoffSeconds: monitor.backoffSeconds || 0,
                     classification: monitor.lastFailureClassification || monitor.lastExtractionFailureClassification || null,
-                    consecutiveFailures: monitor.consecutiveExtractionFailures || 0
+                    consecutiveFailures: monitor.consecutiveExtractionFailures || 0,
+                    source: monitor.lastSuccessfulExtractionSource || null
                 },
                 stalledCount: monitor.stalledCount,
                 lastMediaSequence: monitor.lastMediaSequence,

@@ -13,6 +13,7 @@ const {
     selectHlsStream,
     safeUrlPreview,
     sanitizeYtdlpMessage,
+    shouldAttemptPublicFallback,
     isPotentialHlsFormat
 } = require('../services/ytdlpStreamSelector');
 const {
@@ -148,6 +149,8 @@ class LiveMonitor {
         this.nextRetryAt = 0;
         this.backoffSeconds = 0;
         this.lastSuccessfulCookie = null;
+        this.lastSuccessfulExtractionSource = null;
+        this._lastMetadataExtractionSource = null;
         this.lastExtractionSuccessAt = null;
     }
 
@@ -180,6 +183,7 @@ class LiveMonitor {
         this.nextRetryAt = this.extractionBackoff.nextRetryAt;
         this.backoffSeconds = this.extractionBackoff.backoffSeconds;
         this.lastSuccessfulCookie = this.extractionBackoff.lastSuccessfulCookie;
+        this.lastSuccessfulExtractionSource = this.extractionBackoff.lastSuccessfulExtractionSource;
         this.lastExtractionSuccessAt = this.extractionBackoff.lastExtractionSuccessAt;
     }
 
@@ -196,11 +200,11 @@ class LiveMonitor {
         console.log(`[${this.videoId}] extracao falhou [${this.lastFailureClassification}] falhasConsecutivas=${this.consecutiveExtractionFailures} backoff=${this.backoffSeconds}s proximoRetry=${retryIso}`);
     }
 
-    _recordExtractionSuccess(cookieName) {
-        const recovered = resetExtractionBackoff(this.extractionBackoff, cookieName);
+    _recordExtractionSuccess(cookieName, source = null) {
+        const recovered = resetExtractionBackoff(this.extractionBackoff, cookieName, Date.now(), source);
         this._syncExtractionBackoffFields();
         if (recovered) {
-            console.log(`[${this.videoId}] extracao recuperada com ${this.lastSuccessfulCookie || 'cookie desconhecido'}`);
+            console.log(`[${this.videoId}] extracao recuperada com ${this.lastSuccessfulExtractionSource || this.lastSuccessfulCookie || 'origem desconhecida'}`);
         }
     }
 
@@ -298,8 +302,10 @@ class LiveMonitor {
                 });
             };
 
-            const attempts = cookieAttemptOrder.length > 0 ? cookieAttemptOrder : [null];
-            console.log(`[${this.videoId}] ordem de cookies da rodada: ${attempts.filter(Boolean).join(' -> ') || 'sem cookie'}`);
+            const attempts = cookieAttemptOrder;
+            const failures = [];
+            let publicFallbackFailure = null;
+            console.log(`[${this.videoId}] ordem de cookies da rodada: ${attempts.join(' -> ') || 'sem cookies'}`);
 
             try {
                 for (const cookieName of attempts) {
@@ -310,7 +316,10 @@ class LiveMonitor {
                         }
                         if (cookieName) {
                             this.lastSuccessfulCookie = cookieName;
+                            this.lastSuccessfulExtractionSource = cookieName.replace(/\.txt$/i, '');
+                            this._lastMetadataExtractionSource = this.lastSuccessfulExtractionSource;
                             this.extractionBackoff.lastSuccessfulCookie = cookieName;
+                            this.extractionBackoff.lastSuccessfulExtractionSource = this.lastSuccessfulExtractionSource;
                             this._syncExtractionBackoffFields();
                         }
                         resolve(result.stdout);
@@ -319,6 +328,7 @@ class LiveMonitor {
                         const errorMsg = err.message || '';
                         const classification = classifyYtdlpError(errorMsg);
                         const isCookieAuth = isCookieAuthClassification(classification) || this._isCookieAuthError(errorMsg);
+                        failures.push({ file: cookieName, error: sanitizeYtdlpMessage(errorMsg), classification });
 
                         if (isCookieAuth && this._cookieRotator && cookieName) {
                             console.log(`🔴 Marcando falha para ${cookieName}: ${sanitizeYtdlpMessage(errorMsg).slice(0, 100)}`);
@@ -326,18 +336,50 @@ class LiveMonitor {
                                 cookieFailureAlreadyHandled;
                         }
 
-                        if (isCookieAuth) {
-                            console.log(`${cookieName || 'sem cookie'} falhou: ${classification}`);
-                            continue;
-                        }
-
-                        err.classification = classification;
-                        reject(err);
-                        return;
+                        console.log(`${cookieName || 'sem cookie'} falhou: ${classification} - ${sanitizeYtdlpMessage(errorMsg)}`);
+                        continue;
                     }
                 }
-                const finalError = new Error('Todos os cookies falharam por autenticação/cookie');
-                finalError.classification = CLASSIFICATION.AUTH_COOKIE;
+
+                if (shouldAttemptPublicFallback(failures)) {
+                    try {
+                        console.log(`[${this.videoId}] ordem de extracao final: ${attempts.join(' -> ') || 'sem cookies'} -> public`);
+                        console.log(`[${this.videoId}] tentando extracao publica sem cookie...`);
+                        const result = await execWithCookie(null);
+                        this.lastSuccessfulExtractionSource = 'public';
+                        this._lastMetadataExtractionSource = 'public';
+                        this.extractionBackoff.lastSuccessfulExtractionSource = 'public';
+                        this._syncExtractionBackoffFields();
+                        resolve(result.stdout);
+                        return;
+                    } catch (publicErr) {
+                        const errorMsg = publicErr.message || '';
+                        const classification = publicErr.classification || classifyYtdlpError(errorMsg);
+                        publicFallbackFailure = {
+                            file: 'public',
+                            error: sanitizeYtdlpMessage(errorMsg),
+                            classification
+                        };
+                        console.log(`[${this.videoId}] public falhou: ${classification} - ${publicFallbackFailure.error}`);
+                    }
+                }
+
+                const allFailures = publicFallbackFailure ? failures.concat(publicFallbackFailure) : failures;
+                const onlyCookieAuthFailures = failures.length > 0 &&
+                    failures.every(({ classification }) => isCookieAuthClassification(classification));
+                const publicRestrictedClassification = publicFallbackFailure &&
+                    !shouldAttemptPublicFallback([publicFallbackFailure])
+                    ? publicFallbackFailure.classification
+                    : null;
+                const primaryClassification = allFailures.find(({ classification }) =>
+                    !isCookieAuthClassification(classification)
+                )?.classification || failures[0]?.classification || CLASSIFICATION.UNKNOWN;
+                const finalClassification = publicRestrictedClassification ||
+                    (onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification);
+                const finalError = new Error(publicFallbackFailure
+                    ? `Todos os cookies e fallback publico falharam: ${finalClassification}`
+                    : `Todos os cookies falharam: ${finalClassification}`);
+                finalError.classification = finalClassification;
                 if (cookieFailureAlreadyHandled) {
                     finalError.cookieFailureAlreadyHandled = true;
                 }
@@ -354,6 +396,7 @@ class LiveMonitor {
             console.log(`[${this.videoId}] 📦 Usando cache de metadados (${((agora - this._metadataCacheTime)/1000).toFixed(1)}s)`);
             return { success: true, metadata: this._cachedMetadata };
         }
+        this._lastMetadataExtractionSource = null;
         let cookiePath = null;
         try {
             cookiePath = this.getCookiePath();
@@ -645,7 +688,7 @@ class LiveMonitor {
                 selectionError.classification = this.lastExtractionFailureClassification || CLASSIFICATION.INVALID_HLS;
                 throw selectionError;
             }
-            this._recordExtractionSuccess(this.lastSuccessfulCookie);
+            this._recordExtractionSuccess(this.lastSuccessfulCookie, this._lastMetadataExtractionSource || this.lastSuccessfulExtractionSource);
             if (newUrl !== this.m3u8Url) {
                 this.m3u8Url = newUrl;
                 console.log(`[${this.videoId}] ✅ URL HLS forçada: ${safeUrlPreview(newUrl)}`);
@@ -753,7 +796,7 @@ class LiveMonitor {
             this.applyDerivedState();
             return;
         }
-        this._recordExtractionSuccess(this.lastSuccessfulCookie);
+        this._recordExtractionSuccess(this.lastSuccessfulCookie, this._lastMetadataExtractionSource || this.lastSuccessfulExtractionSource);
         this.urlFails = 0;
         if (newUrl !== this.m3u8Url) {
             this.m3u8Url = newUrl;

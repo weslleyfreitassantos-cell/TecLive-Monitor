@@ -29,7 +29,10 @@ const TERMINAL_AVAILABILITY_CLASSIFICATIONS = Object.freeze(new Set([
     'live_ended',
     'video_unavailable',
     'video_private',
-    'video_removed'
+    'video_removed',
+    'age_restricted',
+    'members_only',
+    'geo_restricted'
 ]));
 
 const PERSISTENT_EXTRACTION_FAILURES = 5;
@@ -153,6 +156,7 @@ function classifyMonitorExtraction(monitor, nowMs = Date.now()) {
     }
 
     return makeComponent('ok', 'Extracao sem falha ativa', {
+        source: safeClassification(monitor?.lastSuccessfulExtractionSource || null),
         lastSuccessAt: monitor?.lastExtractionSuccessAt || null
     });
 }

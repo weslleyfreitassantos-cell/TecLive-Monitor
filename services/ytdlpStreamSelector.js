@@ -8,6 +8,9 @@ const CLASSIFICATION = Object.freeze({
     VIDEO_PRIVATE: 'video_private',
     VIDEO_REMOVED: 'video_removed',
     VIDEO_UNAVAILABLE: 'video_unavailable',
+    AGE_RESTRICTED: 'age_restricted',
+    MEMBERS_ONLY: 'members_only',
+    GEO_RESTRICTED: 'geo_restricted',
     RATE_LIMIT: 'rate_limit',
     NETWORK: 'network',
     TIMEOUT: 'timeout',
@@ -28,12 +31,21 @@ function classifyYtdlpError(error) {
     if (/expired stream|stream url expired|url.*expired|http error 403.*expire/i.test(text)) {
         return CLASSIFICATION.EXPIRED_STREAM_URL;
     }
+    if (/age[- ]?restricted|confirm (?:your )?age|inappropriate for some users/i.test(text)) {
+        return CLASSIFICATION.AGE_RESTRICTED;
+    }
+    if (/members[- ]?only|members only|join this channel|sponsor.*only/i.test(text)) {
+        return CLASSIFICATION.MEMBERS_ONLY;
+    }
+    if (/(not available|blocked).*(country|region)|geo.?restricted|geographic|not made available in your country/i.test(text)) {
+        return CLASSIFICATION.GEO_RESTRICTED;
+    }
     if (/(sign in to confirm|sign in to verify|login required|requires authentication|authentication required|cookie file|invalid cookie|invalid cookies|cookies are no longer valid|use --cookies|pass cookies|export cookies|confirm you'?re not a bot|confirm you’re not a bot|not a bot|protect our community)/i.test(text)) {
         return CLASSIFICATION.AUTH_COOKIE;
     }
     if (/timeout|timed out|etimedout/i.test(text)) return CLASSIFICATION.TIMEOUT;
     if (/429|too many requests|rate limit|ratelimit|temporarily blocked/i.test(text)) return CLASSIFICATION.RATE_LIMIT;
-    if (/private video|this video is private|members-only|members only/i.test(text)) return CLASSIFICATION.VIDEO_PRIVATE;
+    if (/private video|this video is private/i.test(text)) return CLASSIFICATION.VIDEO_PRIVATE;
     if (/removed|has been removed|does not exist|deleted/i.test(text)) return CLASSIFICATION.VIDEO_REMOVED;
     if (/live event has ended|premieres in|recording is not available|this live stream recording is not available|was live/i.test(text)) {
         return CLASSIFICATION.LIVE_ENDED;
@@ -61,6 +73,49 @@ function classifyYtdlpError(error) {
 
 function isCookieAuthClassification(classification) {
     return classification === CLASSIFICATION.AUTH_COOKIE;
+}
+
+const PUBLIC_FALLBACK_ALLOWED_CLASSIFICATIONS = Object.freeze(new Set([
+    CLASSIFICATION.NO_FORMATS,
+    CLASSIFICATION.INVALID_HLS,
+    CLASSIFICATION.DASH_ONLY,
+    CLASSIFICATION.PLAYER_RESPONSE_INVALID,
+    CLASSIFICATION.YOUTUBE_CHANGED,
+    CLASSIFICATION.NETWORK,
+    CLASSIFICATION.TIMEOUT,
+    CLASSIFICATION.SERVER_5XX,
+    CLASSIFICATION.UNKNOWN
+]));
+
+const PUBLIC_FALLBACK_BLOCKED_CLASSIFICATIONS = Object.freeze(new Set([
+    CLASSIFICATION.LIVE_ENDED,
+    CLASSIFICATION.VIDEO_PRIVATE,
+    CLASSIFICATION.VIDEO_REMOVED,
+    CLASSIFICATION.VIDEO_UNAVAILABLE,
+    CLASSIFICATION.AGE_RESTRICTED,
+    CLASSIFICATION.MEMBERS_ONLY,
+    CLASSIFICATION.GEO_RESTRICTED
+]));
+
+function getFailureClassification(failure) {
+    if (!failure) return null;
+    if (typeof failure === 'string') return failure;
+    return failure.classification || null;
+}
+
+function shouldAttemptPublicFallback(failures) {
+    const classifications = (failures || [])
+        .map(getFailureClassification)
+        .filter(Boolean);
+
+    // If no usable cookie exists, a public live may still be extractable.
+    if (classifications.length === 0) return true;
+
+    if (classifications.some(classification => PUBLIC_FALLBACK_BLOCKED_CLASSIFICATIONS.has(classification))) {
+        return false;
+    }
+
+    return classifications.some(classification => PUBLIC_FALLBACK_ALLOWED_CLASSIFICATIONS.has(classification));
 }
 
 function isHlsProtocol(protocol) {
@@ -285,6 +340,7 @@ module.exports = {
     selectHlsStream,
     safeUrlPreview,
     sanitizeYtdlpMessage,
+    shouldAttemptPublicFallback,
     isHlsProtocol,
     isPotentialHlsFormat
 };

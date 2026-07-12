@@ -24,6 +24,12 @@ function resolveCookiePath(cookiesDir, cookieName) {
     return normalized ? path.join(cookiesDir, normalized) : null;
 }
 
+function normalizeExtractionSource(source, cookieName) {
+    if (source === 'public') return 'public';
+    const cookie = normalizeCookieName(source) || normalizeCookieName(cookieName);
+    return cookie ? cookie.replace(/\.txt$/i, '') : null;
+}
+
 function buildCookieAttemptOrder(options = {}) {
     const cookieFiles = (options.cookieFiles || DEFAULT_COOKIE_FILES)
         .map(normalizeCookieName)
@@ -82,7 +88,10 @@ function getBackoffSequence(classification, options = {}) {
         classification === CLASSIFICATION.LIVE_ENDED ||
         classification === CLASSIFICATION.VIDEO_PRIVATE ||
         classification === CLASSIFICATION.VIDEO_UNAVAILABLE ||
-        classification === CLASSIFICATION.VIDEO_REMOVED
+        classification === CLASSIFICATION.VIDEO_REMOVED ||
+        classification === CLASSIFICATION.AGE_RESTRICTED ||
+        classification === CLASSIFICATION.MEMBERS_ONLY ||
+        classification === CLASSIFICATION.GEO_RESTRICTED
     ) {
         const terminalSeconds = positiveNumberOr(options.terminalBackoffSeconds, TERMINAL_BACKOFF_SEQUENCE[0]);
         return [terminalSeconds];
@@ -119,7 +128,7 @@ function applyExtractionFailure(state, classification, nowMs = Date.now(), optio
     return state;
 }
 
-function resetExtractionBackoff(state, cookieName, nowMs = Date.now()) {
+function resetExtractionBackoff(state, cookieName, nowMs = Date.now(), source = null) {
     if (!state) return false;
     const hadFailure = Boolean(
         state.consecutiveExtractionFailures ||
@@ -133,7 +142,11 @@ function resetExtractionBackoff(state, cookieName, nowMs = Date.now()) {
     state.lastFailureClassification = null;
     state.nextRetryAt = 0;
     state.backoffSeconds = 0;
-    state.lastSuccessfulCookie = normalizeCookieName(cookieName) || state.lastSuccessfulCookie || null;
+    const normalizedCookie = normalizeCookieName(cookieName);
+    state.lastSuccessfulCookie = normalizedCookie || state.lastSuccessfulCookie || null;
+    state.lastSuccessfulExtractionSource = normalizeExtractionSource(source, cookieName) ||
+        state.lastSuccessfulExtractionSource ||
+        normalizeExtractionSource(null, state.lastSuccessfulCookie);
     state.lastExtractionSuccessAt = nowMs;
     state._lastBackoffLogAt = 0;
     state._lastBackoffLogRetryAt = 0;
@@ -168,6 +181,7 @@ function createExtractionBackoffState(seed = {}) {
         nextRetryAt: Number(seed.nextRetryAt) || 0,
         backoffSeconds: Number(seed.backoffSeconds) || 0,
         lastSuccessfulCookie: normalizeCookieName(seed.lastSuccessfulCookie) || null,
+        lastSuccessfulExtractionSource: normalizeExtractionSource(seed.lastSuccessfulExtractionSource, seed.lastSuccessfulCookie),
         lastExtractionSuccessAt: seed.lastExtractionSuccessAt || null,
         _lastBackoffLogAt: 0,
         _lastBackoffLogRetryAt: 0,

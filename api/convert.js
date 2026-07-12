@@ -10,7 +10,8 @@ const {
     isCookieAuthClassification,
     getYtdlpDiagnostics,
     selectHlsStream,
-    sanitizeYtdlpMessage
+    sanitizeYtdlpMessage,
+    shouldAttemptPublicFallback
 } = require('../services/ytdlpStreamSelector');
 const {
     DEFAULT_COOKIE_FILES,
@@ -81,21 +82,22 @@ class ConvertAPI {
         console.log(`[${videoId}] em backoff; proxima tentativa em ${retrySeconds}s (${state.lastFailureClassification})`);
     }
 
-    _recordConvertFailure(key, videoId, classification, now = Date.now()) {
+    _recordConvertFailure(key, videoId, classification, now = Date.now(), scope = 'todos os cookies falharam') {
         const state = this._getExtractionState(key);
         if (!shouldApplyExtractionBackoff(classification)) return state;
         applyExtractionFailure(state, classification || CLASSIFICATION.UNKNOWN, now);
         const retryIso = state.nextRetryAt ? new Date(state.nextRetryAt).toISOString() : 'n/a';
-        console.log(`[${videoId}] todos os cookies falharam [${state.lastFailureClassification}] falhasConsecutivas=${state.consecutiveExtractionFailures} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
+        console.log(`[${videoId}] ${scope} [${state.lastFailureClassification}] falhasConsecutivas=${state.consecutiveExtractionFailures} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
         return state;
     }
 
-    _recordConvertSuccess(key, videoId, cookieName, now = Date.now()) {
+    _recordConvertSuccess(key, videoId, cookieName, source = null, now = Date.now()) {
         const state = this._getExtractionState(key);
-        const recovered = resetExtractionBackoff(state, cookieName, now);
+        const recovered = resetExtractionBackoff(state, cookieName, now, source);
         if (recovered) {
-            console.log(`[${videoId}] extracao recuperada com ${state.lastSuccessfulCookie}`);
+            console.log(`[${videoId}] extracao recuperada com ${state.lastSuccessfulExtractionSource || state.lastSuccessfulCookie || 'origem desconhecida'}`);
         }
+        return state;
     }
 
     _persistMapping(videoId, youtubeUrl, owner, metadata) {
@@ -277,9 +279,11 @@ class ConvertAPI {
         });
         let streamUrl = null;
         let workingCookie = null;
+        let extractionSource = null;
         let streamSelection = null;
         let streamMetadata = null;
         const failedCookies = [];
+        let publicFallbackFailure = null;
 
         console.log(`[${videoId}] ordem de cookies da rodada: ${cookieAttemptOrder.join(' -> ') || 'nenhum cookie disponivel'}`);
         for (const file of cookieAttemptOrder) {
@@ -295,6 +299,7 @@ class ConvertAPI {
                 if (selection.ok) {
                     streamUrl = selection.url;
                     workingCookie = file;
+                    extractionSource = file.replace(/\.txt$/i, '');
                     streamSelection = selection;
                     streamMetadata = ytMetadata;
                     console.log(`Sucesso com ${file}: HLS ${selection.type} (${selection.urlPreview})`);
@@ -323,8 +328,46 @@ class ConvertAPI {
             }
         }
 
+        if (!streamUrl && shouldAttemptPublicFallback(failedCookies)) {
+            const publicArgs = ['--dump-json', '--skip-download', '--no-playlist', youtubeUrl];
+            try {
+                console.log(`[${videoId}] ordem de extracao final: ${cookieAttemptOrder.join(' -> ') || 'sem cookies'} -> public`);
+                console.log(`[${videoId}] tentando extracao publica sem cookie...`);
+                const stdout = await this._runYtdlp(publicArgs, 60000);
+                const ytMetadata = JSON.parse(stdout);
+                const diagnostics = getYtdlpDiagnostics(ytMetadata);
+                console.log(`[${videoId}] yt-dlp JSON (public): formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
+                const selection = selectHlsStream(ytMetadata);
+                if (selection.ok) {
+                    streamUrl = selection.url;
+                    workingCookie = null;
+                    extractionSource = 'public';
+                    streamSelection = selection;
+                    streamMetadata = ytMetadata;
+                    console.log(`[${videoId}] sucesso publico: HLS ${selection.type} (${selection.urlPreview})`);
+                } else {
+                    const publicError = new Error(`Falha de extracao publica: ${selection.classification}`);
+                    publicError.classification = selection.classification;
+                    publicError.diagnostics = selection.diagnostics;
+                    throw publicError;
+                }
+            } catch (error) {
+                const classification = error.classification || classifyYtdlpError(error.message);
+                const safeErrorMessage = sanitizeYtdlpMessage(error.message);
+                console.log(`[${videoId}] public falhou: ${classification} - ${safeErrorMessage}`);
+                if (error.diagnostics) {
+                    console.log(`[${videoId}] Diagnostico seguro (public): ${JSON.stringify(error.diagnostics)}`);
+                }
+                publicFallbackFailure = { file: 'public', error: safeErrorMessage, classification };
+            }
+        }
+
         // Se nenhum cookie funcionou
-        if (!streamUrl || !workingCookie) {
+        if (!streamUrl) {
+            const allFailures = publicFallbackFailure ? failedCookies.concat(publicFallbackFailure) : failedCookies;
+            if (publicFallbackFailure) {
+                console.error(`Todos os cookies e fallback publico falharam para ${videoId}`);
+            }
             console.error(`❌ Todos os cookies falharam para ${videoId}`);
             const cookieErrorCount = this.cookieRotator
                 ? failedCookies.filter(({ error, classification }) =>
@@ -333,17 +376,28 @@ class ConvertAPI {
                 : 0;
             const onlyCookieAuthFailures = failedCookies.length > 0 &&
                 cookieErrorCount === failedCookies.length;
-            const primaryClassification = failedCookies.find(({ classification }) =>
+            const publicRestrictedClassification = publicFallbackFailure &&
+                !shouldAttemptPublicFallback([publicFallbackFailure])
+                ? publicFallbackFailure.classification
+                : null;
+            const primaryClassification = allFailures.find(({ classification }) =>
                 !isCookieAuthClassification(classification)
             )?.classification || failedCookies[0]?.classification || CLASSIFICATION.UNKNOWN;
-            const responseClassification = onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification;
-            this._recordConvertFailure(key, videoId, responseClassification);
+            const responseClassification = publicRestrictedClassification ||
+                (onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification);
+            const failureScope = publicFallbackFailure
+                ? 'todos os cookies e fallback publico falharam'
+                : 'todos os cookies falharam';
+            this._recordConvertFailure(key, videoId, responseClassification, Date.now(), failureScope);
             return {
                 success: false,
                 videoId: videoId,
-                error: 'Todos os cookies falharam para obter a stream',
+                error: publicFallbackFailure
+                    ? 'Todos os cookies e fallback publico falharam para obter a stream'
+                    : 'Todos os cookies falharam para obter a stream',
                 classification: responseClassification,
                 failedCookies,
+                publicFallback: publicFallbackFailure,
                 metadata: metadata,
                 message: onlyCookieAuthFailures
                     ? 'Falha de autenticacao/cookie. Verifique os cookies.'
@@ -351,11 +405,14 @@ class ConvertAPI {
             };
         }
 
-        if (this.cookieRotator) {
+        if (this.cookieRotator && workingCookie) {
             console.log(`✅ Cookie ${workingCookie} funcionou para obtenção da stream.`);
             this.cookieRotator.markSuccess(workingCookie);
         }
-        this._recordConvertSuccess(key, videoId, workingCookie);
+        if (extractionSource === 'public') {
+            console.log(`[${videoId}] extracao concluida via public; estado dos cookies preservado.`);
+        }
+        const successState = this._recordConvertSuccess(key, videoId, workingCookie, extractionSource);
 
         console.log(`✅ Stream capturada para ${videoId}:${owner}`);
         const LiveMonitor = require('../monitor/liveMonitor');
@@ -375,8 +432,12 @@ class ConvertAPI {
         monitor.owner = owner;
         monitor.metadata = metadata || streamMetadata;
         monitor.lastSuccessfulCookie = workingCookie;
+        monitor.lastSuccessfulExtractionSource = extractionSource;
+        monitor.lastExtractionSuccessAt = successState.lastExtractionSuccessAt;
         if (monitor.extractionBackoff) {
-            monitor.extractionBackoff.lastSuccessfulCookie = workingCookie;
+            if (workingCookie) monitor.extractionBackoff.lastSuccessfulCookie = workingCookie;
+            monitor.extractionBackoff.lastSuccessfulExtractionSource = extractionSource;
+            monitor.extractionBackoff.lastExtractionSuccessAt = successState.lastExtractionSuccessAt;
             if (typeof monitor._syncExtractionBackoffFields === 'function') {
                 monitor._syncExtractionBackoffFields();
             }
@@ -414,6 +475,7 @@ class ConvertAPI {
             isLive: true,
             cached: false,
             metadata: metadata,
+            extractionSource,
             message: 'Live detectada com sucesso'
         };
     }
