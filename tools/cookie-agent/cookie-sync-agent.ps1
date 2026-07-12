@@ -37,6 +37,14 @@ function ConvertTo-ProcessArgumentString {
     return ($quoted -join ' ')
 }
 
+function Get-WindowsPowerShellPath {
+    $candidate = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    $command = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw 'powershell.exe nao encontrado para executar Cookie Sync.'
+}
+
 function Get-Config {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -414,7 +422,7 @@ function Invoke-CookieSync {
         throw "Cookie invalido: $Cookie"
     }
     Assert-CookieSyncToolsAvailable
-    $psExe = (Get-Process -Id $PID).Path
+    $psExe = Get-WindowsPowerShellPath
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, '-Cookie', $Cookie)
     if ($VerboseOutput) { $arguments += '-VerboseOutput' }
 

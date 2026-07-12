@@ -11,6 +11,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module ScheduledTasks -ErrorAction Stop
+. (Join-Path $PSScriptRoot 'cookie-agent-common.ps1')
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $PSScriptRoot 'cookie-agent.config.json'
@@ -30,9 +31,23 @@ function Get-ScheduledTaskRunLevel {
 }
 
 $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$watchdogScript = Join-Path $PSScriptRoot 'cookie-agent-watchdog.ps1'
-$pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
-$ps = if ($pwsh) { $pwsh.Source } else { (Get-Command powershell -ErrorAction Stop).Source }
+$watchdogLauncher = Join-Path $PSScriptRoot 'run-cookie-watchdog-hidden.vbs'
+$wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) {
+    $wscriptCommand = Get-Command wscript.exe -ErrorAction SilentlyContinue
+    if ($wscriptCommand) { $wscript = $wscriptCommand.Source }
+}
+if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) {
+    throw 'wscript.exe nao encontrado. O launcher sem console exige Windows Script Host.'
+}
+if (-not (Test-Path -LiteralPath $watchdogLauncher -PathType Leaf)) {
+    throw "Launcher VBS ausente: $watchdogLauncher"
+}
+$hiddenLauncher = if ($WhatIfPreference) {
+    Get-CookieAgentHiddenLauncherPath
+} else {
+    Install-CookieAgentHiddenLauncher -ScriptRoot $PSScriptRoot
+}
 
 if ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) -and -not $Force) {
     throw "Tarefa ja existe. Use -Force para substituir: $TaskName"
@@ -41,16 +56,21 @@ if ($Force -and $PSCmdlet.ShouldProcess($TaskName, 'remover tarefa watchdog exis
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
-$arguments = @(
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-WindowStyle', 'Hidden',
-    '-File', "`"$watchdogScript`"",
-    '-TaskName', "`"$AgentTaskName`"",
-    '-ConfigPath', "`"$ConfigPath`""
-) -join ' '
+function Join-TaskActionArguments {
+    param([string[]]$Arguments)
+    return (@($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -notmatch '[\s"]') {
+            $value
+        } else {
+            '"' + ($value -replace '"', '\"') + '"'
+        }
+    }) -join ' ')
+}
 
-$action = New-ScheduledTaskAction -Execute $ps -Argument $arguments -WorkingDirectory $projectRoot
+$arguments = Join-TaskActionArguments @('//B', '//NoLogo', $watchdogLauncher, $hiddenLauncher, $AgentTaskName, $ConfigPath, $projectRoot)
+
+$action = New-ScheduledTaskAction -Execute $wscript -Argument $arguments -WorkingDirectory $projectRoot
 $triggerLogon = New-ScheduledTaskTrigger -AtLogOn
 $triggerRepeat = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
 $settings = New-ScheduledTaskSettingsSet `
@@ -73,7 +93,9 @@ if ($PSCmdlet.ShouldProcess($TaskName, "criar tarefa watchdog com RunLevel $runL
     Write-Host "Tarefa validada: $TaskName"
 }
 
-Write-Host "Comando: $ps $arguments"
+Write-Host "Execute: $wscript"
+Write-Host "Launcher: $(Split-Path $watchdogLauncher -Leaf)"
+Write-Host "HiddenProcessLauncher: $(Split-Path $hiddenLauncher -Leaf)"
 Write-Host "RunLevel: $runLevel"
 Write-Host "MultipleInstances: $($settings.MultipleInstances)"
 Write-Host "RestartCount: $($settings.RestartCount)"

@@ -13,6 +13,9 @@ $install = Join-Path $root 'tools\cookie-agent\install-agent-task.ps1'
 $uninstall = Join-Path $root 'tools\cookie-agent\uninstall-agent-task.ps1'
 $installWatchdog = Join-Path $root 'tools\cookie-agent\install-watchdog-task.ps1'
 $uninstallWatchdog = Join-Path $root 'tools\cookie-agent\uninstall-watchdog-task.ps1'
+$agentLauncher = Join-Path $root 'tools\cookie-agent\run-cookie-agent-hidden.vbs'
+$watchdogLauncher = Join-Path $root 'tools\cookie-agent\run-cookie-watchdog-hidden.vbs'
+$hiddenLauncherSource = Join-Path $root 'tools\cookie-agent\hidden-process-launcher.cs'
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -40,6 +43,9 @@ $commonContent = Get-Content -LiteralPath $common -Raw
 $watchdogContent = Get-Content -LiteralPath $watchdog -Raw
 $healthContent = Get-Content -LiteralPath $healthScript -Raw
 $installWatchdogContent = Get-Content -LiteralPath $installWatchdog -Raw
+$agentLauncherContent = Get-Content -LiteralPath $agentLauncher -Raw
+$watchdogLauncherContent = Get-Content -LiteralPath $watchdogLauncher -Raw
+$hiddenLauncherSourceContent = Get-Content -LiteralPath $hiddenLauncherSource -Raw
 Assert-True ($content -notmatch 'Invoke-Expression') 'Invoke-Expression nao deve ser usado'
 Assert-True ($content -match 'Mutex') 'Mutex/lock local ausente'
 Assert-True ($content -match 'Authorization = "Bearer') 'Bearer token header ausente'
@@ -62,6 +68,8 @@ Assert-True ($content -match 'WellKnownSidType') 'Protecao de ACL deve usar SIDs
 Assert-True ($content -match 'LocalSystemSid' -and $content -match 'BuiltinAdministratorsSid') 'Protecao de ACL deve preservar SYSTEM e Administrators'
 Assert-True ($content -match 'SetAccessRuleProtection\(\$true, \$false\)') 'Protecao de ACL deve remover heranca generica'
 Assert-True ($content -match 'Assert-CookieSyncToolsAvailable') 'Checagem de yt-dlp/ssh/scp deve ficar no caminho de job'
+Assert-True ($content -match 'Get-WindowsPowerShellPath') 'Agente deve resolver powershell.exe real para executar Cookie Sync'
+Assert-True ($content -notmatch 'Get-Process -Id \$PID\)\.Path') 'Agente nao deve usar o proprio host como powershell.exe do Cookie Sync'
 Assert-True ($installContent -match 'RunAsAdmin') 'Parametro RunAsAdmin ausente no instalador'
 Assert-True ($installContent -match "'Highest'") 'RunAsAdmin deve usar Highest'
 Assert-True ($installContent -match "'Limited'") 'Padrao deve usar Limited'
@@ -74,11 +82,25 @@ Assert-True ($installContent -match 'Get-CookieAgentTaskHealth') 'Validacao pos-
 Assert-True ($installContent -match 'SupportsShouldProcess') 'Instalador deve suportar WhatIf'
 Assert-True ($installContent -match 'New-ScheduledTaskTrigger\s+-AtLogOn') 'Trigger no logon deve ser mantido'
 Assert-True ($installContent -match '-Hidden') 'Tarefa do agente deve ser criada oculta'
+Assert-True ($installContent -match 'wscript\.exe') 'Instalador do agente deve usar wscript.exe'
+Assert-True ($installContent -match 'run-cookie-agent-hidden\.vbs') 'Instalador do agente deve usar launcher VBS'
+Assert-True ($installContent -match 'Install-CookieAgentHiddenLauncher') 'Instalador do agente deve preparar launcher sem console'
+Assert-True ($installContent -match 'WhatIfPreference') 'WhatIf do agente nao deve compilar launcher real'
+Assert-True ($installContent -match 'New-ScheduledTaskAction\s+-Execute\s+\$wscript') 'Acao do agente deve executar wscript.exe'
+Assert-True ($installContent -notmatch 'New-ScheduledTaskAction\s+-Execute\s+\$ps') 'Acao do agente nao deve executar powershell.exe diretamente'
+Assert-True ($installContent -match 'wscript\.exe nao encontrado') 'Instalador deve falhar claramente sem wscript.exe'
 Assert-True ($installContent -notmatch '-Password|LogonType\s+Password') 'Instalador nao deve armazenar senha'
 Assert-True ($uninstallContent -match 'SupportsShouldProcess' -and $uninstallContent -match 'ShouldProcess') 'Uninstall do agente deve suportar WhatIf'
 Assert-True ($commonContent -match 'Win32_Process') 'Health deve verificar processo via Win32_Process'
 Assert-True ($commonContent -match 'CommandLine') 'Health deve validar CommandLine do processo'
 Assert-True ($commonContent -match 'activityRecent') 'Health deve considerar heartbeat ou fila recentes como atividade'
+Assert-True ($commonContent -match 'Install-CookieAgentHiddenLauncher') 'Common deve compilar o launcher sem console'
+Assert-True ($commonContent -match '/target:winexe') 'Launcher nativo deve ser compilado como Windows application'
+Assert-True ($commonContent -match 'Set-CookieAgentSecureAcl') 'Diretorio do helper deve receber ACL segura'
+Assert-True ($commonContent -match 'SetAccessRuleProtection\(\$true, \$false\)') 'ACL do helper deve bloquear heranca'
+Assert-True ($commonContent -match 'sourceHash' -and $commonContent -match 'binaryHash') 'Helper deve validar hash de source e binario'
+Assert-True ($commonContent -match 'tmp\.exe') 'Compilacao do helper deve usar executavel temporario'
+Assert-True ($commonContent -match 'Move-Item .* -Destination \$target -Force') 'Compilacao do helper deve substituir binario so apos sucesso'
 Assert-True ($watchdogContent -match 'Stop-ScheduledTask') 'Watchdog deve tentar Stop-ScheduledTask'
 Assert-True ($watchdogContent -match 'Start-ScheduledTask') 'Watchdog deve tentar Start-ScheduledTask'
 Assert-True ($watchdogContent -match 'install-agent-task\.ps1') 'Watchdog deve recriar via instalador existente'
@@ -105,12 +127,45 @@ Assert-True ($installWatchdogContent -match 'Get-Date\)\.AddMinutes\(1\)') 'Trig
 Assert-True ($installWatchdogContent -match 'New-ScheduledTaskTrigger\s+-AtLogOn') 'Watchdog deve iniciar no logon'
 Assert-True ($installWatchdogContent -match "'Limited'") 'Watchdog deve usar Limited por padrao'
 Assert-True ($installWatchdogContent -match '-Hidden') 'Tarefa do watchdog deve ser criada oculta'
+Assert-True ($installWatchdogContent -match 'wscript\.exe') 'Instalador do watchdog deve usar wscript.exe'
+Assert-True ($installWatchdogContent -match 'run-cookie-watchdog-hidden\.vbs') 'Instalador do watchdog deve usar launcher VBS'
+Assert-True ($installWatchdogContent -match 'Install-CookieAgentHiddenLauncher') 'Instalador do watchdog deve preparar launcher sem console'
+Assert-True ($installWatchdogContent -match 'WhatIfPreference') 'WhatIf do watchdog nao deve compilar launcher real'
+Assert-True ($installWatchdogContent -match 'New-ScheduledTaskAction\s+-Execute\s+\$wscript') 'Acao do watchdog deve executar wscript.exe'
+Assert-True ($installWatchdogContent -notmatch 'New-ScheduledTaskAction\s+-Execute\s+\$ps') 'Acao do watchdog nao deve executar powershell.exe diretamente'
 Assert-True ($installWatchdogContent -notmatch '-RunLevel\s+LeastPrivilege|-Password|LogonType\s+Password') 'Watchdog nao deve usar LeastPrivilege nem senha'
+
+foreach ($launcherContent in @($agentLauncherContent, $watchdogLauncherContent)) {
+    Assert-True ($launcherContent -match 'Option Explicit') 'Launcher VBS deve usar Option Explicit'
+    Assert-True ($launcherContent -match 'WScript\.Shell') 'Launcher VBS deve usar WScript.Shell'
+    Assert-True ($launcherContent -match '\.Run\(command,\s*0,\s*(True|False)\)') 'Launcher VBS deve executar com janela oculta'
+    Assert-True ($launcherContent -match 'QuoteArg') 'Launcher VBS deve escapar argumentos'
+    Assert-True ($launcherContent -match 'launcherPath') 'Launcher VBS deve chamar helper sem console'
+    Assert-True ($launcherContent -notmatch 'cmd\.exe|/c|Authorization|Bearer|token') 'Launcher VBS nao deve usar cmd nem conter token'
+}
+Assert-True ($agentLauncherContent -match '\.Run\(command,\s*0,\s*False\)' -and $agentLauncherContent -match 'WScript\.Quit 0') 'Launcher do agente nao deve aguardar retorno'
+Assert-True ($watchdogLauncherContent -match '\.Run\(command,\s*0,\s*True\)' -and $watchdogLauncherContent -match 'WScript\.Quit exitCode') 'Launcher do watchdog deve propagar exit code'
+Assert-True ($agentLauncherContent -match 'cookie-sync-agent\.ps1') 'Launcher do agente deve chamar cookie-sync-agent.ps1'
+Assert-True ($watchdogLauncherContent -match 'cookie-agent-watchdog\.ps1') 'Launcher do watchdog deve chamar cookie-agent-watchdog.ps1'
+Assert-True ($hiddenLauncherSourceContent -match 'System\.Management\.Automation') 'Launcher nativo deve hospedar Windows PowerShell em processo'
+Assert-True ($hiddenLauncherSourceContent -match 'RunspaceFactory\.CreateRunspace') 'Launcher nativo deve criar runspace sem powershell.exe filho'
+Assert-True ($hiddenLauncherSourceContent -match 'PSHost') 'Launcher nativo deve fornecer host PowerShell'
+Assert-True ($hiddenLauncherSourceContent -match 'SetShouldExit') 'Launcher nativo deve capturar exit code do watchdog'
+Assert-True ($hiddenLauncherSourceContent -match 'LASTEXITCODE') 'Launcher nativo deve capturar exit code de scripts PowerShell'
+Assert-True ($hiddenLauncherSourceContent -match 'cookie-sync-agent\.ps1' -and $hiddenLauncherSourceContent -match 'cookie-agent-watchdog\.ps1') 'Launcher nativo deve permitir apenas scripts esperados'
+Assert-True ($hiddenLauncherSourceContent -match 'Path\.GetExtension\(fullPath\)' -and $hiddenLauncherSourceContent -match '"\.ps1"') 'Launcher nativo deve exigir extensao ps1'
+Assert-True ($hiddenLauncherSourceContent -match 'IsExpectedScriptPath' -and $hiddenLauncherSourceContent -match 'tools", "cookie-agent') 'Launcher nativo deve restringir diretorio do script'
+Assert-True ($hiddenLauncherSourceContent -match 'IsExistingJsonFile') 'Launcher nativo deve validar ConfigPath JSON existente'
+Assert-True ($hiddenLauncherSourceContent -notmatch 'ProcessStartInfo|Process\.Start') 'Launcher nativo nao deve iniciar powershell.exe filho'
+Assert-True ($hiddenLauncherSourceContent -notmatch 'Authorization|Bearer|token|cmd\.exe') 'Launcher nativo nao deve conter token nem cmd'
 
 $now = Get-Date
 $mockConfigPath = 'C:\Agent\cookie-agent.config.json'
 $agentProcess = [pscustomobject]@{ ProcessId = 1234; CommandLine = "powershell -File C:\Agent\cookie-sync-agent.ps1 -ConfigPath $mockConfigPath"; CreationDate = $now.AddMinutes(-2) }
 $otherProcess = [pscustomobject]@{ ProcessId = 9999; CommandLine = 'powershell -NoProfile'; CreationDate = $now }
+$hiddenLauncherMockPath = Get-CookieAgentHiddenLauncherPath
+$hiddenAgentProcess = [pscustomobject]@{ ProcessId = 2222; Name = 'hidden-process-launcher.exe'; CommandLine = "`"$hiddenLauncherMockPath`" `"C:\Agent\cookie-sync-agent.ps1`" -ConfigPath `"$mockConfigPath`""; CreationDate = $now.AddMinutes(-2) }
+$fakeHiddenAgentProcess = [pscustomobject]@{ ProcessId = 3333; Name = 'hidden-process-launcher.exe'; CommandLine = '"C:\Temp\hidden-process-launcher.exe" "C:\Agent\cookie-sync-agent.ps1" -ConfigPath "C:\Agent\cookie-agent.config.json"'; CreationDate = $now.AddMinutes(-2) }
 $runningTask = [pscustomobject]@{ State = 'Running'; Principal = [pscustomobject]@{ RunLevel = 'Limited' }; Settings = [pscustomobject]@{ WakeToRun = $false } }
 $readyTask = [pscustomobject]@{ State = 'Ready'; Principal = [pscustomobject]@{ RunLevel = 'Limited' }; Settings = [pscustomobject]@{ WakeToRun = $false } }
 $queuedTask = [pscustomobject]@{ State = 'Queued'; Principal = [pscustomobject]@{ RunLevel = 'Limited' }; Settings = [pscustomobject]@{ WakeToRun = $false } }
@@ -190,6 +245,50 @@ Assert-True ($emptyProcessList -eq $false) 'Lista mock vazia nao deve consultar 
 
 $redacted = Redact-CookieAgentText 'Authorization: Bearer secret-token token:abc C:\Users\Weslley\secret.txt /var/www/livemonitor/app.js # Netscape HTTP Cookie File content'
 Assert-True ($redacted -notmatch 'secret-token|abc|Netscape|C:\\Users|/var/www') 'Redacao de dados sensiveis falhou'
+
+$hiddenFreshState = @{ pid = 2222; lastHeartbeatAt = $now.AddSeconds(-20).ToString('o'); lastQueueCheckAt = $now.AddSeconds(-10).ToString('o') }
+$hiddenReady = Get-CookieAgentTaskHealth -TaskName 'mock' -ConfigPath $mockConfigPath -MockTask $readyTask -MockTaskInfo $okInfo -MockProcesses @($hiddenAgentProcess) -MockRuntimeState $hiddenFreshState -Now $now
+Assert-True ($hiddenReady.healthy -eq $true) 'Hidden launcher validado deve ser OK mesmo com task Ready'
+Assert-True ($hiddenReady.processName -eq 'hidden-process-launcher.exe') 'Health deve reportar o processo launcher'
+$fakeHiddenAccepted = Test-CookieAgentProcessMatches -Process $fakeHiddenAgentProcess -ConfigPath $mockConfigPath
+Assert-True ($fakeHiddenAccepted -eq $false) 'Launcher com mesmo nome em caminho nao esperado nao deve ser aceito'
+
+$hiddenTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie-hidden-launcher-test-" + [guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $hiddenTestRoot | Out-Null
+    $testHiddenLauncherPath = Join-Path $hiddenTestRoot 'hidden-process-launcher.exe'
+
+    $missingSourceMessage = $null
+    try {
+        Install-CookieAgentHiddenLauncher -ScriptRoot (Join-Path $hiddenTestRoot 'missing-source') -OutputPath $testHiddenLauncherPath
+    } catch {
+        $missingSourceMessage = $_.Exception.Message
+    }
+    Assert-True ($missingSourceMessage -match 'Codigo-fonte do launcher sem console ausente') 'Source C# ausente deve falhar claramente'
+
+    $sourceRoot = Join-Path $hiddenTestRoot 'source'
+    New-Item -ItemType Directory -Path $sourceRoot | Out-Null
+    'this is not valid csharp' | Set-Content -LiteralPath (Join-Path $sourceRoot 'hidden-process-launcher.cs') -Encoding ASCII
+    'previous binary' | Set-Content -LiteralPath $testHiddenLauncherPath -Encoding ASCII
+    $previousHash = Get-CookieAgentFileHash -Path $testHiddenLauncherPath
+    $compileFailMessage = $null
+    try {
+        Install-CookieAgentHiddenLauncher -ScriptRoot $sourceRoot -OutputPath $testHiddenLauncherPath
+    } catch {
+        $compileFailMessage = $_.Exception.Message
+    }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($compileFailMessage)) 'Falha de compilacao deve ser reportada'
+    Assert-True ((Get-CookieAgentFileHash -Path $testHiddenLauncherPath) -eq $previousHash) 'Falha de compilacao deve preservar binario anterior'
+    Assert-True ((Test-CookieAgentHiddenLauncherCurrent -Source (Join-Path $sourceRoot 'hidden-process-launcher.cs') -LauncherPath $testHiddenLauncherPath) -eq $false) 'Helper corrompido ou sem metadata nao deve ser considerado atual'
+
+    Protect-CookieAgentHiddenLauncherPath -LauncherPath $testHiddenLauncherPath
+    $acl = Get-Acl -LiteralPath $hiddenTestRoot
+    Assert-True ($acl.AreAccessRulesProtected -eq $true) 'Diretorio do helper deve bloquear heranca'
+    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+    Assert-True (@($rules | Where-Object { $_.IdentityReference.Value -eq 'S-1-1-0' }).Count -eq 0) 'Diretorio do helper nao deve permitir Everyone'
+} finally {
+    Remove-Item -LiteralPath $hiddenTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 function Import-AgentFunctionDefinitions {
     param([string]$Path)
@@ -302,7 +401,7 @@ try {
     Remove-Item -LiteralPath $invalidStatePath -Force -ErrorAction SilentlyContinue
 }
 
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie-agent-test-" + [guid]::NewGuid().ToString('N'))
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cookie agent test " + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 $oldRuntimeStatePath = $env:COOKIE_AGENT_RUNTIME_STATE_PATH
 $oldWatchdogStatePath = $env:COOKIE_AGENT_WATCHDOG_STATE_PATH
@@ -324,6 +423,10 @@ try {
     $watchdogInstall = (& $installWatchdog -TaskName $watchdogTaskName -ConfigPath $installConfig -WhatIf *>&1) -join "`n"
     $watchdogUninstall = (& $uninstallWatchdog -TaskName $watchdogTaskName -WhatIf *>&1) -join "`n"
     Assert-OutputMatch $defaultInstall 'RunLevel:\s+Limited' 'Padrao do instalador deve usar Limited'
+    Assert-OutputMatch $defaultInstall 'Execute:\s+.*wscript\.exe' 'Acao do agente deve usar wscript.exe'
+    Assert-OutputMatch $defaultInstall 'Launcher:\s+run-cookie-agent-hidden\.vbs' 'Instalador do agente deve reportar launcher VBS'
+    Assert-OutputMatch $defaultInstall 'HiddenProcessLauncher:\s+hidden-process-launcher\.exe' 'Instalador do agente deve reportar helper sem console'
+    Assert-True ($defaultInstall -notmatch 'Execute:\s+.*powershell\.exe') 'Acao do agente nao deve executar powershell.exe diretamente'
     Assert-OutputMatch $adminInstall 'RunLevel:\s+Highest' 'RunAsAdmin deve usar Highest'
     Assert-True (($defaultInstall + $adminInstall + $wakeInstall) -notmatch 'RunLevel:\s+LeastPrivilege') 'Instalador nunca deve usar LeastPrivilege'
     Assert-OutputMatch $defaultInstall 'MultipleInstances:\s+IgnoreNew' 'MultipleInstances deve ser IgnoreNew'
@@ -339,6 +442,10 @@ try {
     Assert-OutputMatch $defaultInstall 'WakeToRun:\s+False' 'WakeToRun padrao deve ser False'
     Assert-OutputMatch $wakeInstall 'WakeToRun:\s+True' 'WakeToRun explicito deve ser True'
     Assert-OutputMatch $watchdogInstall 'RunLevel:\s+Limited' 'Watchdog deve usar Limited por padrao'
+    Assert-OutputMatch $watchdogInstall 'Execute:\s+.*wscript\.exe' 'Acao do watchdog deve usar wscript.exe'
+    Assert-OutputMatch $watchdogInstall 'Launcher:\s+run-cookie-watchdog-hidden\.vbs' 'Instalador do watchdog deve reportar launcher VBS'
+    Assert-OutputMatch $watchdogInstall 'HiddenProcessLauncher:\s+hidden-process-launcher\.exe' 'Instalador do watchdog deve reportar helper sem console'
+    Assert-True ($watchdogInstall -notmatch 'Execute:\s+.*powershell\.exe') 'Acao do watchdog nao deve executar powershell.exe diretamente'
     Assert-OutputMatch $watchdogInstall 'ExecutionTimeLimit:\s+PT2M' 'Watchdog deve limitar execucao a 2 minutos'
     Assert-OutputMatch $watchdogInstall 'Hidden:\s+True' 'Tarefa do watchdog deve ser Hidden=True'
     Assert-OutputMatch $watchdogInstall 'WakeToRun:\s+False' 'Watchdog WakeToRun padrao deve ser False'

@@ -84,6 +84,167 @@ function Get-CookieAgentRuntimeStatePath {
     return (Join-Path $ScriptRoot 'agent-runtime-state.json')
 }
 
+function Get-CookieAgentHiddenLauncherPath {
+    $base = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'TecLive\CookieAgent'
+    return (Join-Path $base 'hidden-process-launcher.exe')
+}
+
+function Get-CookieAgentHiddenLauncherMetadataPath {
+    param([string]$LauncherPath)
+    $launcherPath = if ([string]::IsNullOrWhiteSpace($LauncherPath)) { Get-CookieAgentHiddenLauncherPath } else { $LauncherPath }
+    return "$launcherPath.meta.json"
+}
+
+function Get-CookieAgentFileHash {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Get-CookieAgentSid {
+    param([System.Security.Principal.WellKnownSidType]$Type)
+    return [System.Security.Principal.SecurityIdentifier]::new($Type, $null)
+}
+
+function Set-CookieAgentSecureAcl {
+    param(
+        [string]$Path,
+        [switch]$Directory
+    )
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $system = Get-CookieAgentSid ([System.Security.Principal.WellKnownSidType]::LocalSystemSid)
+    $admins = Get-CookieAgentSid ([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid)
+
+    if ($Directory) {
+        $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+    } else {
+        $acl = [System.Security.AccessControl.FileSecurity]::new()
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+    }
+    $propagation = [System.Security.AccessControl.PropagationFlags]::None
+    $rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+    $type = [System.Security.AccessControl.AccessControlType]::Allow
+
+    foreach ($sid in @($currentUser, $system, $admins)) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, $rights, $inheritance, $propagation, $type)
+        $acl.AddAccessRule($rule)
+    }
+    $acl.SetAccessRuleProtection($true, $false)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Protect-CookieAgentHiddenLauncherPath {
+    param([string]$LauncherPath)
+    $launcherPath = if ([string]::IsNullOrWhiteSpace($LauncherPath)) { Get-CookieAgentHiddenLauncherPath } else { $LauncherPath }
+    $dir = Split-Path $launcherPath -Parent
+    if (Test-Path -LiteralPath $dir -PathType Container) {
+        Set-CookieAgentSecureAcl -Path $dir -Directory
+    }
+    foreach ($path in @($launcherPath, (Get-CookieAgentHiddenLauncherMetadataPath -LauncherPath $launcherPath))) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Set-CookieAgentSecureAcl -Path $path
+        }
+    }
+}
+
+function Test-CookieAgentHiddenLauncherCurrent {
+    param([string]$Source, [string]$LauncherPath)
+    $target = if ([string]::IsNullOrWhiteSpace($LauncherPath)) { Get-CookieAgentHiddenLauncherPath } else { $LauncherPath }
+    $metadataPath = Get-CookieAgentHiddenLauncherMetadataPath -LauncherPath $target
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { return $false }
+    $metadata = Read-CookieAgentJsonFile -Path $metadataPath
+    if ($metadata.ContainsKey('invalidJson') -and $metadata.invalidJson) { return $false }
+
+    $sourceHash = Get-CookieAgentFileHash -Path $Source
+    $binaryHash = Get-CookieAgentFileHash -Path $target
+    if ([string]::IsNullOrWhiteSpace($sourceHash) -or [string]::IsNullOrWhiteSpace($binaryHash)) { return $false }
+    if ([string]$metadata.sourceHash -ne $sourceHash) { return $false }
+    if ([string]$metadata.binaryHash -ne $binaryHash) { return $false }
+    return $true
+}
+
+function Get-CookieAgentCSharpCompilerPath {
+    $candidates = @(
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    $command = Get-Command csc.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function Get-CookieAgentPowerShellAutomationPath {
+    try {
+        $assemblyPath = ([System.Management.Automation.PSObject].Assembly.Location)
+        if (Test-Path -LiteralPath $assemblyPath -PathType Leaf) { return $assemblyPath }
+    } catch {}
+    $candidates = @(
+        (Join-Path $env:WINDIR 'Microsoft.NET\assembly\GAC_MSIL\System.Management.Automation\v4.0_3.0.0.0__31bf3856ad364e35\System.Management.Automation.dll'),
+        (Join-Path $env:WINDIR 'assembly\GAC_MSIL\System.Management.Automation\1.0.0.0__31bf3856ad364e35\System.Management.Automation.dll')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+function Install-CookieAgentHiddenLauncher {
+    param([string]$ScriptRoot, [string]$OutputPath)
+
+    $source = Join-Path $ScriptRoot 'hidden-process-launcher.cs'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Codigo-fonte do launcher sem console ausente: $source"
+    }
+
+    $target = if ([string]::IsNullOrWhiteSpace($OutputPath)) { Get-CookieAgentHiddenLauncherPath } else { $OutputPath }
+    $targetDir = Split-Path $target -Parent
+    if (-not (Test-Path -LiteralPath $targetDir)) {
+        [void](New-Item -ItemType Directory -Path $targetDir -Force)
+    }
+    Protect-CookieAgentHiddenLauncherPath -LauncherPath $target
+
+    if (Test-CookieAgentHiddenLauncherCurrent -Source $source -LauncherPath $target) {
+        Protect-CookieAgentHiddenLauncherPath -LauncherPath $target
+        return $target
+    }
+
+    $compiler = Get-CookieAgentCSharpCompilerPath
+    if ([string]::IsNullOrWhiteSpace($compiler)) {
+        throw 'Compilador C# nao encontrado. O launcher sem console exige .NET Framework csc.exe.'
+    }
+    $automation = Get-CookieAgentPowerShellAutomationPath
+    if ([string]::IsNullOrWhiteSpace($automation)) {
+        throw 'System.Management.Automation.dll nao encontrado. O launcher sem console exige Windows PowerShell 5.1.'
+    }
+
+    $tmp = Join-Path $targetDir ('.hidden-process-launcher.{0}.{1}.tmp.exe' -f $PID, [guid]::NewGuid().ToString('N'))
+    try {
+        $output = & $compiler @('/nologo', '/target:winexe', '/optimize+', "/reference:$automation", "/out:$tmp", $source) 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp -PathType Leaf)) {
+            throw "Falha ao compilar launcher sem console: $($output -join ' ')"
+        }
+        Move-Item -LiteralPath $tmp -Destination $target -Force
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        Protect-CookieAgentHiddenLauncherPath -LauncherPath $target
+        throw
+    }
+    $metadata = @{
+        sourceHash = Get-CookieAgentFileHash -Path $source
+        binaryHash = Get-CookieAgentFileHash -Path $target
+        builtAt = (Get-Date).ToString('o')
+        sourceName = (Split-Path $source -Leaf)
+    }
+    Save-CookieAgentJsonAtomic -Path (Get-CookieAgentHiddenLauncherMetadataPath -LauncherPath $target) -Data $metadata
+    Protect-CookieAgentHiddenLauncherPath -LauncherPath $target
+    return $target
+}
+
 function Update-CookieAgentRuntimeState {
     param([string]$Path, [hashtable]$Patch)
     $state = Read-CookieAgentJsonFile -Path $Path
@@ -127,6 +288,21 @@ function Test-CookieAgentProcessMatches {
     if (-not $Process) { return $false }
     $cmd = [string]$Process.CommandLine
     if ([string]::IsNullOrWhiteSpace($cmd)) { return $false }
+    $processName = if ($Process.PSObject.Properties['Name']) { [string]$Process.Name } else { '' }
+    if ($processName -eq 'hidden-process-launcher.exe') {
+        $launcherPath = Get-CookieAgentHiddenLauncherPath
+        $resolvedLauncher = Resolve-Path -LiteralPath $launcherPath -ErrorAction SilentlyContinue
+        $launcherCandidates = @($launcherPath)
+        if ($resolvedLauncher) { $launcherCandidates += $resolvedLauncher.Path }
+        $launcherMatched = $false
+        foreach ($candidate in $launcherCandidates) {
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and $cmd -match [regex]::Escape($candidate)) {
+                $launcherMatched = $true
+                break
+            }
+        }
+        if (-not $launcherMatched) { return $false }
+    }
     if ($cmd -notmatch [regex]::Escape($AgentScriptName)) { return $false }
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath) -and $cmd -match '(?i)-ConfigPath') {
         $resolved = Resolve-Path -LiteralPath $ConfigPath -ErrorAction SilentlyContinue
@@ -152,11 +328,11 @@ function Get-CookieAgentProcessList {
     $items = @()
     try {
         $items = Get-CimInstance Win32_Process -ErrorAction Stop |
-            Where-Object { $_.Name -in @('powershell.exe', 'pwsh.exe') }
+            Where-Object { $_.Name -in @('powershell.exe', 'pwsh.exe', 'hidden-process-launcher.exe') }
     } catch {
         try {
             $items = Get-WmiObject Win32_Process -ErrorAction Stop |
-                Where-Object { $_.Name -in @('powershell.exe', 'pwsh.exe') }
+                Where-Object { $_.Name -in @('powershell.exe', 'pwsh.exe', 'hidden-process-launcher.exe') }
         } catch {
             return @()
         }
@@ -166,6 +342,7 @@ function Get-CookieAgentProcessList {
     } | ForEach-Object {
         [pscustomobject]@{
             ProcessId = [int]$_.ProcessId
+            Name = [string]$_.Name
             CommandLine = [string]$_.CommandLine
             CreationDate = $_.CreationDate
         }
@@ -238,6 +415,8 @@ function Get-CookieAgentTaskHealth {
     $processArray = @($processes)
     $process = if ($processArray.Count -gt 0) { $processArray[0] } else { $null }
     $processFound = [bool]$process
+    $processName = if ($process -and $process.PSObject.Properties['Name']) { [string]$process.Name } elseif ($process -and $process.PSObject.Properties['processName']) { [string]$process.processName } else { '' }
+    $processIsDetachedLauncher = ($processName -eq 'hidden-process-launcher.exe')
     $runtimeHeartbeatAt = if ($runtime.ContainsKey('lastHeartbeatAt')) { $runtime.lastHeartbeatAt } else { $null }
     $runtimeQueueCheckAt = if ($runtime.ContainsKey('lastQueueCheckAt')) { $runtime.lastQueueCheckAt } else { $null }
     $runtimePid = if ($runtime.ContainsKey('pid')) { $runtime.pid } else { $null }
@@ -258,7 +437,8 @@ function Get-CookieAgentTaskHealth {
     if ($null -ne $queueAge) { $activityAgeCandidates += [int]$queueAge }
     $activityAge = if ($activityAgeCandidates.Count -gt 0) { [int](($activityAgeCandidates | Measure-Object -Minimum).Minimum) } else { $null }
     $activityRecent = ($heartbeatRecent -or $queueRecent)
-    $healthy = ($taskState -eq 'Running' -and $processFound -and $activityRecent -and -not $statePidDead)
+    $taskEffectivelyRunning = ($taskState -eq 'Running' -or ($taskState -eq 'Ready' -and $processIsDetachedLauncher))
+    $healthy = ($taskEffectivelyRunning -and $processFound -and $activityRecent -and -not $statePidDead)
     $degraded = $false
     $reason = 'ok'
     $recommended = 'none'
@@ -307,6 +487,7 @@ function Get-CookieAgentTaskHealth {
         lastTaskResultHex = $lastTaskResultHex
         processFound = $processFound
         processId = if ($process) { [int]$process.ProcessId } else { $null }
+        processName = $processName
         processStartTime = if ($process) { $process.CreationDate } else { $null }
         runtimeState = $runtime
         runtimeStateInvalid = [bool]($runtime.ContainsKey('invalidJson') -and $runtime.invalidJson)

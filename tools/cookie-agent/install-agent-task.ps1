@@ -23,12 +23,22 @@ if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
 }
 
 $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$agentScript = Join-Path $PSScriptRoot 'cookie-sync-agent.ps1'
-$pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
-if ($pwsh) {
-    $ps = $pwsh.Source
+$agentLauncher = Join-Path $PSScriptRoot 'run-cookie-agent-hidden.vbs'
+$wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) {
+    $wscriptCommand = Get-Command wscript.exe -ErrorAction SilentlyContinue
+    if ($wscriptCommand) { $wscript = $wscriptCommand.Source }
+}
+if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) {
+    throw 'wscript.exe nao encontrado. O launcher sem console exige Windows Script Host.'
+}
+if (-not (Test-Path -LiteralPath $agentLauncher -PathType Leaf)) {
+    throw "Launcher VBS ausente: $agentLauncher"
+}
+$hiddenLauncher = if ($WhatIfPreference) {
+    Get-CookieAgentHiddenLauncherPath
 } else {
-    $ps = (Get-Command powershell -ErrorAction Stop).Source
+    Install-CookieAgentHiddenLauncher -ScriptRoot $PSScriptRoot
 }
 
 if ((Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) -and -not $Force) {
@@ -54,15 +64,21 @@ function Get-ScheduledTaskRunLevel {
     return $desired
 }
 
-$arguments = @(
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-WindowStyle', 'Hidden',
-    '-File', "`"$agentScript`"",
-    '-ConfigPath', "`"$ConfigPath`""
-) -join ' '
+function Join-TaskActionArguments {
+    param([string[]]$Arguments)
+    return (@($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -notmatch '[\s"]') {
+            $value
+        } else {
+            '"' + ($value -replace '"', '\"') + '"'
+        }
+    }) -join ' ')
+}
 
-$action = New-ScheduledTaskAction -Execute $ps -Argument $arguments -WorkingDirectory $projectRoot
+$arguments = Join-TaskActionArguments @('//B', '//NoLogo', $agentLauncher, $hiddenLauncher, $ConfigPath, $projectRoot)
+
+$action = New-ScheduledTaskAction -Execute $wscript -Argument $arguments -WorkingDirectory $projectRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
@@ -121,7 +137,9 @@ if ($ValidateAfterStart) {
     }
 }
 
-Write-Host "Comando: $ps $arguments"
+Write-Host "Execute: $wscript"
+Write-Host "Launcher: $(Split-Path $agentLauncher -Leaf)"
+Write-Host "HiddenProcessLauncher: $(Split-Path $hiddenLauncher -Leaf)"
 Write-Host "RunLevel: $runLevel"
 Write-Host "MultipleInstances: $($settings.MultipleInstances)"
 Write-Host "RestartCount: $($settings.RestartCount)"
