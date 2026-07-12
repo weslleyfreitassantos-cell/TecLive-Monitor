@@ -7,6 +7,7 @@ const session = require('express-session');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const CookieRefreshQueue = require('./services/cookieRefreshQueue');
+const { parseTrustProxyConfig, resolveBindHost } = require('./services/httpRuntimeConfig');
 require('dotenv').config();
 
 // ============================================================
@@ -38,6 +39,52 @@ const httpsAgent = new https.Agent({
 
 const app = express();
 const PORT = process.env.PORT || 3002;
+const BIND_HOST = resolveBindHost();
+const TRUST_PROXY = parseTrustProxyConfig(process.env.TRUST_PROXY);
+app.set('trust proxy', TRUST_PROXY.value);
+
+function normalizedIpKey(req) {
+    const ip = normalizeIp(req.ip || req.socket?.remoteAddress || 'unknown');
+    return rateLimit.ipKeyGenerator ? rateLimit.ipKeyGenerator(ip) : ip;
+}
+
+function createJsonRateLimiter({ windowMs, limit, error }) {
+    return rateLimit({
+        windowMs,
+        limit,
+        standardHeaders: true,
+        legacyHeaders: false,
+        keyGenerator: normalizedIpKey,
+        message: { success: false, error },
+        handler: (req, res, next, options) => {
+            res.status(options.statusCode).json(options.message);
+        }
+    });
+}
+
+const adminLoginLimiter = createJsonRateLimiter({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    error: 'admin_login_rate_limited'
+});
+
+const adminApiLimiter = createJsonRateLimiter({
+    windowMs: 60 * 1000,
+    limit: 120,
+    error: 'admin_api_rate_limited'
+});
+
+const publicApiLimiter = createJsonRateLimiter({
+    windowMs: 60 * 1000,
+    limit: 600,
+    error: 'public_api_rate_limited'
+});
+
+const cookieAgentLimiter = createJsonRateLimiter({
+    windowMs: 60 * 1000,
+    limit: 120,
+    error: 'cookie_agent_rate_limited'
+});
 
 // ========== CONFIGURAÇÃO DE SESSÃO ==========
 app.use(session({
@@ -252,6 +299,10 @@ function normalizeIp(ip) {
     }
     if (ip === '::1' || ip === '0:0:0:0:0:0:0:1') return '127.0.0.1';
     return ip;
+}
+
+function getRequestIp(req) {
+    return normalizeIp(req.ip || req.socket?.remoteAddress || 'unknown');
 }
 
 // Limpeza periódica global de IPs inativos (a cada 15 segundos)
@@ -886,11 +937,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     const localIp = req.query.localIp || null;
 
     if (trackingOwner) {
-        const rawIp = req.ip || req.socket.remoteAddress;
-        const clientIp = normalizeIp(
-            req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-            rawIp
-        );
+        const clientIp = getRequestIp(req);
         const userAgent = req.headers['user-agent'] || '';
 
         if (!isLocalIp(clientIp)) {
@@ -912,11 +959,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
     } else {
         console.warn(`[${videoId}] Acesso sem owner definido - dispositivo não será rastreado.`);
     }
-    const rawIpActivity = req.ip || req.socket.remoteAddress;
-    const clientIpActivity = normalizeIp(
-        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-        rawIpActivity
-    );
+    const clientIpActivity = getRequestIp(req);
     const userAgentActivity = req.headers['user-agent'] || '';
     trackViewer(trackingOwner, videoId, clientIpActivity, userAgentActivity, localIp);
 
@@ -1172,7 +1215,7 @@ app.get('/converter.html', (req, res) => {
     res.sendFile(path.join(__dirname, 'public/converter.html'));
 });
 
-app.post('/api/convert', async (req, res) => {
+app.post('/api/convert', publicApiLimiter, async (req, res) => {
     const { youtubeUrl, owner } = req.body;
     if (!youtubeUrl) return res.status(400).json({ success: false, error: 'URL obrigatoria' });
     const baseUrl = process.env.BASE_URL || 'http://localhost:' + PORT;
@@ -1185,7 +1228,7 @@ app.post('/api/convert', async (req, res) => {
     res.json(result);
 });
 
-app.get('/api/public/device-status/:owner', (req, res) => {
+app.get('/api/public/device-status/:owner', publicApiLimiter, (req, res) => {
     const owner = req.params.owner;
     const localIp = req.query.localIp || null;
     if (!owner) {
@@ -1193,8 +1236,7 @@ app.get('/api/public/device-status/:owner', (req, res) => {
     }
 
     if (localIp) {
-        const rawIp = req.ip || req.socket.remoteAddress;
-        const ip = normalizeIp(req.headers['x-forwarded-for']?.split(',')[0]?.trim() || rawIp);
+        const ip = getRequestIp(req);
         const userAgent = req.headers['user-agent'] || '';
         trackViewer(owner, 'panel', ip, userAgent, localIp);
     }
@@ -1322,7 +1364,7 @@ app.post('/api/device/release-all', (req, res) => {
     }
 });
 
-app.get('/api/public/device-status-all', (req, res) => {
+app.get('/api/public/device-status-all', publicApiLimiter, (req, res) => {
     const clientes = getClientes();
     const result = {};
     const now = Date.now();
@@ -1344,7 +1386,7 @@ app.get('/api/public/device-status-all', (req, res) => {
     res.json(result);
 });
 
-app.get('/api/public/monitors', (req, res) => {
+app.get('/api/public/monitors', publicApiLimiter, (req, res) => {
     const monitors = [];
     if (converter && converter.activeMonitors) {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
@@ -1414,13 +1456,9 @@ neonews_pool_queued ${stats.pool?.queued || 0}
 `);
 });
 
-app.get('/api/keepalive', (req, res) => {
+app.get('/api/keepalive', publicApiLimiter, (req, res) => {
     const { owner, videoId, localIp } = req.query;
-    const rawIp = req.ip || req.socket.remoteAddress;
-    const ip = normalizeIp(
-        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-        rawIp
-    );
+    const ip = getRequestIp(req);
     const userAgent = req.headers['user-agent'] || '';
     if (owner && videoId && !isLocalIp(ip)) {
         trackViewerByOwner(owner, ip, videoId, userAgent, localIp);
@@ -1464,21 +1502,16 @@ app.get('/neonews/t/:token.m3u8', async (req, res) => {
 // ========== AUTENTICAÇÃO E DASHBOARD ==========
 function isAuthenticated(req, res, next) {
     if (req.session && req.session.admin === true) return next();
+    if (req.path && req.path.startsWith('/api/')) {
+        return res.status(401).json({ success: false, error: 'admin_session_expired' });
+    }
     res.redirect('/admin-login');
 }
 
 function isAdminApiAuthenticated(req, res, next) {
     if (req.session && req.session.admin === true) return next();
-    return res.status(401).json({ success: false, error: 'unauthorized' });
+    return res.status(401).json({ success: false, error: 'admin_session_expired' });
 }
-
-const cookieAgentLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    limit: 60,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, error: 'rate_limited' }
-});
 
 function sanitizeApiText(value, max = 500) {
     return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -1596,7 +1629,7 @@ app.get('/admin-login', (req, res) => {
     res.sendFile(path.join(__dirname, 'public/admin-login.html'));
 });
 
-app.post('/admin-login', (req, res) => {
+app.post('/admin-login', adminLoginLimiter, (req, res) => {
     const { password } = req.body;
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
     if (password === adminPassword) {
@@ -1679,6 +1712,8 @@ app.post('/api/cookie-agent/heartbeat', (req, res) => {
 // ============================================================
 // COOKIE REFRESH ADMIN API (sessão administrativa)
 // ============================================================
+app.use('/api/admin/cookie-refresh', adminApiLimiter);
+
 app.get('/api/admin/cookie-refresh/status', isAdminApiAuthenticated, (req, res) => {
     res.json({ success: true, status: getCookieRefreshAdminStatus() });
 });
@@ -2272,14 +2307,16 @@ app.get('/', (req, res) => {
     res.redirect('/converter.html');
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, BIND_HOST, () => {
     console.log('========================================');
     console.log('NeoNews Live Converter V3 - SSOT + GlobalScheduler + Tokens');
     console.log('========================================');
-    console.log(`Conversor público: http://localhost:${PORT}/converter.html`);
-    console.log(`Dashboard protegido: http://localhost:${PORT}/dashboard`);
-    console.log(`API Health: http://localhost:${PORT}/health`);
-    console.log(`Métricas: http://localhost:${PORT}/metrics`);
+    console.log(`Bind: ${BIND_HOST}:${PORT}`);
+    console.log(`Trust proxy: ${TRUST_PROXY.label}`);
+    console.log(`Conversor público: http://${BIND_HOST}:${PORT}/converter.html`);
+    console.log(`Dashboard protegido: http://${BIND_HOST}:${PORT}/dashboard`);
+    console.log(`API Health: http://${BIND_HOST}:${PORT}/health`);
+    console.log(`Métricas: http://${BIND_HOST}:${PORT}/metrics`);
     console.log(`Timeout de dispositivos: ${VIEWER_WINDOW_MS}ms (${VIEWER_WINDOW_MS / 3600000}h)`);
     console.log('========================================\n');
 });

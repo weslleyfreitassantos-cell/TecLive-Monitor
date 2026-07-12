@@ -7,7 +7,9 @@
     exec_mode: 'fork',
     env: {
       NODE_ENV: 'production',
-      PORT: 3002
+      PORT: 3002,
+      BIND_HOST: '127.0.0.1',
+      TRUST_PROXY: 'loopback'
     },
     error_file: './logs/pm2-error.log',
     out_file: './logs/pm2-out.log',

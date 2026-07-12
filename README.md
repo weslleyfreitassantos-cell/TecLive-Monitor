@@ -62,6 +62,8 @@ Crie um arquivo .env na raiz do projeto com o seguinte conteúdo (ajuste conform
 
 env
 PORT=3002
+BIND_HOST=127.0.0.1
+TRUST_PROXY=false
 BASE_URL=https://seu-dominio.com   # ou http://localhost:3002
 
 EMAIL_USER=seu-email@gmail.com
@@ -85,6 +87,11 @@ VIDEO_MAX_HEIGHT=720
 # ==========================================
 STALE_MAX_AGE_MS=60000
 M3U8_CACHE_TTL=5000
+
+Em produção atrás de Nginx, mantenha o Node escutando apenas em `127.0.0.1:3002`.
+Depois de confirmar que a porta 3002 não está exposta diretamente, configure `TRUST_PROXY=loopback`
+ou um número/lista restrita de proxies confiáveis. Não use `TRUST_PROXY=true`.
+
 4. Inicie o servidor
 Modo desenvolvimento:
 

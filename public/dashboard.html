@@ -1291,6 +1291,13 @@
     const bannerMessage = document.getElementById('bannerMessage');
     let lastCookieAutomationStatus = null;
     let cookieAutomationBusy = false;
+    let adminRedirectInProgress = false;
+
+    function redirectToAdminLoginOnce() {
+        if (adminRedirectInProgress) return;
+        adminRedirectInProgress = true;
+        window.location.href = '/admin-login';
+    }
 
     // ============================================================
     // FUNÇÕES DO MODAL IP
@@ -1432,6 +1439,7 @@
             const body = owner ? JSON.stringify({ owner }) : JSON.stringify({});
             const res = await fetch(`/api/monitor/stop/${videoId}`, { 
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: body
             });
@@ -1508,7 +1516,7 @@
 
     async function fetchAllDeviceStatus() {
         try {
-            const res = await fetch('/api/public/device-status-all');
+            const res = await fetch('/api/public/device-status-all', { credentials: 'same-origin', cache: 'no-store' });
             return await res.json();
         } catch (e) {
             console.warn('Erro ao buscar status de dispositivos:', e);
@@ -1518,7 +1526,7 @@
 
     async function sincronizarClientesBackend() {
         try {
-            const resp = await fetch('/api/clientes');
+            const resp = await fetch('/api/clientes', { credentials: 'same-origin', cache: 'no-store' });
             const clientes = await resp.json();
             if (Array.isArray(clientes)) {
                 localStorage.setItem('tecLiveClientes', JSON.stringify(clientes));
@@ -1535,6 +1543,7 @@
         try {
             const resp = await fetch('/api/client/sync', {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ clientes })
             });
@@ -1553,8 +1562,7 @@
     async function carregarListaClientes() {
         if (allMonitorsData.length === 0) {
             try {
-                const res = await fetch('/api/monitors');
-                const data = await res.json();
+                const data = await fetchAdminJson('/api/monitors');
                 allMonitorsData = data.monitors || [];
             } catch (e) {
                 console.warn('Não foi possível obter a lista de monitores:', e);
@@ -1744,6 +1752,7 @@
         try {
             const response = await fetch('/api/convert', {
                 method: 'POST',
+                credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ youtubeUrl: url })
             });
@@ -1880,17 +1889,46 @@
         return job.status || 'desconhecido';
     }
 
+    function getAdminApiErrorMessage(status, data = {}) {
+        if (status === 401) return 'Sessão administrativa expirada';
+        if (status === 429) return 'Muitas requisições; tente novamente em instantes';
+        if (status === 503) return 'Automação de cookies desativada';
+        if (status >= 500) return 'Erro interno';
+        return data.message || data.error || `HTTP ${status}`;
+    }
+
+    async function fetchAdminJson(url, options = {}) {
+        let res;
+        try {
+            res = await fetch(url, {
+                credentials: 'same-origin',
+                cache: options.cache || 'no-store',
+                ...options,
+                headers: {
+                    ...(options.headers || {})
+                }
+            });
+        } catch (fetchError) {
+            const err = new Error('Erro de rede ao acessar API administrativa');
+            err.cause = fetchError;
+            throw err;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.success === false) {
+            const err = new Error(getAdminApiErrorMessage(res.status, data));
+            err.status = res.status;
+            err.redirectToLogin = res.status === 401;
+            throw err;
+        }
+        return data;
+    }
+
     async function postCookieAutomation(url, body = {}) {
-        const res = await fetch(url, {
+        return fetchAdminJson(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data.success === false) {
-            throw new Error(data.error || data.message || `HTTP ${res.status}`);
-        }
-        return data;
     }
 
     async function enqueueCookieRefresh(cookie) {
@@ -1908,6 +1946,7 @@
             await loadCookieAutomationStatus();
         } catch (err) {
             alert(`Erro ao criar tarefa: ${err.message}`);
+            if (err.redirectToLogin) redirectToAdminLoginOnce();
         } finally {
             cookieAutomationBusy = false;
             renderCookieAutomation(lastCookieAutomationStatus);
@@ -1930,6 +1969,7 @@
             await loadCookieAutomationStatus();
         } catch (err) {
             alert(`Erro ao cancelar tarefa: ${err.message}`);
+            if (err.redirectToLogin) redirectToAdminLoginOnce();
         } finally {
             cookieAutomationBusy = false;
             renderCookieAutomation(lastCookieAutomationStatus);
@@ -2063,9 +2103,7 @@
 
     async function loadCookieAutomationStatus() {
         try {
-            const res = await fetch('/api/admin/cookie-refresh/status', { cache: 'no-store' });
-            const data = await res.json();
-            if (!res.ok || data.success === false) throw new Error(data.error || 'falha ao carregar automação');
+            const data = await fetchAdminJson('/api/admin/cookie-refresh/status');
             lastCookieAutomationStatus = data.status;
             renderCookieAutomation(data.status);
         } catch (err) {
@@ -2077,7 +2115,10 @@
                 badge.classList.add('fail');
             }
             if (container) {
-                container.innerHTML = `<div class="public-mode-card">Falha ao carregar automação<br><span style="color:#e74c3c;">${escapeHtml(err.message)}</span></div>`;
+                const redirect = err.redirectToLogin
+                    ? '<br><button type="button" onclick="redirectToAdminLoginOnce()">Entrar novamente</button>'
+                    : '';
+                container.innerHTML = `<div class="public-mode-card">Falha ao carregar automação<br><span style="color:#e74c3c;">${escapeHtml(err.message)}</span>${redirect}</div>`;
             }
         }
     }
@@ -2191,7 +2232,7 @@
                 if (!videoId) return;
                 if (!confirm(`Encerrar monitor ${videoId}?`)) return;
                 try {
-                    const res = await fetch(`/api/monitor/stop/${videoId}`, { method: 'POST' });
+                    const res = await fetch(`/api/monitor/stop/${videoId}`, { method: 'POST', credentials: 'same-origin' });
                     const data = await res.json();
                     if (data.success) { alert('Encerrado!'); fetchData(); }
                     else alert(`Erro: ${data.message}`);
@@ -2210,8 +2251,7 @@
     // ============================================================
     async function loadFunctionalCookieStatus() {
         try {
-            const res = await fetch('/api/cookie/functional-status', { cache: 'no-store' });
-            const data = await res.json();
+            const data = await fetchAdminJson('/api/cookie/functional-status');
             const functional = data.functional || {};
             const container = document.getElementById('cookieContent');
             if (!container) return;
@@ -2259,7 +2299,7 @@
                 html += `<div class="cookie-item ${statusClass}">
                             <strong>${shortName.toUpperCase()}</strong>
                             ${statusText}
-                            ${isProblematic ? `<span style="color:#e74c3c; font-size:10px;">${reason}${lastFailStr}</span>` : ''}
+                            ${isProblematic ? `<span style="color:#e74c3c; font-size:10px;">${escapeHtml(reason)}${escapeHtml(lastFailStr)}</span>` : ''}
                             ${isProblematic ? `
                                 <button type="button" class="substituir-btn" data-cookie-type="${type}">Substituir</button>
                                 <input type="file" class="cookie-file-input" data-cookie-type="${type}" accept=".txt" style="display:none">
@@ -2288,11 +2328,10 @@
                     const formData = new FormData();
                     formData.append('cookie', file);
                     try {
-                        const res = await fetch(`/api/cookie/upload?type=${type}`, {
+                        const data = await fetchAdminJson(`/api/cookie/upload?type=${type}`, {
                             method: 'POST',
                             body: formData
                         });
-                        const data = await res.json();
                         if (data.success) {
                             alert(`Cookie ${type} atualizado com sucesso!`);
                         } else {
@@ -2300,6 +2339,7 @@
                         }
                     } catch (err) {
                         alert(`Erro ao enviar cookie: ${err.message}`);
+                        if (err.redirectToLogin) redirectToAdminLoginOnce();
                     } finally {
                         input.value = '';
                         loadFunctionalCookieStatus();
@@ -2325,14 +2365,17 @@
             document.getElementById('cookieContent').innerHTML = '<div class="public-mode-card">MODO PÚBLICO<br>Nenhum cookie configurado</div>';
             document.getElementById('cookieStatusBadge').textContent = 'NENHUM';
             emergencyBanner.style.display = 'none';
+            if (err.redirectToLogin) redirectToAdminLoginOnce();
         }
     }
 
     async function fetchData() {
         try {
-            const [healthRes, monitorsRes] = await Promise.all([ fetch('/health'), fetch('/api/monitors') ]);
+            const [healthRes, monitors] = await Promise.all([
+                fetch('/health', { credentials: 'same-origin', cache: 'no-store' }),
+                fetchAdminJson('/api/monitors')
+            ]);
             const health = await healthRes.json();
-            const monitors = await monitorsRes.json();
             const isOnline = (health.status === 'healthy' || health.status === 'ok');
             document.getElementById('mainStatus').innerHTML = isOnline ? 'ONLINE' : 'OFFLINE';
             const activeCount = monitors.monitors?.filter(m => m.status === 'online' || m.status === 'degraded').length || 0;
@@ -2346,7 +2389,10 @@
             await loadFunctionalCookieStatus();
             await loadCookieAutomationStatus();
             updateChart(monitors.monitors || []);
-        } catch (error) { console.error(error); }
+        } catch (error) {
+            console.error(error);
+            if (error.redirectToLogin) redirectToAdminLoginOnce();
+        }
     }
 
     function setupFilters() {

@@ -1,10 +1,14 @@
 const assert = require('assert');
+const express = require('express');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
+const rateLimit = require('express-rate-limit');
 
 const CookieRefreshQueue = require('../services/cookieRefreshQueue');
 const CookieRotator = require('../cookieRotator');
+const { parseTrustProxyConfig, resolveBindHost } = require('../services/httpRuntimeConfig');
 
 function tempDir() {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'cookie-refresh-'));
@@ -16,6 +20,49 @@ function readApp() {
 
 function readDashboard() {
     return fs.readFileSync(path.join(__dirname, '..', 'public', 'dashboard.html'), 'utf8');
+}
+
+function readEcosystem() {
+    return fs.readFileSync(path.join(__dirname, '..', 'ecosystem.config.js'), 'utf8');
+}
+
+function readHttpRuntimeConfig() {
+    return fs.readFileSync(path.join(__dirname, '..', 'services', 'httpRuntimeConfig.js'), 'utf8');
+}
+
+function request(server, route, headers = {}) {
+    return new Promise((resolve, reject) => {
+        const address = server.address();
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: address.port,
+            path: route,
+            method: 'GET',
+            headers
+        }, (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', chunk => { body += chunk; });
+            res.on('end', () => {
+                let json = null;
+                try {
+                    json = body ? JSON.parse(body) : null;
+                } catch (err) {
+                    json = null;
+                }
+                resolve({ status: res.statusCode, body, json });
+            });
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+function listen(app, host = '127.0.0.1') {
+    return new Promise((resolve, reject) => {
+        const server = app.listen(0, host, () => resolve(server));
+        server.once('error', reject);
+    });
 }
 
 function testQueueBasics() {
@@ -224,13 +271,122 @@ function testQueueCheckActivityIsPersisted() {
     assert.equal(status.reason, 'heartbeat_stale_queue_recent');
 }
 
+async function testPhase1ProxyAndLimiterRuntime() {
+    assert.equal(resolveBindHost({}), '127.0.0.1');
+    assert.equal(resolveBindHost({ BIND_HOST: '0.0.0.0' }), '0.0.0.0');
+    assert.equal(resolveBindHost({ BIND_HOST: '   ', HOST: '' }), '127.0.0.1');
+
+    assert.deepEqual(parseTrustProxyConfig('false'), { value: false, label: 'false' });
+    assert.deepEqual(parseTrustProxyConfig('loopback'), { value: 'loopback', label: 'loopback' });
+    assert.deepEqual(parseTrustProxyConfig('1'), { value: 1, label: '1' });
+    assert.deepEqual(parseTrustProxyConfig('127.0.0.1,10.0.0.0/8'), {
+        value: ['127.0.0.1', '10.0.0.0/8'],
+        label: '127.0.0.1,10.0.0.0/8'
+    });
+    assert.throws(() => parseTrustProxyConfig('true'), /TRUST_PROXY=true nao e permitido/);
+    assert.throws(() => parseTrustProxyConfig('not-a-proxy'), /TRUST_PROXY invalido/);
+    assert.throws(() => parseTrustProxyConfig('0'), /TRUST_PROXY invalido/);
+
+    const directApp = express();
+    directApp.set('trust proxy', parseTrustProxyConfig('false').value);
+    directApp.get('/ip', (req, res) => res.json({ ip: req.ip }));
+    const directServer = await listen(directApp);
+    try {
+        const direct = await request(directServer, '/ip', { 'X-Forwarded-For': '203.0.113.77' });
+        assert.equal(direct.status, 200);
+        assert.notEqual(direct.json.ip, '203.0.113.77');
+        assert.match(direct.json.ip, /127\.0\.0\.1|::ffff:127\.0\.0\.1/);
+    } finally {
+        directServer.close();
+    }
+
+    const proxyApp = express();
+    proxyApp.set('trust proxy', parseTrustProxyConfig('loopback').value);
+    proxyApp.get('/ip', (req, res) => res.json({ ip: req.ip }));
+    const proxyServer = await listen(proxyApp);
+    try {
+        const proxied = await request(proxyServer, '/ip', { 'X-Forwarded-For': '203.0.113.77' });
+        assert.equal(proxied.status, 200);
+        assert.equal(proxied.json.ip, '203.0.113.77');
+    } finally {
+        proxyServer.close();
+    }
+
+    const limiterKey = req => rateLimit.ipKeyGenerator(req.ip);
+    const adminLimiter = rateLimit({
+        windowMs: 60 * 1000,
+        limit: 1,
+        keyGenerator: limiterKey,
+        legacyHeaders: false,
+        standardHeaders: true,
+        message: { success: false, error: 'admin_api_rate_limited' }
+    });
+    const agentLimiter = rateLimit({
+        windowMs: 60 * 1000,
+        limit: 1,
+        keyGenerator: limiterKey,
+        legacyHeaders: false,
+        standardHeaders: true,
+        message: { success: false, error: 'cookie_agent_rate_limited' }
+    });
+    const limiterApp = express();
+    limiterApp.set('trust proxy', parseTrustProxyConfig('false').value);
+    limiterApp.get('/admin', adminLimiter, (req, res) => res.json({ success: true, scope: 'admin' }));
+    limiterApp.get('/agent', agentLimiter, (req, res) => res.json({ success: true, scope: 'agent' }));
+    limiterApp.get('/admin401', (req, res) => res.status(401).json({ success: false, error: 'admin_session_expired' }));
+    limiterApp.get('/agent401', (req, res) => res.status(401).json({ success: false, error: 'unauthorized' }));
+    const limiterServer = await listen(limiterApp);
+    try {
+        assert.equal((await request(limiterServer, '/admin')).status, 200);
+        assert.equal((await request(limiterServer, '/admin')).status, 429);
+        assert.equal((await request(limiterServer, '/agent')).status, 200);
+        assert.equal((await request(limiterServer, '/agent')).status, 429);
+
+        const admin401 = await request(limiterServer, '/admin401');
+        assert.equal(admin401.status, 401);
+        assert.equal(admin401.json.success, false);
+        assert.equal(admin401.json.error, 'admin_session_expired');
+
+        const agent401 = await request(limiterServer, '/agent401');
+        assert.equal(agent401.status, 401);
+        assert.equal(agent401.json.error, 'unauthorized');
+    } finally {
+        limiterServer.close();
+    }
+
+    const bindApp = express();
+    bindApp.get('/health', (req, res) => res.json({ status: 'ok' }));
+    const bindServer = await listen(bindApp, resolveBindHost({ BIND_HOST: '127.0.0.1' }));
+    try {
+        assert.equal(bindServer.address().address, '127.0.0.1');
+    } finally {
+        bindServer.close();
+    }
+}
+
 function testSecurityAndDashboardStaticChecks() {
     const app = readApp();
+    const httpRuntimeConfig = readHttpRuntimeConfig();
     assert.ok(app.includes('COOKIE_AGENT_TOKEN'));
     assert.ok(app.includes('crypto.timingSafeEqual'));
+    assert.ok(app.includes("require('./services/httpRuntimeConfig')"));
+    assert.ok(app.includes("app.set('trust proxy', TRUST_PROXY.value)"));
+    assert.ok(httpRuntimeConfig.includes("TRUST_PROXY=true nao e permitido"));
+    assert.ok(httpRuntimeConfig.includes('function resolveBindHost'));
+    assert.ok(httpRuntimeConfig.includes("return configured || '127.0.0.1'"));
+    assert.ok(httpRuntimeConfig.includes('hops < 1 || hops > 16'));
+    assert.ok(app.includes('app.listen(PORT, BIND_HOST'));
+    assert.ok(app.includes('adminLoginLimiter'));
+    assert.ok(app.includes('adminApiLimiter'));
+    assert.ok(app.includes('publicApiLimiter'));
+    assert.ok(app.includes('cookieAgentLimiter'));
+    assert.ok(app.includes("app.post('/admin-login', adminLoginLimiter"));
+    assert.ok(app.includes("app.use('/api/admin/cookie-refresh', adminApiLimiter)"));
     assert.ok(app.includes("Object.prototype.hasOwnProperty.call(req.query || {}, 'token')"));
     assert.ok(app.includes("app.use('/api/cookie-agent', cookieAgentLimiter, authenticateCookieAgent)"));
     assert.ok(app.includes('/api/admin/cookie-refresh/status'));
+    assert.ok(app.includes("error: 'admin_session_expired'"));
+    assert.ok(!app.includes("req.headers['x-forwarded-for']"));
     assert.ok(app.includes('recordQueueCheck(req.agentId)'));
     assert.ok(app.includes('lastAgentActivityAt'));
     assert.ok(app.includes('heartbeatAgeSeconds'));
@@ -249,20 +405,41 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(dashboard.includes('DEGRADADO'));
     assert.ok(dashboard.includes('atividade recente, heartbeat atrasado'));
     assert.ok(dashboard.includes('/api/admin/cookie-refresh/enqueue/'));
+    assert.ok(dashboard.includes("credentials: 'same-origin'"));
+    assert.ok(dashboard.includes('Sessão administrativa expirada'));
+    assert.ok(dashboard.includes('Muitas requisições; tente novamente em instantes'));
+    assert.ok(dashboard.includes('Automação de cookies desativada'));
+    assert.ok(dashboard.includes('Erro de rede ao acessar API administrativa'));
+    assert.ok(dashboard.includes('Entrar novamente'));
+    assert.ok(dashboard.includes('redirectToAdminLoginOnce'));
+    assert.ok(dashboard.includes('adminRedirectInProgress'));
+    assert.ok(dashboard.includes('fetchAdminJson'));
     assert.ok(!dashboard.includes('COOKIE_AGENT_TOKEN'));
     assert.ok(!dashboard.includes('LINHA DO TEMPO'));
     assert.ok(!dashboard.includes('timelineContent'));
     assert.ok(!dashboard.includes('function addEvent'));
+
+    const ecosystem = readEcosystem();
+    assert.ok(ecosystem.includes("BIND_HOST: '127.0.0.1'"));
+    assert.ok(ecosystem.includes("TRUST_PROXY: 'loopback'"));
 }
 
-testQueueBasics();
-testLeaseAndCooldown();
-testInvalidJsonRecoveryAndHistory();
-testSanitization();
-testRotatorIntegration();
-testRotatorDoesNotCancelClaimedOrRunning();
-testAgentStatusClassification();
-testQueueCheckActivityIsPersisted();
-testSecurityAndDashboardStaticChecks();
+async function main() {
+    testQueueBasics();
+    testLeaseAndCooldown();
+    testInvalidJsonRecoveryAndHistory();
+    testSanitization();
+    testRotatorIntegration();
+    testRotatorDoesNotCancelClaimedOrRunning();
+    testAgentStatusClassification();
+    testQueueCheckActivityIsPersisted();
+    await testPhase1ProxyAndLimiterRuntime();
+    testSecurityAndDashboardStaticChecks();
 
-console.log('Cookie refresh automation Node tests OK');
+    console.log('Cookie refresh automation Node tests OK');
+}
+
+main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+});
