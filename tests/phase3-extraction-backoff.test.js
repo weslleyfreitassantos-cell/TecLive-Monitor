@@ -1,5 +1,6 @@
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const {
@@ -57,6 +58,9 @@ function captureConsole() {
 function installConvertFakes() {
     const fakeCalls = [];
     const instances = [];
+    const previousGlobalBackoffFile = process.env.GLOBAL_EXTRACTION_BACKOFF_FILE;
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phase3-global-backoff-'));
+    process.env.GLOBAL_EXTRACTION_BACKOFF_FILE = path.join(stateDir, 'global-extraction-backoff.json');
 
     class FakeCookieRotator {
         constructor() {
@@ -118,9 +122,16 @@ function installConvertFakes() {
         ConvertAPI,
         fakeCalls,
         instances,
+        globalBackoffFile: process.env.GLOBAL_EXTRACTION_BACKOFF_FILE,
         cleanup() {
             fs.existsSync = originalExistsSync;
             LiveMonitor.prototype.startMonitoring = originalStartMonitoring;
+            if (previousGlobalBackoffFile === undefined) {
+                delete process.env.GLOBAL_EXTRACTION_BACKOFF_FILE;
+            } else {
+                process.env.GLOBAL_EXTRACTION_BACKOFF_FILE = previousGlobalBackoffFile;
+            }
+            fs.rmSync(stateDir, { recursive: true, force: true });
         }
     };
 }
@@ -415,6 +426,71 @@ async function testGlobalExtractionOutageBackoff() {
     }
 }
 
+async function testGlobalExtractionCircuitBreakerPersistsAcrossRestart() {
+    const fakes = installConvertFakes();
+    const capture = captureConsole();
+    const previousCircuitBreaker = process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS;
+    const previousAutoRefreshCooldown = process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS;
+    try {
+        process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS = '900';
+        process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS = '1800000';
+
+        const firstApi = new fakes.ConvertAPI(null, null);
+        firstApi._getVideoMetadata = async () => ({ title: 'Global outage', channel: 'Test' });
+        firstApi._persistMapping = () => {};
+        const queuedRefreshes = [];
+        firstApi.cookieRotator.refreshQueue = {
+            enqueue(cookie, source, reason, meta) {
+                queuedRefreshes.push({ cookie, source, reason, requestedBy: meta?.requestedBy || null });
+                return { created: true, job: { id: `job-${cookie}`, cookie } };
+            }
+        };
+        firstApi._runYtdlp = async (args) => {
+            const cookie = cookieFromArgs(args);
+            if (cookie === null) throw new Error('Sign in to confirm you are not a bot');
+            throw new Error('No video formats found');
+        };
+
+        const first = await firstApi.convert('https://www.youtube.com/watch?v=PERSISTGB01', 'http://127.0.0.1', 'owner-a');
+        assert.equal(first.success, false);
+        assert.equal(first.globalExtractionCritical, true);
+        assert.equal(queuedRefreshes.length, 3);
+        assert.ok(fs.existsSync(fakes.globalBackoffFile));
+
+        const persisted = JSON.parse(fs.readFileSync(fakes.globalBackoffFile, 'utf8'));
+        assert.equal(persisted.critical, true);
+        assert.equal(persisted.state.lastFailureClassification, CLASSIFICATION.NO_FORMATS);
+        assert.ok(persisted.state.nextRetryAt > Date.now());
+        assert.ok(persisted.state.lastAutomaticCookieRefreshQueuedAt > 0);
+
+        const secondApi = new fakes.ConvertAPI(null, null);
+        let attemptedAfterRestart = 0;
+        secondApi._runYtdlp = async () => {
+            attemptedAfterRestart += 1;
+            throw new Error('should not run while global circuit breaker is active');
+        };
+
+        const suppressed = await secondApi.convert('https://www.youtube.com/watch?v=PERSISTGB02', 'http://127.0.0.1', 'owner-b');
+        assert.equal(suppressed.success, false);
+        assert.equal(suppressed.globalExtractionCritical, true);
+        assert.equal(attemptedAfterRestart, 0);
+        assert.equal(secondApi.globalExtractionBackoff.lastAutomaticCookieRefreshQueuedAt, persisted.state.lastAutomaticCookieRefreshQueuedAt);
+    } finally {
+        if (previousCircuitBreaker === undefined) {
+            delete process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS;
+        } else {
+            process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS = previousCircuitBreaker;
+        }
+        if (previousAutoRefreshCooldown === undefined) {
+            delete process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS;
+        } else {
+            process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS = previousAutoRefreshCooldown;
+        }
+        capture.restore();
+        fakes.cleanup();
+    }
+}
+
 async function testOwnersAndRemovalCleanup() {
     const fakes = installConvertFakes();
     const capture = captureConsole();
@@ -586,6 +662,7 @@ async function main() {
     await testConvertBackoffAndIsolation();
     await testAuthCookieStillMarksFailure();
     await testGlobalExtractionOutageBackoff();
+    await testGlobalExtractionCircuitBreakerPersistsAcrossRestart();
     await testOwnersAndRemovalCleanup();
     await testSchedulerRespectsBackoff();
     await testSchedulerRespectsGlobalBackoff();

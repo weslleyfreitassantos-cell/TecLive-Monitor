@@ -44,8 +44,73 @@ function cookieFileToQueueName(file) {
     return String(file || '').replace(/\.txt$/i, '');
 }
 
+function getGlobalExtractionBackoffFile() {
+    return process.env.GLOBAL_EXTRACTION_BACKOFF_FILE ||
+        path.join(__dirname, '../data/global-extraction-backoff.json');
+}
+
+function sanitizeGlobalExtractionBackoffState(state = {}, critical = false) {
+    const snapshot = createExtractionBackoffState(state);
+    return {
+        version: 1,
+        critical: Boolean(critical),
+        updatedAt: new Date().toISOString(),
+        state: {
+            consecutiveExtractionFailures: snapshot.consecutiveExtractionFailures,
+            lastExtractionFailureAt: snapshot.lastExtractionFailureAt,
+            lastFailureClassification: snapshot.lastFailureClassification,
+            nextRetryAt: snapshot.nextRetryAt,
+            backoffSeconds: snapshot.backoffSeconds,
+            lastSuccessfulCookie: snapshot.lastSuccessfulCookie,
+            lastSuccessfulExtractionSource: snapshot.lastSuccessfulExtractionSource,
+            lastExtractionSuccessAt: snapshot.lastExtractionSuccessAt,
+            lastAutomaticCookieRefreshQueuedAt: snapshot.lastAutomaticCookieRefreshQueuedAt,
+            automaticCookieRefreshReason: snapshot.automaticCookieRefreshReason,
+            automaticCookieRefreshJobs: snapshot.automaticCookieRefreshJobs,
+            lastGlobalOutageAlertAt: snapshot.lastGlobalOutageAlertAt,
+            globalOutageAlertReason: snapshot.globalOutageAlertReason,
+            lastCircuitBreakerOpenedAt: snapshot.lastCircuitBreakerOpenedAt,
+            globalCircuitBreakerSeconds: snapshot.globalCircuitBreakerSeconds
+        }
+    };
+}
+
+function readGlobalExtractionBackoff(filePath = getGlobalExtractionBackoffFile()) {
+    try {
+        if (!fs.existsSync(filePath)) {
+            return { critical: false, state: createExtractionBackoffState() };
+        }
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return {
+            critical: Boolean(parsed?.critical),
+            state: createExtractionBackoffState(parsed?.state || {})
+        };
+    } catch (err) {
+        console.warn(`[GLOBAL] estado persistido de extracao ignorado: ${err.message}`);
+        return { critical: false, state: createExtractionBackoffState() };
+    }
+}
+
+function writeGlobalExtractionBackoff(filePath, state, critical) {
+    try {
+        const dir = path.dirname(filePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+        fs.writeFileSync(
+            tmpPath,
+            JSON.stringify(sanitizeGlobalExtractionBackoffState(state, critical), null, 2),
+            'utf8'
+        );
+        fs.renameSync(tmpPath, filePath);
+        return true;
+    } catch (err) {
+        console.warn(`[GLOBAL] falha ao persistir circuit breaker de extracao: ${err.message}`);
+        return false;
+    }
+}
+
 class ConvertAPI {
-    constructor(emailAlerts, orchestrator, revokeTokenFn = null) {
+    constructor(emailAlerts, orchestrator, revokeTokenFn = null, options = {}) {
         this.emailAlerts = emailAlerts;
         this.orchestrator = orchestrator;
         this.activeMonitors = new Map();
@@ -61,8 +126,15 @@ class ConvertAPI {
         
         this.scheduler = new GlobalScheduler(60000, 6, this.cookieRotator);
         this.extractionBackoff = new Map();
-        this.globalExtractionBackoff = createExtractionBackoffState();
-        this.globalExtractionCritical = false;
+        this.globalExtractionBackoffFile = options.globalExtractionBackoffFile || getGlobalExtractionBackoffFile();
+        const persistedGlobalBackoff = readGlobalExtractionBackoff(this.globalExtractionBackoffFile);
+        this.globalExtractionBackoff = persistedGlobalBackoff.state;
+        this.globalExtractionCritical = persistedGlobalBackoff.critical ||
+            Boolean(this.globalExtractionBackoff.lastFailureClassification || this.globalExtractionBackoff.consecutiveExtractionFailures);
+        if (this.globalExtractionCritical && getBackoffDelayMs(this.globalExtractionBackoff) > 0) {
+            const retrySeconds = Math.ceil(getBackoffDelayMs(this.globalExtractionBackoff) / 1000);
+            console.log(`[GLOBAL] circuit breaker de extracao restaurado; retry em ${retrySeconds}s`);
+        }
         if (typeof this.scheduler.setGlobalExtractionBackoffProvider === 'function') {
             this.scheduler.setGlobalExtractionBackoffProvider(() => this.globalExtractionBackoff);
         }
@@ -140,6 +212,7 @@ class ConvertAPI {
         console.log(`[GLOBAL] circuit breaker de extracao apos ${videoId}: ${state.lastFailureClassification} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
         this._queueCookieRefreshAfterGlobalExtractionFailure(videoId, state, now);
         this._sendGlobalExtractionOutageAlert(videoId, state, now);
+        this._persistGlobalExtractionState();
         return state;
     }
 
@@ -208,7 +281,16 @@ class ConvertAPI {
     _recordGlobalExtractionSuccess(now = Date.now()) {
         const recovered = resetExtractionBackoff(this.globalExtractionBackoff, null, now, 'stream');
         this.globalExtractionCritical = false;
+        this._persistGlobalExtractionState();
         return recovered;
+    }
+
+    _persistGlobalExtractionState() {
+        return writeGlobalExtractionBackoff(
+            this.globalExtractionBackoffFile,
+            this.globalExtractionBackoff,
+            this.globalExtractionCritical
+        );
     }
 
     _recordConvertSuccess(key, videoId, cookieName, source = null, now = Date.now()) {

@@ -29,6 +29,9 @@ chmod +x "$TMP/bin/yt-dlp"
 
 cat >"$TMP/bin/pm2" <<'MOCK'
 #!/usr/bin/env bash
+if [[ -n "${COOKIE_SYNC_PM2_CALLS:-}" ]]; then
+  printf '%s\n' "$*" >>"$COOKIE_SYNC_PM2_CALLS"
+fi
 if [[ "$1" == "reload" ]]; then exit 0; fi
 if [[ "$1" == "jlist" ]]; then
   echo '[{"name":"youtube-monitor-v3","pm2_env":{"status":"online"}}]'
@@ -44,15 +47,10 @@ exit 0
 MOCK
 chmod +x "$TMP/bin/flock"
 
-cat >"$TMP/bin/node" <<'MOCK'
-#!/usr/bin/env bash
-exit 0
-MOCK
-chmod +x "$TMP/bin/node"
-
 export PATH="$TMP/bin:$PATH"
 export COOKIE_SYNC_PROJECT_PATH="$TMP/project"
 export COOKIE_SYNC_MIN_SIZE=10
+export COOKIE_SYNC_PM2_CALLS="$TMP/project/pm2-calls.log"
 
 cat >"$TMP/project/cookies/cookieStatus.json" <<'JSON'
 {
@@ -104,5 +102,18 @@ grep -q 'new' "$TMP/project/cookies/cookie1.txt"
 find "$TMP/project/cookies/archive" -type f -name 'cookie1.txt.*.bak' | grep -q .
 grep -q 'URL rejeitada (url_encerrada): https://example.invalid/ended' "$TMP/project/logs/cookie-sync/cookie-sync.log"
 grep -q 'URL efetivamente usada na validacao: https://example.invalid/good' "$TMP/project/logs/cookie-sync/cookie-sync.log"
+grep -q 'PM2 reload ignorado' "$TMP/project/logs/cookie-sync/cookie-sync.log"
+if [[ -f "$COOKIE_SYNC_PM2_CALLS" ]] && grep -q '^reload ' "$COOKIE_SYNC_PM2_CALLS"; then
+  echo "PM2 reload nao deveria ocorrer por padrao" >&2
+  exit 1
+fi
+node - "$TMP/project/cookies/cookieStatus.json" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+const status = data['cookie1.txt'];
+if (!status || status.state !== 'valid' || status.failCount !== 0) process.exit(1);
+if (status.streamProbeStatus !== 'inconclusive') process.exit(1);
+NODE
 
 echo "Cookie Sync Bash mock tests OK"

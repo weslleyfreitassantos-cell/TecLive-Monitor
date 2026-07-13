@@ -20,7 +20,13 @@ O script abaixo e chamado via SSH pelo Windows depois do SCP:
 scripts/cookie-sync/validate-and-promote-cookie.sh cookie1.txt /var/www/livemonitor/cookies/incoming/arquivo.txt
 ```
 
-Ele valida o arquivo recebido, cria backup do cookie atual, promove atomicamente, testa novamente, recarrega PM2 e aguarda o `cookieStatus.json` voltar para `valid` com `failCount=0`.
+Ele valida o arquivo recebido, cria backup do cookie atual, promove atomicamente, testa novamente e atualiza o `cookieStatus.json` para `valid` com `failCount=0`. Por padrao ele nao recarrega PM2; o app le o arquivo do cookie nas proximas extracoes e evita reinicios em lote.
+
+Se for realmente necessario recarregar o processo apos cada cookie, habilite explicitamente:
+
+```bash
+COOKIE_SYNC_RELOAD_PM2=1
+```
 
 ## URLs de teste
 
@@ -34,7 +40,7 @@ O validador tenta uma URL por vez. URL inadequada, erro de rede ou timeout nao s
 
 ## Rollback
 
-Rollback automatico ocorre se o teste final, PM2 ou `cookieStatus.json` falharem. Backups ficam em:
+Rollback automatico ocorre se o teste final ou `cookieStatus.json` falharem. Se `COOKIE_SYNC_RELOAD_PM2=1`, falha de PM2 tambem dispara rollback. Backups ficam em:
 
 ```bash
 /var/www/livemonitor/cookies/archive/

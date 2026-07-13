@@ -18,6 +18,7 @@ MIN_SIZE="${COOKIE_SYNC_MIN_SIZE:-1000}"
 TIMEOUT_SECONDS="${COOKIE_SYNC_TIMEOUT:-60}"
 PM2_PROCESS="${COOKIE_SYNC_PM2_PROCESS:-youtube-monitor-v3}"
 KEEP_BACKUPS="${COOKIE_SYNC_KEEP_BACKUPS:-10}"
+RELOAD_PM2="${COOKIE_SYNC_RELOAD_PM2:-0}"
 
 COOKIES_DIR="$PROJECT_PATH/cookies"
 INCOMING_DIR="$COOKIES_DIR/incoming"
@@ -308,6 +309,65 @@ if (!proc || !proc.pm2_env || proc.pm2_env.status !== 'online') process.exit(1);
 NODE
 }
 
+should_reload_pm2() {
+  case "$(printf '%s' "$RELOAD_PM2" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|sim) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+mark_cookie_status_promoted() {
+  local status_file="$COOKIES_DIR/cookieStatus.json"
+  node - "$status_file" "$TARGET_COOKIE" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const [statusFile, targetCookie] = process.argv.slice(2);
+let data = {};
+try {
+  if (fs.existsSync(statusFile)) {
+    data = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+  }
+} catch (_) {
+  data = {};
+}
+
+const now = new Date().toISOString();
+const current = data[targetCookie] && typeof data[targetCookie] === 'object'
+  ? data[targetCookie]
+  : {};
+
+data[targetCookie] = {
+  ...current,
+  state: 'valid',
+  authValid: true,
+  extractionValid: true,
+  streamValid: true,
+  failCount: 0,
+  lastFailure: null,
+  lastSuccess: now,
+  lastExtractionCheck: now,
+  lastExtractionFailure: null,
+  lastProbeAt: now,
+  lastProbeVideoId: current.lastProbeVideoId || null,
+  consecutiveStreamFailures: 0,
+  streamFailureVideoIds: [],
+  metadataValid: true,
+  formatsValid: null,
+  hlsValid: false,
+  streamProbeStatus: 'inconclusive',
+  extractionClassification: null,
+  reason: null,
+  alertActive: false
+};
+
+const dir = path.dirname(statusFile);
+fs.mkdirSync(dir, { recursive: true });
+const tmp = path.join(dir, `.${path.basename(statusFile)}.${process.pid}.${Date.now()}.tmp`);
+fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+fs.renameSync(tmp, statusFile);
+NODE
+}
+
 cookie_status_ok() {
   local status_file="$COOKIES_DIR/cookieStatus.json"
   [[ -f "$status_file" ]] || return 1
@@ -357,25 +417,34 @@ if ! run_ytdlp_test "$PROMOTED_PATH"; then
 fi
 
 rm -f -- "$INCOMING_REAL"
+mark_cookie_status_promoted
 
-if ! pm2_reload_and_check; then
-  rollback "PM2 nao retornou online"
-  pm2 reload "$PM2_PROCESS" --update-env >>"$LOG_FILE" 2>&1 || true
-  exit 1
+PM2_RESULT="nao_recarregado"
+if should_reload_pm2; then
+  if ! pm2_reload_and_check; then
+    rollback "PM2 nao retornou online"
+    pm2 reload "$PM2_PROCESS" --update-env >>"$LOG_FILE" 2>&1 || true
+    exit 1
+  fi
+  PM2_RESULT="$PM2_PROCESS"
+  log "PM2 online: $PM2_PROCESS"
+else
+  log "PM2 reload ignorado (COOKIE_SYNC_RELOAD_PM2=${RELOAD_PM2}); cookie sera usado sem reiniciar o app."
 fi
 
 if ! wait_for_cookie_status; then
   log "cookieStatus.json nao voltou para valid/failCount=0 dentro de 30s. Logs resumidos:"
   safe_tail "$LOG_FILE"
   rollback "cookieStatus.json nao confirmou revalidacao"
-  pm2 reload "$PM2_PROCESS" --update-env >>"$LOG_FILE" 2>&1 || true
+  if should_reload_pm2; then
+    pm2 reload "$PM2_PROCESS" --update-env >>"$LOG_FILE" 2>&1 || true
+  fi
   exit 1
 fi
 
 log "Cookie promovido: $TARGET_COOKIE"
 log "Backup criado: ${BACKUP_PATH:-nenhum}"
-log "PM2 online: $PM2_PROCESS"
-log "Status persistido: valid, failCount=0"
+log "Status persistido: valid, failCount=0, streamProbeStatus=inconclusive"
 
 printf 'cookie=%s\nbackup=%s\npm2=%s\nstatus=valid failCount=0\n' \
-  "$TARGET_COOKIE" "${BACKUP_PATH:-nenhum}" "$PM2_PROCESS"
+  "$TARGET_COOKIE" "${BACKUP_PATH:-nenhum}" "$PM2_RESULT"
