@@ -36,6 +36,10 @@ function positiveIntegerEnv(name, fallback) {
     return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function globalCircuitBreakerSeconds() {
+    return positiveIntegerEnv('YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS', 15 * 60);
+}
+
 function cookieFileToQueueName(file) {
     return String(file || '').replace(/\.txt$/i, '');
 }
@@ -59,6 +63,9 @@ class ConvertAPI {
         this.extractionBackoff = new Map();
         this.globalExtractionBackoff = createExtractionBackoffState();
         this.globalExtractionCritical = false;
+        if (typeof this.scheduler.setGlobalExtractionBackoffProvider === 'function') {
+            this.scheduler.setGlobalExtractionBackoffProvider(() => this.globalExtractionBackoff);
+        }
     }
 
     removeMonitor(videoId, owner) {
@@ -110,17 +117,29 @@ class ConvertAPI {
 
     _recordGlobalExtractionFailure(videoId, classification, now = Date.now()) {
         const state = this.globalExtractionBackoff;
+        const circuitBreakerSeconds = globalCircuitBreakerSeconds();
         const parsedMaxSeconds = parseInt(process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS, 10);
         const extractionMaxSeconds = Number.isFinite(parsedMaxSeconds) && parsedMaxSeconds > 0
             ? parsedMaxSeconds
-            : 300;
+            : circuitBreakerSeconds;
+
         applyExtractionFailure(state, classification || CLASSIFICATION.NO_FORMATS, now, {
             extractionMaxSeconds
         });
+
+        const enforcedSeconds = Math.min(circuitBreakerSeconds, extractionMaxSeconds);
+        if (state.backoffSeconds < enforcedSeconds) {
+            state.backoffSeconds = enforcedSeconds;
+            state.nextRetryAt = now + enforcedSeconds * 1000;
+        }
+        state.lastCircuitBreakerOpenedAt = now;
+        state.globalCircuitBreakerSeconds = state.backoffSeconds;
         this.globalExtractionCritical = true;
+
         const retryIso = state.nextRetryAt ? new Date(state.nextRetryAt).toISOString() : 'n/a';
-        console.log(`[GLOBAL] extracao critica apos ${videoId}: ${state.lastFailureClassification} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
+        console.log(`[GLOBAL] circuit breaker de extracao apos ${videoId}: ${state.lastFailureClassification} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
         this._queueCookieRefreshAfterGlobalExtractionFailure(videoId, state, now);
+        this._sendGlobalExtractionOutageAlert(videoId, state, now);
         return state;
     }
 
@@ -128,7 +147,7 @@ class ConvertAPI {
         const refreshQueue = this.cookieRotator?.refreshQueue;
         if (!refreshQueue || typeof refreshQueue.enqueue !== 'function') return [];
 
-        const threshold = positiveIntegerEnv('COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES', 2);
+        const threshold = positiveIntegerEnv('COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES', 1);
         const cooldownMs = positiveIntegerEnv('COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS', 30 * 60 * 1000);
         const consecutiveFailures = Number(state?.consecutiveExtractionFailures) || 0;
         if (consecutiveFailures < threshold) return [];
@@ -165,6 +184,25 @@ class ConvertAPI {
         const reused = results.filter(item => !item.created && !item.error).map(item => item.cookie);
         console.log(`[GLOBAL] renovacao automatica de cookies solicitada apos falha confirmada em ${videoId}: criadas=${created.join(',') || '0'} existentes=${reused.join(',') || '0'}`);
         return results;
+    }
+
+    _sendGlobalExtractionOutageAlert(videoId, state, now = Date.now()) {
+        if (!this.emailAlerts || typeof this.emailAlerts.sendGlobalExtractionOutageAlert !== 'function') return false;
+        const cooldownMs = positiveIntegerEnv('GLOBAL_EXTRACTION_ALERT_COOLDOWN_MS', 60 * 60 * 1000);
+        const lastAlertAt = Number(state?.lastGlobalOutageAlertAt) || 0;
+        if (lastAlertAt > 0 && now - lastAlertAt < cooldownMs) return false;
+
+        state.lastGlobalOutageAlertAt = now;
+        state.globalOutageAlertReason = `extracao global critica: ${state.lastFailureClassification || CLASSIFICATION.NO_FORMATS}`;
+        this.emailAlerts.sendGlobalExtractionOutageAlert({
+            videoId,
+            classification: state.lastFailureClassification || CLASSIFICATION.NO_FORMATS,
+            retryAfterSeconds: Math.ceil(getBackoffDelayMs(state, now) / 1000),
+            consecutiveFailures: Number(state.consecutiveExtractionFailures) || 0,
+            automaticCookieRefreshQueuedAt: state.lastAutomaticCookieRefreshQueuedAt || null,
+            automaticCookieRefreshJobs: state.automaticCookieRefreshJobs || []
+        });
+        return true;
     }
 
     _recordGlobalExtractionSuccess(now = Date.now()) {
@@ -312,7 +350,7 @@ class ConvertAPI {
     async convert(youtubeUrl, baseUrl, owner = null, options = {}) {
         const videoId = this.extractVideoId(youtubeUrl);
         const key = this._getCompositeKey(videoId, owner);
-        const manualAttempt = options.manual === true;
+        const bypassGlobalBackoff = options.bypassGlobalBackoff === true;
         
         if (this.activeMonitors.has(key)) {
             const monitor = this.activeMonitors.get(key);
@@ -342,17 +380,17 @@ class ConvertAPI {
         }
 
         const globalBackoffDelayMs = getBackoffDelayMs(this.globalExtractionBackoff);
-        if (!manualAttempt && globalBackoffDelayMs > 0) {
+        if (!bypassGlobalBackoff && globalBackoffDelayMs > 0) {
             const retryAfterSeconds = Math.ceil(globalBackoffDelayMs / 1000);
             console.log(`[GLOBAL] extracao em backoff; ${videoId} suprimido por ${retryAfterSeconds}s`);
             return {
                 success: false,
                 videoId,
-                error: 'Não foi possível extrair a transmissão do YouTube neste momento.',
+                error: 'A extracao do YouTube esta temporariamente indisponivel.',
                 classification: this.globalExtractionBackoff.lastFailureClassification || CLASSIFICATION.NO_FORMATS,
                 retryAfterSeconds,
                 globalExtractionCritical: true,
-                message: 'Extração global em backoff temporário; tente novamente em instantes.'
+                message: 'A extracao do YouTube esta temporariamente indisponivel. Tente novamente em alguns minutos.'
             };
         }
 
@@ -504,21 +542,28 @@ class ConvertAPI {
                 ? 'todos os cookies e fallback publico falharam'
                 : 'todos os cookies falharam';
             this._recordConvertFailure(key, videoId, responseClassification, Date.now(), failureScope);
+            let globalRetryAfterSeconds = 0;
             if (globalExtractionOutage) {
-                this._recordGlobalExtractionFailure(videoId, responseClassification);
+                const globalState = this._recordGlobalExtractionFailure(videoId, responseClassification);
+                globalRetryAfterSeconds = Math.ceil(getBackoffDelayMs(globalState) / 1000);
             }
             return {
                 success: false,
                 videoId: videoId,
-                error: 'Não foi possível extrair a transmissão do YouTube neste momento.',
+                error: globalExtractionOutage
+                    ? 'A extracao do YouTube esta temporariamente indisponivel.'
+                    : 'Não foi possível extrair a transmissão do YouTube neste momento.',
                 classification: responseClassification,
                 globalExtractionCritical: globalExtractionOutage,
+                retryAfterSeconds: globalExtractionOutage ? globalRetryAfterSeconds : undefined,
                 failedCookies,
                 publicFallback: publicFallbackFailure,
                 metadata: metadata,
                 message: onlyCookieAuthFailures
                     ? 'Falha de autenticacao/cookie. Verifique os cookies.'
-                    : 'Não foi possível extrair a transmissão do YouTube neste momento. Tente novamente em instantes ou atualize os cookies se o problema persistir.'
+                    : globalExtractionOutage
+                        ? 'A extracao do YouTube esta temporariamente indisponivel. Tente novamente em alguns minutos.'
+                        : 'Não foi possível extrair a transmissão do YouTube neste momento. Tente novamente em instantes ou atualize os cookies se o problema persistir.'
             };
         }
 
@@ -547,6 +592,9 @@ class ConvertAPI {
             this.cookieRotator,
             (vid, own) => {
                 this.removeMonitor(vid, own);
+            },
+            (vid, classification) => {
+                this._recordGlobalExtractionFailure(vid, classification || CLASSIFICATION.NO_FORMATS);
             }
         );
         monitor.m3u8Url = streamUrl;

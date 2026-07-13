@@ -43,7 +43,19 @@ async function main() {
             lastError: 'Authorization: Bearer secret https://manifest.googlevideo.com/api/manifest/hls_variant/token/private C:\\Users\\Weslley\\cookies\\cookie2.txt /var/www/livemonitor/app.js <script>x</script>'
         });
 
-        assert.equal(sent.length, 3);
+        alerts.sendGlobalExtractionOutageAlert({
+            videoId: 'LIVEOUTAGE1',
+            classification: 'no_formats https://manifest.googlevideo.com/api/manifest/hls_variant/token/private',
+            retryAfterSeconds: 900,
+            consecutiveFailures: 2,
+            automaticCookieRefreshQueuedAt: '2026-07-12T15:30:00.000Z',
+            automaticCookieRefreshJobs: [
+                { cookie: 'cookie1', created: true },
+                { cookie: 'cookie2', created: false, error: 'Authorization: Bearer secret C:\\Users\\Weslley\\cookies\\cookie2.txt' }
+            ]
+        });
+
+        assert.equal(sent.length, 4);
         assert.match(sent[0].subject, /Cookie Agent Offline/);
         assert.match(sent[0].text, /Heartbeat do Agent Windows ausente/);
         assert.match(sent[0].text, /ASUS_WESLLEY/);
@@ -61,6 +73,13 @@ async function main() {
         assert.ok(!sent[2].text.includes('/var/www'));
         assert.ok(sent[2].html.includes('&lt;script&gt;x&lt;/script&gt;'));
         assert.ok(!sent[2].html.includes('<script>x</script>'));
+
+        assert.match(sent[3].subject, /Extracao do YouTube indisponivel/);
+        assert.match(sent[3].text, /Todas as estrategias de extracao falharam/);
+        assert.match(sent[3].text, /15m 0s/);
+        assert.ok(!sent[3].text.includes('manifest.googlevideo.com'));
+        assert.ok(!sent[3].text.includes('secret'));
+        assert.ok(!sent[3].text.includes('C:\\Users'));
     } finally {
         nodemailer.createTransport = originalCreateTransport;
         delete require.cache[require.resolve('../alerts/emailAlerts')];

@@ -321,11 +321,13 @@ async function testGlobalExtractionOutageBackoff() {
     const fakes = installConvertFakes();
     const capture = captureConsole();
     const previousGlobalBackoffMax = process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS;
+    const previousCircuitBreaker = process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS;
     const previousAutoRefreshFailures = process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES;
     const previousAutoRefreshCooldown = process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS;
     try {
-        process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES = '2';
+        process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES = '1';
         process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS = '600000';
+        process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS = '900';
         const api = new fakes.ConvertAPI(null, null);
         api._getVideoMetadata = async () => ({ title: 'Global outage', channel: 'Test' });
         api._persistMapping = () => {};
@@ -351,29 +353,31 @@ async function testGlobalExtractionOutageBackoff() {
         assert.equal(result.success, false);
         assert.equal(result.classification, CLASSIFICATION.NO_FORMATS);
         assert.equal(result.globalExtractionCritical, true);
-        assert.ok(result.error.includes('Não foi possível extrair'));
+        assert.equal(result.retryAfterSeconds, 900);
+        assert.ok(result.error.includes('temporariamente indisponivel'));
         assert.deepEqual(attempts, ['cookie1.txt', 'cookie2.txt', 'cookie3.txt', null]);
         assert.equal(fakes.fakeCalls.filter(call => call.op === 'failure').length, 0);
         assert.equal(api.globalExtractionCritical, true);
         assert.equal(api.globalExtractionBackoff.lastFailureClassification, CLASSIFICATION.NO_FORMATS);
         assert.ok(api.globalExtractionBackoff.nextRetryAt > Date.now());
-        assert.equal(queuedRefreshes.length, 0);
+        assert.equal(api.globalExtractionBackoff.backoffSeconds, 900);
+        assert.deepEqual(queuedRefreshes.map(item => item.cookie), ['cookie1', 'cookie2', 'cookie3']);
+        assert.ok(queuedRefreshes.every(item => item.source === 'automatic'));
+        assert.ok(queuedRefreshes.every(item => item.requestedBy === 'global-extraction-watch'));
+        assert.equal(api.globalExtractionBackoff.automaticCookieRefreshReason, 'extracao global critica: no_formats');
 
         const before = attempts.length;
         const suppressed = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL2', 'http://127.0.0.1', 'owner-b', { automatic: true });
         assert.equal(suppressed.success, false);
         assert.equal(suppressed.globalExtractionCritical, true);
         assert.equal(attempts.length, before);
-        assert.equal(queuedRefreshes.length, 0);
+        assert.equal(queuedRefreshes.length, 3);
 
         api.globalExtractionBackoff.nextRetryAt = Date.now() - 1;
         const manual = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL2', 'http://127.0.0.1', 'owner-b', { manual: true });
         assert.equal(manual.success, false);
         assert.ok(attempts.length > before);
-        assert.deepEqual(queuedRefreshes.map(item => item.cookie), ['cookie1', 'cookie2', 'cookie3']);
-        assert.ok(queuedRefreshes.every(item => item.source === 'automatic'));
-        assert.ok(queuedRefreshes.every(item => item.requestedBy === 'global-extraction-watch'));
-        assert.equal(api.globalExtractionBackoff.automaticCookieRefreshReason, 'extracao global critica: no_formats');
+        assert.equal(queuedRefreshes.length, 3);
 
         api.globalExtractionBackoff.nextRetryAt = Date.now() - 1;
         await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL3', 'http://127.0.0.1', 'owner-c', { manual: true });
@@ -384,12 +388,17 @@ async function testGlobalExtractionOutageBackoff() {
         for (let i = 0; i < 8; i += 1) {
             invalidEnvApi._recordGlobalExtractionFailure(`ENVFAIL${i}`, CLASSIFICATION.NO_FORMATS, 1000 + i);
         }
-        assert.equal(invalidEnvApi.globalExtractionBackoff.backoffSeconds, 300);
+        assert.equal(invalidEnvApi.globalExtractionBackoff.backoffSeconds, 900);
     } finally {
         if (previousGlobalBackoffMax === undefined) {
             delete process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS;
         } else {
             process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS = previousGlobalBackoffMax;
+        }
+        if (previousCircuitBreaker === undefined) {
+            delete process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS;
+        } else {
+            process.env.YTDLP_GLOBAL_EXTRACTION_CIRCUIT_BREAKER_SECONDS = previousCircuitBreaker;
         }
         if (previousAutoRefreshFailures === undefined) {
             delete process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES;
@@ -486,6 +495,49 @@ async function testSchedulerRespectsBackoff() {
     assert.ok(healthyMonitor.nextCheck > now);
 }
 
+async function testSchedulerRespectsGlobalBackoff() {
+    const scheduler = new GlobalScheduler(1000, 2, null);
+    const now = Date.now();
+    const globalState = { nextRetryAt: now + 60000 };
+    let poolRuns = 0;
+    const monitorA = {
+        videoId: 'GLOBALBACKA1',
+        owner: null,
+        nextCheck: now - 1000,
+        _running: false,
+        _monitorStopped: false,
+        _liveEnded: false,
+        async checkAndRenew() {
+            throw new Error('should not run');
+        }
+    };
+    const monitorB = {
+        videoId: 'GLOBALBACKB2',
+        owner: 'owner-b',
+        nextCheck: now - 1000,
+        _running: false,
+        _monitorStopped: false,
+        _liveEnded: false,
+        async checkAndRenew() {
+            throw new Error('should not run');
+        }
+    };
+
+    scheduler.setGlobalExtractionBackoffProvider(() => globalState);
+    scheduler.pool.run = async (task) => {
+        poolRuns += 1;
+        await task();
+    };
+    scheduler.monitors.set('GLOBALBACKA1', monitorA);
+    scheduler.monitors.set('GLOBALBACKB2:owner-b', monitorB);
+
+    await scheduler._tick();
+
+    assert.equal(poolRuns, 0);
+    assert.ok(monitorA.nextCheck >= now + 59000);
+    assert.ok(monitorB.nextCheck >= now + 59000);
+}
+
 async function testForcedRenewStopsCurrentRound() {
     const LiveMonitor = require('../monitor/liveMonitor');
     const capture = captureConsole();
@@ -536,6 +588,7 @@ async function main() {
     await testGlobalExtractionOutageBackoff();
     await testOwnersAndRemovalCleanup();
     await testSchedulerRespectsBackoff();
+    await testSchedulerRespectsGlobalBackoff();
     await testForcedRenewStopsCurrentRound();
     console.log('Phase 3 extraction backoff tests OK');
 }

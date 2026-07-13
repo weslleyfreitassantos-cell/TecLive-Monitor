@@ -188,6 +188,10 @@ function createExtractionBackoffState(seed = {}) {
         automaticCookieRefreshJobs: Array.isArray(seed.automaticCookieRefreshJobs)
             ? seed.automaticCookieRefreshJobs.slice(0, 10)
             : [],
+        lastGlobalOutageAlertAt: Number(seed.lastGlobalOutageAlertAt) || 0,
+        globalOutageAlertReason: seed.globalOutageAlertReason || null,
+        lastCircuitBreakerOpenedAt: Number(seed.lastCircuitBreakerOpenedAt) || 0,
+        globalCircuitBreakerSeconds: Number(seed.globalCircuitBreakerSeconds) || 0,
         _lastBackoffLogAt: 0,
         _lastBackoffLogRetryAt: 0,
         _recoveryLoggedForFailureSequence: false

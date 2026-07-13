@@ -205,6 +205,45 @@ class EmailAlerts {
         this.sendEmailAlert(subject, message, 'cookie_refresh_failed');
     }
 
+    sendGlobalExtractionOutageAlert(details = {}) {
+        const videoId = this._safeText(details.videoId, 'desconhecido');
+        const classification = this._safeText(details.classification, 'no_formats');
+        const retryAfter = this._formatDuration(details.retryAfterSeconds);
+        const failures = Number.isFinite(Number(details.consecutiveFailures))
+            ? Number(details.consecutiveFailures)
+            : 0;
+        const queuedAt = details.automaticCookieRefreshQueuedAt
+            ? this._formatDate(details.automaticCookieRefreshQueuedAt)
+            : 'nao solicitado';
+        const jobs = Array.isArray(details.automaticCookieRefreshJobs)
+            ? details.automaticCookieRefreshJobs
+            : [];
+        const jobLines = jobs.length > 0
+            ? jobs.map(job => {
+                const cookie = this._safeText(job.cookie, 'cookie').toUpperCase();
+                const status = job.created ? 'job criado' : (job.error || 'job existente');
+                return `- ${cookie}: ${this._safeText(status)}`;
+            })
+            : ['- nenhum job registrado'];
+        const subject = '🔴 Extracao do YouTube indisponivel - NeoNews Monitor';
+        const message = [
+            'Todas as estrategias de extracao falharam.',
+            '',
+            `Video: ${videoId}`,
+            `Classificacao: ${classification}`,
+            `Falhas consecutivas globais: ${failures}`,
+            `Proxima tentativa em: ${retryAfter}`,
+            `Renovacao automatica solicitada em: ${queuedAt}`,
+            '',
+            'Jobs de renovacao:',
+            ...jobLines,
+            '',
+            'Acao recomendada:',
+            'Aguardar o circuit breaker, acompanhar o Agent Windows e verificar yt-dlp/IP se continuar falhando.'
+        ].join('\n');
+        this.sendEmailAlert(subject, message, 'global_extraction_outage');
+    }
+
     // ========== Método base ==========
     sendEmailAlert(subject, message, type) {
         console.log(`📧 [EMAIL] Enviando e-mail tipo=${type}: "${subject}"`);

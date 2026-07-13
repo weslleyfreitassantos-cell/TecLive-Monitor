@@ -51,9 +51,16 @@ class GlobalScheduler extends EventEmitter {
         this.timer = null;
         this._running = false;
         this.cookieRotator = cookieRotator;
+        this.globalExtractionBackoffProvider = null;
+        this._lastGlobalBackoffLogAt = 0;
+        this._lastGlobalBackoffRetryAt = 0;
 
         this._lastTickActivity = Date.now();
         this._watchdogTimer = null;
+    }
+
+    setGlobalExtractionBackoffProvider(provider) {
+        this.globalExtractionBackoffProvider = typeof provider === 'function' ? provider : null;
     }
 
     register(monitor) {
@@ -108,6 +115,16 @@ class GlobalScheduler extends EventEmitter {
     async _tick() {
         const now = Date.now();
         this._lastTickActivity = now;
+
+        const globalRetryDelayMs = this._getGlobalExtractionBackoffDelayMs(now);
+        if (globalRetryDelayMs > 0) {
+            for (const monitor of this.monitors.values()) {
+                if (monitor._monitorStopped || monitor._liveEnded) continue;
+                monitor.nextCheck = now + globalRetryDelayMs;
+            }
+            this._logGlobalExtractionBackoffSuppressed(globalRetryDelayMs, now);
+            return;
+        }
 
         const monitorsToRun = [];
         for (const monitor of this.monitors.values()) {
@@ -169,6 +186,10 @@ class GlobalScheduler extends EventEmitter {
                 if (retryDelayMs > 0) {
                     nextInterval = Math.max(nextInterval, retryDelayMs);
                 }
+                const globalRetryDelayMs = this._getGlobalExtractionBackoffDelayMs(Date.now());
+                if (globalRetryDelayMs > 0) {
+                    nextInterval = Math.max(nextInterval, globalRetryDelayMs);
+                }
 
                 monitor.nextCheck = Date.now() + nextInterval;
                 monitor._runningStartedAt = null;
@@ -190,6 +211,34 @@ class GlobalScheduler extends EventEmitter {
 
     stop() {
         this._stop();
+    }
+
+    _getGlobalExtractionBackoffDelayMs(now = Date.now()) {
+        if (typeof this.globalExtractionBackoffProvider !== 'function') return 0;
+        let state = null;
+        try {
+            state = this.globalExtractionBackoffProvider();
+        } catch (err) {
+            console.warn(`⚠️ [Scheduler] Falha ao ler backoff global de extracao: ${err.message}`);
+            return 0;
+        }
+        const nextRetryAt = Number(state?.nextRetryAt) || 0;
+        return nextRetryAt > now ? nextRetryAt - now : 0;
+    }
+
+    _logGlobalExtractionBackoffSuppressed(delayMs, now = Date.now()) {
+        const retryAt = now + delayMs;
+        if (
+            this._lastGlobalBackoffLogAt &&
+            now - this._lastGlobalBackoffLogAt < 30000 &&
+            this._lastGlobalBackoffRetryAt === retryAt
+        ) {
+            return;
+        }
+        this._lastGlobalBackoffLogAt = now;
+        this._lastGlobalBackoffRetryAt = retryAt;
+        const retrySeconds = Math.ceil(delayMs / 1000);
+        console.log(`[GLOBAL] scheduler em circuit breaker; ${this.monitors.size} monitor(es) aguardando proxima tentativa em ${retrySeconds}s`);
     }
 
     getStats() {

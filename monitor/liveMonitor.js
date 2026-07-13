@@ -74,7 +74,7 @@ const ComponentStatus = {
 };
 
 class LiveMonitor {
-    constructor(youtubeUrl, emailAlerts, activeMonitorsMap = null, scheduler = null, cookieRotator = null, onEnd = null) {
+    constructor(youtubeUrl, emailAlerts, activeMonitorsMap = null, scheduler = null, cookieRotator = null, onEnd = null, onGlobalExtractionOutage = null) {
         this.youtubeUrl = youtubeUrl;
         this.emailAlerts = emailAlerts;
         this.videoId = this.extractVideoId(youtubeUrl); // ✅ agora o método existe
@@ -87,6 +87,7 @@ class LiveMonitor {
         this._scheduler = scheduler;
         this._cookieRotator = cookieRotator;
         this._onEnd = onEnd;
+        this._onGlobalExtractionOutage = onGlobalExtractionOutage;
         
         this.metadataFails = 0;
         this.segmentFails = 0;
@@ -464,6 +465,13 @@ class LiveMonitor {
             const errorMsg = error.message.toLowerCase();
             const classification = error.classification || classifyYtdlpError(error.message);
             this._recordExtractionFailure(classification);
+            if (error.globalExtractionOutage && typeof this._onGlobalExtractionOutage === 'function') {
+                try {
+                    this._onGlobalExtractionOutage(this.videoId, classification);
+                } catch (callbackError) {
+                    console.warn(`[${this.videoId}] falha ao registrar pane global de extracao: ${callbackError.message}`);
+                }
+            }
             const isLiveEnded = errorMsg.includes('video unavailable') || 
                                errorMsg.includes('not available') || 
                                errorMsg.includes('recording is not available') ||
