@@ -703,8 +703,8 @@
         .cookie-check-time {
             color: #7a8aa0;
             font-size: 12px;
-            text-align: right;
-            margin-top: -2px;
+            text-align: center;
+            margin-top: 0;
         }
         .cookie-item .substituir-btn {
             grid-column: 1 / -1;
@@ -782,45 +782,75 @@
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 8px;
         }
+        .automation-action-panel {
+            background: rgba(0,0,0,0.22);
+            border: 1px solid rgba(93,173,226,0.14);
+            border-left: 4px solid rgba(93,173,226,0.65);
+            border-radius: 8px;
+            padding: 12px;
+        }
         .automation-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
         }
         .automation-actions button {
             background: rgba(46,204,113,0.12);
             border: 1px solid rgba(46,204,113,0.25);
             color: #2ecc71;
             border-radius: 6px;
-            padding: 7px 10px;
-            font-weight: 700;
+            min-height: 42px;
+            padding: 10px 12px;
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            line-height: 1.2;
+            transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+        }
+        .automation-actions button:hover:not(:disabled) {
+            background: rgba(46,204,113,0.2);
+            border-color: rgba(46,204,113,0.45);
+            transform: translateY(-1px);
+        }
+        .automation-actions button.strong {
+            background: rgba(46,204,113,0.18);
+            border-color: rgba(46,204,113,0.42);
+        }
+        .automation-actions button.secondary {
+            background: rgba(122,138,160,0.12);
+            border-color: rgba(122,138,160,0.28);
+            color: #9aa7b7;
         }
         .automation-actions button.danger {
             background: rgba(231,76,60,0.12);
             border-color: rgba(231,76,60,0.35);
             color: #e74c3c;
+            grid-column: 1 / -1;
+        }
+        .automation-actions button.danger:hover:not(:disabled) {
+            background: rgba(231,76,60,0.2);
+            border-color: rgba(231,76,60,0.5);
         }
         .automation-actions button:disabled {
             opacity: 0.45;
             cursor: not-allowed;
-        }
-        .automation-log-row {
-            display: flex;
-            justify-content: flex-start;
         }
         .server-log-button {
             background: rgba(93,173,226,0.12);
             border: 1px solid rgba(93,173,226,0.32);
             color: #5dade2;
             border-radius: 6px;
-            padding: 8px 16px;
-            font-weight: 800;
+            padding: 10px 16px;
             letter-spacing: 1px;
-            cursor: pointer;
         }
-        .server-log-button:hover {
+        .automation-actions .server-log-button:hover:not(:disabled) {
             background: rgba(93,173,226,0.22);
+            border-color: rgba(93,173,226,0.52);
         }
         .automation-jobs {
             max-height: 150px;
@@ -2790,16 +2820,16 @@
                 ${cookieRows}
             </div>
             ${automationProgress}
-            <div class="automation-actions">
+            <div class="automation-action-panel">
+                <div class="automation-actions">
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie1')">Atualizar Cookie1</button>
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie2')">Atualizar Cookie2</button>
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie3')">Atualizar Cookie3</button>
-                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('all')">Atualizar Todos</button>
+                <button type="button" class="strong" ${disabledAttr} onclick="enqueueCookieRefresh('all')">Atualizar Todos</button>
                 <button type="button" class="danger" ${cancelDisabledAttr} onclick="cancelPendingCookieRefresh()">Cancelar tarefa pendente</button>
-                <button type="button" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
-            </div>
-            <div class="automation-log-row">
+                <button type="button" class="secondary" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
                 <button type="button" class="server-log-button" onclick="openServerLogModal()">LOG</button>
+                </div>
             </div>
         `;
     }
