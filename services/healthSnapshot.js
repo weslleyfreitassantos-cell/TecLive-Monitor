@@ -292,6 +292,30 @@ function buildBackoffExtractionEntry(key, state, nowMs) {
     };
 }
 
+function buildGlobalExtractionEntry(state, nowMs) {
+    const retryAt = Number(state?.nextRetryAt) || 0;
+    const retryAfterSeconds = retryAt > nowMs ? Math.ceil((retryAt - nowMs) / 1000) : 0;
+    const classification = safeClassification(state?.lastFailureClassification || 'unknown');
+    return {
+        key: 'global',
+        videoId: 'global',
+        owner: null,
+        status: 'critical',
+        health: {
+            components: {
+                extraction: makeComponent('critical', retryAfterSeconds > 0
+                    ? `Extracao global critica em backoff (${classification})`
+                    : `Extracao global critica (${classification})`, {
+                        classification,
+                        retryAfterSeconds,
+                        nextRetryAt: retryAt,
+                        consecutiveFailures: Number(state?.consecutiveExtractionFailures) || 0
+                    })
+            }
+        }
+    };
+}
+
 function classifyAuth(options = {}) {
     if (options.sessionAdmin === false) {
         return makeComponent('error', 'Sessao administrativa ausente');
@@ -307,22 +331,37 @@ function classifyCookies(functional = {}) {
 
     const valid = entries.filter(([, info]) => info?.valid === true);
     const alerted = entries.filter(([, info]) => info?.alertActive === true || ['invalid', 'suspect'].includes(info?.state));
+    const authValid = entries.filter(([, info]) => info?.authValid !== false);
+    const extractionValid = entries.filter(([, info]) => info?.extractionValid !== false);
+    const streamValid = entries.filter(([, info]) => info?.streamValid !== false);
 
     if (valid.length === 0) {
-        return makeComponent('critical', 'Nenhum cookie valido', { valid: 0, total: entries.length });
+        return makeComponent('critical', 'Nenhum cookie valido para stream', {
+            valid: 0,
+            total: entries.length,
+            authValid: authValid.length,
+            extractionValid: extractionValid.length,
+            streamValid: streamValid.length
+        });
     }
 
     if (alerted.length > 0) {
         return makeComponent('warning', `${valid.length}/${entries.length} cookie(s) validos; ${alerted.length} com alerta`, {
             valid: valid.length,
             total: entries.length,
+            authValid: authValid.length,
+            extractionValid: extractionValid.length,
+            streamValid: streamValid.length,
             alerted: alerted.map(([name]) => name)
         });
     }
 
     return makeComponent('ok', `${valid.length}/${entries.length} cookie(s) validos`, {
         valid: valid.length,
-        total: entries.length
+        total: entries.length,
+        authValid: authValid.length,
+        extractionValid: extractionValid.length,
+        streamValid: streamValid.length
     });
 }
 
@@ -397,6 +436,17 @@ function buildSystemHealth(options = {}) {
             }
         }
     }
+    if (converter?.globalExtractionCritical && converter?.globalExtractionBackoff) {
+        const state = converter.globalExtractionBackoff;
+        const hasFailure = Boolean(
+            state?.lastFailureClassification ||
+            state?.consecutiveExtractionFailures ||
+            (Number(state?.nextRetryAt) || 0) > nowMs
+        );
+        if (hasFailure) {
+            extractionEntries.push(buildGlobalExtractionEntry(state, nowMs));
+        }
+    }
 
     const monitorCookieAggregate = aggregateComponent(monitorEntries, 'cookies', 'Cookies dos monitores OK');
     const functionalCookies = classifyCookies(options.cookieFunctionalStatus || {});
@@ -408,6 +458,9 @@ function buildSystemHealth(options = {}) {
                 status: functionalCookies.status,
                 valid: functionalCookies.valid,
                 total: functionalCookies.total,
+                authValid: functionalCookies.authValid,
+                extractionValid: functionalCookies.extractionValid,
+                streamValid: functionalCookies.streamValid,
                 alerted: functionalCookies.alerted || []
             },
             monitors: {

@@ -52,9 +52,16 @@ class CookieRotator {
     _defaultCookieStatus() {
         return {
             state: 'valid',
+            authValid: true,
+            extractionValid: true,
+            streamValid: true,
             failCount: 0,
             lastFailure: null,
             lastSuccess: new Date().toISOString(),
+            lastExtractionCheck: null,
+            lastExtractionFailure: null,
+            lastStreamSuccess: null,
+            extractionClassification: null,
             reason: null,
             alertActive: false
         };
@@ -103,6 +110,34 @@ class CookieRotator {
         }
         if (cookie.alertActive === undefined) {
             cookie.alertActive = false;
+            changed = true;
+        }
+        if (cookie.authValid === undefined) {
+            cookie.authValid = cookie.state !== 'invalid';
+            changed = true;
+        }
+        if (cookie.extractionValid === undefined) {
+            cookie.extractionValid = true;
+            changed = true;
+        }
+        if (cookie.streamValid === undefined) {
+            cookie.streamValid = true;
+            changed = true;
+        }
+        if (cookie.lastExtractionCheck === undefined) {
+            cookie.lastExtractionCheck = null;
+            changed = true;
+        }
+        if (cookie.lastExtractionFailure === undefined) {
+            cookie.lastExtractionFailure = null;
+            changed = true;
+        }
+        if (cookie.lastStreamSuccess === undefined) {
+            cookie.lastStreamSuccess = null;
+            changed = true;
+        }
+        if (cookie.extractionClassification === undefined) {
+            cookie.extractionClassification = null;
             changed = true;
         }
 
@@ -246,6 +281,12 @@ class CookieRotator {
         cookie.lastFailure = new Date().toISOString();
         cookie.reason = errorMsg;
         cookie.alertActive = true;
+        cookie.authValid = false;
+        cookie.extractionValid = false;
+        cookie.streamValid = false;
+        cookie.lastExtractionCheck = cookie.lastFailure;
+        cookie.lastExtractionFailure = cookie.lastFailure;
+        cookie.extractionClassification = 'auth_cookie';
 
         console.log(`⚠️ Cookie ${cookieName} falhou${context}: ${this._shortError(errorMsg)} (${Math.min(cookie.failCount, 3)}/3)`);
 
@@ -285,8 +326,15 @@ class CookieRotator {
             cookie.alertActive === true;
 
         cookie.state = 'valid';
+        cookie.authValid = true;
+        cookie.extractionValid = true;
+        cookie.streamValid = true;
         cookie.failCount = 0;
         cookie.lastSuccess = new Date().toISOString();
+        cookie.lastExtractionCheck = cookie.lastSuccess;
+        cookie.lastStreamSuccess = cookie.lastSuccess;
+        cookie.lastExtractionFailure = null;
+        cookie.extractionClassification = null;
         cookie.lastFailure = null;
         cookie.reason = null;
         cookie.alertActive = false;
@@ -302,6 +350,30 @@ class CookieRotator {
             console.log(`✅ Cookie ${cookieName} válido; sucesso registrado.`);
         }
         return true;
+    }
+
+    markExtractionFailure(cookieName, classification, errorMsg = '', context = null) {
+        if (!this.status[cookieName]) return false;
+        this._ensureStatusFields(cookieName);
+        const cookie = this.status[cookieName];
+        const nowIso = new Date().toISOString();
+        cookie.lastExtractionCheck = nowIso;
+        cookie.lastExtractionFailure = nowIso;
+        cookie.extractionClassification = classification || 'unknown';
+        cookie.extractionValid = false;
+        cookie.streamValid = false;
+        if (classification === 'auth_cookie') {
+            cookie.authValid = false;
+        }
+        cookie.reason = errorMsg || cookie.reason;
+        const suffix = context ? ` (${context})` : '';
+        console.log(`⚠️ Cookie ${cookieName} sem stream valida${suffix}: ${cookie.extractionClassification} - ${this._shortError(errorMsg)}`);
+        this.saveStatus();
+        return true;
+    }
+
+    markExtractionSuccess(cookieName) {
+        return this.markSuccess(cookieName);
     }
 
     /**
@@ -323,11 +395,18 @@ class CookieRotator {
         }
 
         cookie.state = 'valid';
+        cookie.authValid = true;
+        cookie.extractionValid = true;
+        cookie.streamValid = true;
         cookie.failCount = 0;
         cookie.reason = null;
         cookie.lastFailure = null;
+        cookie.lastExtractionFailure = null;
+        cookie.extractionClassification = null;
         cookie.alertActive = false;
         cookie.lastSuccess = new Date().toISOString();
+        cookie.lastExtractionCheck = cookie.lastSuccess;
+        cookie.lastStreamSuccess = cookie.lastSuccess;
         this.saveStatus();
 
         this.sendManualRecoveryAlert(cookieName);
@@ -398,15 +477,26 @@ class CookieRotator {
             const cookiePath = path.join(this.cookiesDir, cookie);
             const fileExists = fs.existsSync(cookiePath) && fs.statSync(cookiePath).size > 5000;
             this._ensureAlertField(cookie);
+            const status = this.status[cookie] || {};
+            const authValid = status.authValid !== false && status.state === 'valid';
+            const extractionValid = status.extractionValid !== false;
+            const streamValid = status.streamValid !== false;
             result[key] = {
-                state: this.status[cookie]?.state || 'unknown',
-                valid: this.status[cookie]?.state === 'valid' && fileExists,
-                failCount: this.status[cookie]?.failCount || 0,
-                lastFailure: this.status[cookie]?.lastFailure,
-                lastSuccess: this.status[cookie]?.lastSuccess,
-                reason: this.status[cookie]?.reason,
+                state: status.state || 'unknown',
+                authValid,
+                extractionValid,
+                streamValid,
+                valid: status.state === 'valid' && fileExists && authValid && extractionValid && streamValid,
+                failCount: status.failCount || 0,
+                lastFailure: status.lastFailure,
+                lastSuccess: status.lastSuccess,
+                lastExtractionCheck: status.lastExtractionCheck || null,
+                lastExtractionFailure: status.lastExtractionFailure || null,
+                lastStreamSuccess: status.lastStreamSuccess || null,
+                extractionClassification: status.extractionClassification || null,
+                reason: status.reason,
                 fileExists,
-                alertActive: this.status[cookie]?.alertActive || false
+                alertActive: status.alertActive || false
             };
         }
         return result;

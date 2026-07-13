@@ -17,6 +17,13 @@ const {
     buildSystemHealth,
     getMonitorDisplayStatus
 } = require('./services/healthSnapshot');
+const {
+    CLASSIFICATION,
+    classifyYtdlpError,
+    getYtdlpDiagnostics,
+    selectHlsStream,
+    sanitizeYtdlpMessage
+} = require('./services/ytdlpStreamSelector');
 require('dotenv').config();
 
 // ============================================================
@@ -279,8 +286,12 @@ async function restoreMonitorsPersistence() {
             try {
                 const owner = key.includes(':') ? key.split(':')[1] : null;
                 if (entry.youtubeUrl) {
-                    await converter.convert(entry.youtubeUrl, baseUrl, owner);
-                    console.log(`✅ Monitor restaurado: ${key}`);
+                    const result = await converter.convert(entry.youtubeUrl, baseUrl, owner, { automatic: true });
+                    if (result?.success && converter.activeMonitors.has(key)) {
+                        console.log(`✅ Monitor restaurado: ${key}`);
+                    } else {
+                        console.warn(`⚠️ Monitor não restaurado ${key}: ${result?.classification || 'unknown'} - ${result?.message || result?.error || 'sem stream ativa'}`);
+                    }
                 }
             } catch (err) {
                 console.warn(`❌ Falha ao restaurar monitor ${key}:`, err.message);
@@ -532,6 +543,16 @@ let converter = null;
 // ============================================================
 // FUNÇÃO runYtdlp CORRIGIDA (com fallback de cookie e parâmetros forçados)
 // ============================================================
+function sanitizeYtdlpArgsForLog(args) {
+    return (args || []).map((arg, index) => {
+        const value = String(arg || '');
+        if (args[index - 1] === '--cookies') return '[cookie-path-redacted]';
+        if (/^https?:\/\//i.test(value)) return '[url-redacted]';
+        if (/[A-Za-z]:\\/.test(value) || value.includes('/var/www/') || value.includes('/cookies/')) return '[path-redacted]';
+        return value;
+    }).join(' ');
+}
+
 function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
     return new Promise(async (resolve, reject) => {
         const filteredArgs = args.filter((arg, index) => {
@@ -542,10 +563,12 @@ function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
 
         const isMetadataCall = filteredArgs.includes('--dump-json') && 
                               filteredArgs.some(a => a.includes('youtube.com/watch'));
+        const isRealExtractionCall = filteredArgs.includes('--no-playlist') ||
+                                     filteredArgs.includes('--skip-download');
 
         let finalArgs = [...filteredArgs];
 
-        if (isMetadataCall) {
+        if (isMetadataCall && !isRealExtractionCall) {
             if (!finalArgs.includes('--flat-playlist')) {
                 finalArgs.push('--flat-playlist');
             }
@@ -568,7 +591,7 @@ function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
             }
         }
 
-        console.log(`🔧 runYtdlp args: ${finalArgs.join(' ')}`);
+        console.log(`🔧 runYtdlp args: ${sanitizeYtdlpArgsForLog(finalArgs)}`);
 
         const ytCmd = process.platform === 'win32' ? '.\\yt-dlp.exe' : 'yt-dlp';
 
@@ -667,18 +690,26 @@ async function validateCookieSimple(cookiePath) {
     }
     console.log('✅ Estrutura do cookie OK');
     try {
-        console.log('🔍 Testando autenticação do cookie...');
-        await runYtdlp([
+        console.log('🔍 Testando extração real do cookie...');
+        const stdout = await runYtdlp([
             '--cookies', cookiePath,
-            '--flat-playlist',
-            '--playlist-end', '1',
             '--dump-json',
-            'https://www.youtube.com/feed/subscriptions'
-        ], 20000, false);
-        console.log('✅ Cookie válido (autenticação confirmada)');
+            '--skip-download',
+            '--no-playlist',
+            process.env.COOKIE_STREAM_VALIDATION_URL || 'https://www.youtube.com/watch?v=aSXLerQStXA'
+        ], 45000, false);
+        const metadata = JSON.parse(stdout);
+        const selection = selectHlsStream(metadata, {
+            maxHeight: parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 720,
+            forceArtificial: true
+        });
+        if (!selection.ok) {
+            throw new Error(`sem stream valida (${selection.classification})`);
+        }
+        console.log(`✅ Cookie válido para streaming (${selection.type})`);
         return true;
     } catch (error) {
-        throw new Error('Cookie inválido: ' + error.message);
+        throw new Error('Cookie sem extração válida: ' + sanitizeYtdlpMessage(error.message));
     }
 }
 
@@ -1005,7 +1036,11 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     const savedOwner = key.includes(':') ? key.split(':')[1] : null;
                     console.log(`[${videoId}] Monitor ausente, recriando a partir do persistido... (owner: ${savedOwner})`);
                     const baseUrl = process.env.BASE_URL || `http://localhost:${PORT}`;
-                    await converter.convert(entry.youtubeUrl, baseUrl, savedOwner);
+                    const restoreResult = await converter.convert(entry.youtubeUrl, baseUrl, savedOwner, { automatic: true });
+                    if (!restoreResult?.success) {
+                        console.warn(`[${videoId}] Monitor persistido não recriado: ${restoreResult?.classification || 'unknown'} - ${restoreResult?.message || restoreResult?.error || 'sem stream ativa'}`);
+                        continue;
+                    }
                     const newKey = savedOwner ? `${videoId}:${savedOwner}` : videoId;
                     if (converter.activeMonitors.has(newKey)) {
                         monitor = converter.activeMonitors.get(newKey);
@@ -1371,7 +1406,7 @@ app.post('/api/convert', publicApiLimiter, async (req, res) => {
     const { youtubeUrl, owner } = req.body;
     if (!youtubeUrl) return res.status(400).json({ success: false, error: 'URL obrigatoria' });
     const baseUrl = process.env.BASE_URL || 'http://localhost:' + PORT;
-    const result = await converter.convert(youtubeUrl, baseUrl, owner);
+    const result = await converter.convert(youtubeUrl, baseUrl, owner, { manual: true });
     if (result.success && result.videoId) {
         const token = getOrCreateToken(result.videoId, owner);
         result.token = token;
@@ -2553,9 +2588,9 @@ startCookieAgentAlertWatcher();
 // ============================================================
 (async function validateCookiesOnStartup() {
     if (!converter || !converter.cookieRotator) return;
-    console.log('🔍 Validando cookies na inicialização (teste com live contínua)...');
+    console.log('🔍 Validando cookies na inicialização (extração real de HLS)...');
     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
-    const TEST_URL = 'https://www.youtube.com/watch?v=aSXLerQStXA';
+    const TEST_URL = process.env.COOKIE_STREAM_VALIDATION_URL || 'https://www.youtube.com/watch?v=aSXLerQStXA';
 
     for (const file of cookieFiles) {
         const fullPath = path.join(cookiesDir, file);
@@ -2568,25 +2603,47 @@ startCookieAgentAlertWatcher();
         const currentState = converter.cookieRotator.status[cookieKey]?.state || 'valid';
 
         try {
-            console.log(`🔍 Testando ${file} com live contínua...`);
-            await runYtdlp([
+            console.log(`🔍 Testando ${file} com extração real de stream...`);
+            const stdout = await runYtdlp([
                 '--cookies', fullPath,
-                '--flat-playlist',
-                '--playlist-end', '1',
                 '--dump-json',
+                '--skip-download',
+                '--no-playlist',
                 TEST_URL
-            ], 20000, false);
+            ], 45000, false);
 
-            converter.cookieRotator.markSuccess(cookieKey);
+            const metadata = JSON.parse(stdout);
+            const diagnostics = getYtdlpDiagnostics(metadata);
+            const selection = selectHlsStream(metadata, {
+                maxHeight: parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 720,
+                forceArtificial: true
+            });
+            console.log(`[startup:${file}] yt-dlp JSON: formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
+
+            if (!selection.ok) {
+                const extractionError = new Error(`Falha de validação de stream: ${selection.classification}`);
+                extractionError.classification = selection.classification || CLASSIFICATION.UNKNOWN;
+                extractionError.diagnostics = selection.diagnostics;
+                throw extractionError;
+            }
+
+            converter.cookieRotator.markExtractionSuccess(cookieKey);
             if (currentState !== 'valid') {
-                console.log(`✅ ${file} voltou de '${currentState}' para 'valid' após teste bem-sucedido.`);
+                console.log(`✅ ${file} voltou de '${currentState}' para 'valid' após extração real bem-sucedida.`);
+            } else {
+                console.log(`✅ ${file} validado para streaming (${selection.type}, ${selection.urlPreview})`);
             }
         } catch (err) {
-            console.log(`❌ ${file} falhou no teste: ${err.message}`);
-            if (converter.cookieRotator.isCookieAuthError(err.message)) {
+            const classification = err.classification || classifyYtdlpError(err.message);
+            const safeError = sanitizeYtdlpMessage(err.message);
+            console.log(`❌ ${file} falhou na validação real: ${classification} - ${safeError}`);
+            if (err.diagnostics) {
+                console.log(`[startup:${file}] Diagnóstico seguro: ${JSON.stringify(err.diagnostics)}`);
+            }
+            if (classification === CLASSIFICATION.AUTH_COOKIE || converter.cookieRotator.isCookieAuthError(err.message)) {
                 converter.cookieRotator.markFailure(cookieKey, err.message, 'startup-validation');
             } else {
-                console.log(`ℹ️ ${file}: Falha não relacionada a autenticação de cookie; estado preservado.`);
+                converter.cookieRotator.markExtractionFailure(cookieKey, classification, safeError, 'startup-validation');
             }
         }
     }
@@ -2601,11 +2658,11 @@ startCookieAgentAlertWatcher();
             emailAlerts.sendCookieFailureSummaryAlert(problematic);
         }
     } else {
-        const allValid = Object.values(statusAfterValidation).every(v => v.state === 'valid');
+        const allValid = Object.values(statusAfterValidation).every(v => v.valid === true);
         if (allValid) {
-            console.log('✅ Todos os cookies estão com estado válido após validação.');
+            console.log('✅ Todos os cookies estão válidos para extração real após validação.');
         } else {
-            console.log('ℹ️ Há cookies com estado não-válido, mas sem alerta ativo (possivelmente já recuperados).');
+            console.log('ℹ️ Há cookies sem validação completa de streaming; dashboard não deve exibir falso OK.');
         }
     }
 

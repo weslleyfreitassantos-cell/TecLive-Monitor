@@ -328,6 +328,34 @@ function testConversionBackoffWithoutActiveMonitorAffectsSystemHealth() {
     assert.equal(system.components.cookies.status, 'ok');
 }
 
+function testGlobalExtractionCriticalAffectsSystemHealth() {
+    const now = Date.now();
+    const converter = {
+        activeMonitors: new Map(),
+        extractionBackoff: new Map(),
+        globalExtractionCritical: true,
+        globalExtractionBackoff: {
+            consecutiveExtractionFailures: 2,
+            lastFailureClassification: 'no_formats',
+            nextRetryAt: now + 120000,
+            backoffSeconds: 120
+        }
+    };
+
+    const system = buildSystemHealth({
+        converter,
+        cookieFunctionalStatus: cookieStatus(true),
+        cookieRefreshStatus: agentStatus('online'),
+        auth: { sessionAdmin: true, adminPasswordConfigured: true },
+        nowMs: now
+    });
+
+    assert.equal(system.status, 'critical');
+    assert.equal(system.summary.activeMonitors, 0);
+    assert.equal(system.components.extraction.status, 'critical');
+    assert.ok(system.components.extraction.examples.some(item => item.includes('global')));
+}
+
 function testInvalidTimestampsAndMissingFieldsAreSafe() {
     assert.doesNotThrow(() => buildSystemHealth({
         converter: {
@@ -386,6 +414,8 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('serverLogContent'));
     assert.ok(appSource.includes("app.get('/api/admin/logs/timeline', isAdminApiAuthenticated"));
     assert.ok(appSource.includes('sanitizeServerLogLine'));
+    assert.ok(appSource.includes('sanitizeYtdlpArgsForLog'));
+    assert.ok(!appSource.includes('runYtdlp args: ${finalArgs.join'));
     assert.equal((html.match(/setInterval\(fetchData/g) || []).length, 1);
     assert.equal((html.match(/fetchAdminJson\('\/api\/admin\/health'/g) || []).length, 1);
     assert.ok(!html.includes('onclick="openClientDetailModal'));
@@ -405,6 +435,7 @@ function main() {
     testCriticalCookiesDoNotHideOtherComponents();
     testTerminalAvailabilityDoesNotPolluteGlobalHealth();
     testConversionBackoffWithoutActiveMonitorAffectsSystemHealth();
+    testGlobalExtractionCriticalAffectsSystemHealth();
     testInvalidTimestampsAndMissingFieldsAreSafe();
     testPublicHealthRouteDoesNotExposeSensitiveOperationalDetails();
     testAdminHealthRouteRequiresAdminSession();

@@ -317,6 +317,64 @@ async function testAuthCookieStillMarksFailure() {
     }
 }
 
+async function testGlobalExtractionOutageBackoff() {
+    const fakes = installConvertFakes();
+    const capture = captureConsole();
+    const previousGlobalBackoffMax = process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS;
+    try {
+        const api = new fakes.ConvertAPI(null, null);
+        api._getVideoMetadata = async () => ({ title: 'Global outage', channel: 'Test' });
+        api._persistMapping = () => {};
+
+        const attempts = [];
+        api._runYtdlp = async (args) => {
+            const cookie = cookieFromArgs(args);
+            attempts.push(cookie);
+            if (cookie === null) {
+                throw new Error('Sign in to confirm you are not a bot');
+            }
+            throw new Error('No video formats found');
+        };
+
+        const result = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL1', 'http://127.0.0.1', 'owner-a');
+        assert.equal(result.success, false);
+        assert.equal(result.classification, CLASSIFICATION.NO_FORMATS);
+        assert.equal(result.globalExtractionCritical, true);
+        assert.ok(result.error.includes('Não foi possível extrair'));
+        assert.deepEqual(attempts, ['cookie1.txt', 'cookie2.txt', 'cookie3.txt', null]);
+        assert.equal(fakes.fakeCalls.filter(call => call.op === 'failure').length, 0);
+        assert.equal(api.globalExtractionCritical, true);
+        assert.equal(api.globalExtractionBackoff.lastFailureClassification, CLASSIFICATION.NO_FORMATS);
+        assert.ok(api.globalExtractionBackoff.nextRetryAt > Date.now());
+
+        const before = attempts.length;
+        const suppressed = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL2', 'http://127.0.0.1', 'owner-b', { automatic: true });
+        assert.equal(suppressed.success, false);
+        assert.equal(suppressed.globalExtractionCritical, true);
+        assert.equal(attempts.length, before);
+
+        api.globalExtractionBackoff.nextRetryAt = Date.now() - 1;
+        const manual = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL2', 'http://127.0.0.1', 'owner-b', { manual: true });
+        assert.equal(manual.success, false);
+        assert.ok(attempts.length > before);
+
+        process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS = '-1';
+        const invalidEnvApi = new fakes.ConvertAPI(null, null);
+        for (let i = 0; i < 8; i += 1) {
+            invalidEnvApi._recordGlobalExtractionFailure(`ENVFAIL${i}`, CLASSIFICATION.NO_FORMATS, 1000 + i);
+        }
+        assert.equal(invalidEnvApi.globalExtractionBackoff.backoffSeconds, 300);
+    } finally {
+        if (previousGlobalBackoffMax === undefined) {
+            delete process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS;
+        } else {
+            process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS = previousGlobalBackoffMax;
+        }
+        capture.restore();
+        fakes.cleanup();
+    }
+}
+
 async function testOwnersAndRemovalCleanup() {
     const fakes = installConvertFakes();
     const capture = captureConsole();
@@ -444,6 +502,7 @@ async function main() {
     testBackoffStateReset();
     await testConvertBackoffAndIsolation();
     await testAuthCookieStillMarksFailure();
+    await testGlobalExtractionOutageBackoff();
     await testOwnersAndRemovalCleanup();
     await testSchedulerRespectsBackoff();
     await testForcedRenewStopsCurrentRound();

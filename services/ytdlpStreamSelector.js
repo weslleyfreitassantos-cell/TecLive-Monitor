@@ -97,6 +97,14 @@ const PUBLIC_FALLBACK_BLOCKED_CLASSIFICATIONS = Object.freeze(new Set([
     CLASSIFICATION.GEO_RESTRICTED
 ]));
 
+const COOKIE_EXTRACTION_FAILURE_CLASSIFICATIONS = Object.freeze(new Set([
+    CLASSIFICATION.NO_FORMATS,
+    CLASSIFICATION.INVALID_HLS,
+    CLASSIFICATION.DASH_ONLY,
+    CLASSIFICATION.PLAYER_RESPONSE_INVALID,
+    CLASSIFICATION.YOUTUBE_CHANGED
+]));
+
 function getFailureClassification(failure) {
     if (!failure) return null;
     if (typeof failure === 'string') return failure;
@@ -116,6 +124,21 @@ function shouldAttemptPublicFallback(failures) {
     }
 
     return classifications.some(classification => PUBLIC_FALLBACK_ALLOWED_CLASSIFICATIONS.has(classification));
+}
+
+function isCookieExtractionFailureClassification(classification) {
+    return COOKIE_EXTRACTION_FAILURE_CLASSIFICATIONS.has(classification);
+}
+
+function isGlobalExtractionOutagePattern(cookieFailures, publicFailure) {
+    const cookieClassifications = (cookieFailures || [])
+        .map(getFailureClassification)
+        .filter(Boolean);
+    const publicClassification = getFailureClassification(publicFailure);
+
+    return cookieClassifications.length > 0 &&
+        cookieClassifications.every(isCookieExtractionFailureClassification) &&
+        publicClassification === CLASSIFICATION.AUTH_COOKIE;
 }
 
 function isHlsProtocol(protocol) {
@@ -349,6 +372,8 @@ module.exports = {
     safeUrlPreview,
     sanitizeYtdlpMessage,
     shouldAttemptPublicFallback,
+    isCookieExtractionFailureClassification,
+    isGlobalExtractionOutagePattern,
     isHlsProtocol,
     isPotentialHlsFormat
 };

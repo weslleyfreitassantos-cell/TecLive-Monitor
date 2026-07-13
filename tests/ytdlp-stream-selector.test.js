@@ -5,7 +5,8 @@ const {
     classifyYtdlpError,
     getYtdlpDiagnostics,
     selectHlsStream,
-    sanitizeYtdlpMessage
+    sanitizeYtdlpMessage,
+    isGlobalExtractionOutagePattern
 } = require('../services/ytdlpStreamSelector');
 
 function hlsFormat(height, extra = {}) {
@@ -173,6 +174,22 @@ function testMaxHeightFallbackAndDiagnostics() {
     assert.ok(diagnostics.protocols.includes('m3u8_native'));
 }
 
+function testGlobalExtractionOutagePattern() {
+    assert.equal(isGlobalExtractionOutagePattern([
+        { classification: CLASSIFICATION.NO_FORMATS },
+        { classification: CLASSIFICATION.NO_FORMATS },
+        { classification: CLASSIFICATION.INVALID_HLS }
+    ], { classification: CLASSIFICATION.AUTH_COOKIE }), true);
+
+    assert.equal(isGlobalExtractionOutagePattern([
+        { classification: CLASSIFICATION.AUTH_COOKIE }
+    ], { classification: CLASSIFICATION.AUTH_COOKIE }), false);
+
+    assert.equal(isGlobalExtractionOutagePattern([
+        { classification: CLASSIFICATION.NO_FORMATS }
+    ], { classification: CLASSIFICATION.LIVE_ENDED }), false);
+}
+
 testClassifications();
 testHlsSelectionFromFormatsWithoutM3u8Extension();
 testManifestUrlSelection();
@@ -182,5 +199,6 @@ testYtdlpMessageSanitization();
 testTopLevelProtocolSelection();
 testDashOnlyAndNoFormats();
 testMaxHeightFallbackAndDiagnostics();
+testGlobalExtractionOutagePattern();
 
 console.log('yt-dlp stream selector tests OK');

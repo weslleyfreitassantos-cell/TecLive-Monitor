@@ -267,6 +267,27 @@ function testRotatorIgnoresExtractionAndNetworkErrors() {
     assert.equal(queue.list({ limit: 10 }).length, 0);
 }
 
+function testRotatorSeparatesAuthAndStreamValidity() {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'cookie1.txt'), `${'#'.repeat(6000)}\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\ta\tb\n`);
+    const rotator = new CookieRotator(dir, path.join(dir, 'status.json'));
+
+    rotator.markExtractionFailure('cookie1.txt', 'no_formats', 'No video formats found', 'test');
+    let functional = rotator.getFunctionalStatus();
+    assert.equal(functional.cookie1.state, 'valid');
+    assert.equal(functional.cookie1.authValid, true);
+    assert.equal(functional.cookie1.extractionValid, false);
+    assert.equal(functional.cookie1.streamValid, false);
+    assert.equal(functional.cookie1.valid, false);
+    assert.equal(functional.cookie1.extractionClassification, 'no_formats');
+
+    rotator.markExtractionSuccess('cookie1.txt');
+    functional = rotator.getFunctionalStatus();
+    assert.equal(functional.cookie1.valid, true);
+    assert.equal(functional.cookie1.extractionValid, true);
+    assert.equal(functional.cookie1.streamValid, true);
+}
+
 function testAgentStatusClassification() {
     const now = Date.parse('2026-07-11T12:00:00.000Z');
     const heartbeatRecent = CookieRefreshQueue.computeAgentStatus({
@@ -554,6 +575,7 @@ async function main() {
     testRotatorIntegration();
     testRotatorDoesNotCancelClaimedOrRunning();
     testRotatorIgnoresExtractionAndNetworkErrors();
+    testRotatorSeparatesAuthAndStreamValidity();
     testAgentStatusClassification();
     testQueueCheckActivityIsPersisted();
     testAgentOfflineAndRecoveryAlertTransitions();

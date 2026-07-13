@@ -14,6 +14,7 @@ const {
     safeUrlPreview,
     sanitizeYtdlpMessage,
     shouldAttemptPublicFallback,
+    isGlobalExtractionOutagePattern,
     isPotentialHlsFormat
 } = require('../services/ytdlpStreamSelector');
 const {
@@ -407,19 +408,22 @@ class LiveMonitor {
                 const allFailures = publicFallbackFailure ? failures.concat(publicFallbackFailure) : failures;
                 const onlyCookieAuthFailures = failures.length > 0 &&
                     failures.every(({ classification }) => isCookieAuthClassification(classification));
-                const publicRestrictedClassification = publicFallbackFailure &&
+                const globalExtractionOutage = failures.length >= attempts.length &&
+                    isGlobalExtractionOutagePattern(failures, publicFallbackFailure);
+                const publicRestrictedClassification = !globalExtractionOutage && publicFallbackFailure &&
                     !shouldAttemptPublicFallback([publicFallbackFailure])
                     ? publicFallbackFailure.classification
                     : null;
                 const primaryClassification = allFailures.find(({ classification }) =>
                     !isCookieAuthClassification(classification)
                 )?.classification || failures[0]?.classification || CLASSIFICATION.UNKNOWN;
-                const finalClassification = publicRestrictedClassification ||
+                const finalClassification = globalExtractionOutage ? CLASSIFICATION.NO_FORMATS : publicRestrictedClassification ||
                     (onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification);
                 const finalError = new Error(publicFallbackFailure
                     ? `Todos os cookies e fallback publico falharam: ${finalClassification}`
                     : `Todos os cookies falharam: ${finalClassification}`);
                 finalError.classification = finalClassification;
+                finalError.globalExtractionOutage = globalExtractionOutage;
                 if (cookieFailureAlreadyHandled) {
                     finalError.cookieFailureAlreadyHandled = true;
                 }

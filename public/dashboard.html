@@ -2408,9 +2408,11 @@
             const info = cookies[name] || {};
             const state = info.state || 'desconhecido';
             const lastSuccess = formatDateTime(info.lastSuccess);
-            return `<div class="automation-pill ${state === 'valid' ? 'ok' : 'warn'}">
+            const streamOk = info.valid === true;
+            const displayState = streamOk ? 'valid' : (info.extractionValid === false || info.streamValid === false ? 'sem stream' : state);
+            return `<div class="automation-pill ${streamOk ? 'ok' : 'warn'}">
                 <div class="automation-label">${name.toUpperCase()}</div>
-                <div class="automation-value">${escapeHtml(state)}<br><span style="color:#7a8aa0; font-size:11px;">última sync: ${escapeHtml(lastSuccess)}</span></div>
+                <div class="automation-value">${escapeHtml(displayState)}<br><span style="color:#7a8aa0; font-size:11px;">última sync: ${escapeHtml(lastSuccess)}</span></div>
             </div>`;
         }).join('');
 
@@ -2652,7 +2654,11 @@
                 // Fonte da verdade: alertActive (vem do backend). Só desliga
                 // quando o cookie é trocado de verdade, não com recuperação
                 // automática do scheduler.
-                const isProblematic = info.alertActive === true;
+                const isProblematic = info.alertActive === true ||
+                    info.valid === false ||
+                    info.authValid === false ||
+                    info.extractionValid === false ||
+                    info.streamValid === false;
 
                 if (isProblematic) {
                     hasProblem = true;
@@ -2662,12 +2668,13 @@
                 let statusText = 'VÁLIDO';
                 let statusClass = '';
                 if (isProblematic) {
-                    if (info.state === 'invalid') statusText = 'INVÁLIDO';
+                    if (info.authValid === false || info.state === 'invalid') statusText = 'INVÁLIDO';
+                    else if (info.extractionValid === false || info.streamValid === false) statusText = 'SEM STREAM';
                     else statusText = 'SUSPEITO (aguardando troca)';
                     statusClass = 'invalid';
                 }
 
-                const reason = info.reason || (info.failCount > 0 ? `${info.failCount} falhas` : '');
+                const reason = info.reason || info.extractionClassification || (info.failCount > 0 ? `${info.failCount} falhas` : '');
                 const lastFail = info.lastFailure ? new Date(info.lastFailure).getTime() : 0;
                 const lastFailStr = lastFail ? ` (última falha ${new Date(lastFail).toLocaleTimeString('pt-BR')})` : '';
 

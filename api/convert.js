@@ -11,7 +11,8 @@ const {
     getYtdlpDiagnostics,
     selectHlsStream,
     sanitizeYtdlpMessage,
-    shouldAttemptPublicFallback
+    shouldAttemptPublicFallback,
+    isGlobalExtractionOutagePattern
 } = require('../services/ytdlpStreamSelector');
 const {
     DEFAULT_COOKIE_FILES,
@@ -47,6 +48,8 @@ class ConvertAPI {
         
         this.scheduler = new GlobalScheduler(60000, 6, this.cookieRotator);
         this.extractionBackoff = new Map();
+        this.globalExtractionBackoff = createExtractionBackoffState();
+        this.globalExtractionCritical = false;
     }
 
     removeMonitor(videoId, owner) {
@@ -94,6 +97,27 @@ class ConvertAPI {
         const retryIso = state.nextRetryAt ? new Date(state.nextRetryAt).toISOString() : 'n/a';
         console.log(`[${videoId}] ${scope} [${state.lastFailureClassification}] falhasConsecutivas=${state.consecutiveExtractionFailures} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
         return state;
+    }
+
+    _recordGlobalExtractionFailure(videoId, classification, now = Date.now()) {
+        const state = this.globalExtractionBackoff;
+        const parsedMaxSeconds = parseInt(process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS, 10);
+        const extractionMaxSeconds = Number.isFinite(parsedMaxSeconds) && parsedMaxSeconds > 0
+            ? parsedMaxSeconds
+            : 300;
+        applyExtractionFailure(state, classification || CLASSIFICATION.NO_FORMATS, now, {
+            extractionMaxSeconds
+        });
+        this.globalExtractionCritical = true;
+        const retryIso = state.nextRetryAt ? new Date(state.nextRetryAt).toISOString() : 'n/a';
+        console.log(`[GLOBAL] extracao critica apos ${videoId}: ${state.lastFailureClassification} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
+        return state;
+    }
+
+    _recordGlobalExtractionSuccess(now = Date.now()) {
+        const recovered = resetExtractionBackoff(this.globalExtractionBackoff, null, now, 'stream');
+        this.globalExtractionCritical = false;
+        return recovered;
     }
 
     _recordConvertSuccess(key, videoId, cookieName, source = null, now = Date.now()) {
@@ -232,9 +256,10 @@ class ConvertAPI {
         }
     }
 
-    async convert(youtubeUrl, baseUrl, owner = null) {
+    async convert(youtubeUrl, baseUrl, owner = null, options = {}) {
         const videoId = this.extractVideoId(youtubeUrl);
         const key = this._getCompositeKey(videoId, owner);
+        const manualAttempt = options.manual === true;
         
         if (this.activeMonitors.has(key)) {
             const monitor = this.activeMonitors.get(key);
@@ -260,6 +285,21 @@ class ConvertAPI {
                 classification: extractionState.lastFailureClassification || CLASSIFICATION.UNKNOWN,
                 retryAfterSeconds: Math.ceil(backoffDelayMs / 1000),
                 message: 'A extracao desta live esta em backoff temporario; tente novamente apos o proximo retry.'
+            };
+        }
+
+        const globalBackoffDelayMs = getBackoffDelayMs(this.globalExtractionBackoff);
+        if (!manualAttempt && globalBackoffDelayMs > 0) {
+            const retryAfterSeconds = Math.ceil(globalBackoffDelayMs / 1000);
+            console.log(`[GLOBAL] extracao em backoff; ${videoId} suprimido por ${retryAfterSeconds}s`);
+            return {
+                success: false,
+                videoId,
+                error: 'Não foi possível extrair a transmissão do YouTube neste momento.',
+                classification: this.globalExtractionBackoff.lastFailureClassification || CLASSIFICATION.NO_FORMATS,
+                retryAfterSeconds,
+                globalExtractionCritical: true,
+                message: 'Extração global em backoff temporário; tente novamente em instantes.'
             };
         }
 
@@ -387,32 +427,36 @@ class ConvertAPI {
                 : 0;
             const onlyCookieAuthFailures = failedCookies.length > 0 &&
                 cookieErrorCount === failedCookies.length;
-            const publicRestrictedClassification = publicFallbackFailure &&
+            const globalExtractionOutage = failedCookies.length >= cookieAttemptOrder.length &&
+                isGlobalExtractionOutagePattern(failedCookies, publicFallbackFailure);
+            const publicRestrictedClassification = !globalExtractionOutage && publicFallbackFailure &&
                 !shouldAttemptPublicFallback([publicFallbackFailure])
                 ? publicFallbackFailure.classification
                 : null;
             const primaryClassification = allFailures.find(({ classification }) =>
                 !isCookieAuthClassification(classification)
-            )?.classification || failedCookies[0]?.classification || CLASSIFICATION.UNKNOWN;
-            const responseClassification = publicRestrictedClassification ||
+                )?.classification || failedCookies[0]?.classification || CLASSIFICATION.UNKNOWN;
+            const responseClassification = globalExtractionOutage ? CLASSIFICATION.NO_FORMATS : publicRestrictedClassification ||
                 (onlyCookieAuthFailures ? CLASSIFICATION.AUTH_COOKIE : primaryClassification);
             const failureScope = publicFallbackFailure
                 ? 'todos os cookies e fallback publico falharam'
                 : 'todos os cookies falharam';
             this._recordConvertFailure(key, videoId, responseClassification, Date.now(), failureScope);
+            if (globalExtractionOutage) {
+                this._recordGlobalExtractionFailure(videoId, responseClassification);
+            }
             return {
                 success: false,
                 videoId: videoId,
-                error: publicFallbackFailure
-                    ? 'Todos os cookies e fallback publico falharam para obter a stream'
-                    : 'Todos os cookies falharam para obter a stream',
+                error: 'Não foi possível extrair a transmissão do YouTube neste momento.',
                 classification: responseClassification,
+                globalExtractionCritical: globalExtractionOutage,
                 failedCookies,
                 publicFallback: publicFallbackFailure,
                 metadata: metadata,
                 message: onlyCookieAuthFailures
                     ? 'Falha de autenticacao/cookie. Verifique os cookies.'
-                    : 'Nao foi possivel obter a stream; o erro parece relacionado ao video, disponibilidade ou rede, nao necessariamente aos cookies.'
+                    : 'Não foi possível extrair a transmissão do YouTube neste momento. Tente novamente em instantes ou atualize os cookies se o problema persistir.'
             };
         }
 
@@ -424,6 +468,7 @@ class ConvertAPI {
             console.log(`[${videoId}] extracao concluida via public; estado dos cookies preservado.`);
         }
         const successState = this._recordConvertSuccess(key, videoId, workingCookie, extractionSource);
+        this._recordGlobalExtractionSuccess();
 
         console.log(`✅ Stream capturada para ${videoId}:${owner}`);
         const LiveMonitor = require('../monitor/liveMonitor');
