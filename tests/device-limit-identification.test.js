@@ -325,6 +325,27 @@ function testAppIntegrationStaticChecks() {
     assert.ok(!app.includes('primeiros 200 chars'));
 }
 
+function testHlsPlaybackCompatibilityStaticChecks() {
+    const app = fs.readFileSync(APP_PATH, 'utf8');
+    assert.ok(app.includes('function getPlaybackManifestBaseUrl(req)'));
+    assert.ok(app.includes('function normalizeManifestBaseUrl(value)'));
+    assert.ok(app.includes('DEFAULT_PUBLIC_HLS_BASE_URL'));
+    assert.ok(app.includes('process.env.HLS_PUBLIC_BASE_URL'));
+    assert.ok(app.includes("parsed.protocol = 'https:'"));
+    assert.ok(app.includes('baseUrl: playbackManifestBaseUrl'));
+    assert.ok(app.includes('function sendHlsError(res, statusCode, message'));
+    assert.ok(app.includes("'Cache-Control': 'private, no-store, no-cache'"));
+    assert.ok(app.includes("app.head('/neonews/t/:token.m3u8'"));
+    assert.ok(app.includes("app.head('/neonews/:videoId.m3u8'"));
+    assert.ok(app.includes("return sendHlsError(res, 429, 'limit_exceeded')"));
+    assert.ok(app.includes("return sendHlsError(res, 429, 'session_rate_limited'"));
+    assert.ok(app.includes("return sendHlsError(res, 404, 'token_not_found')"));
+    assert.ok(!app.includes("req.headers['x-forwarded-host']"));
+    assert.ok(!app.includes("req.get('host')"));
+    assert.ok(!app.includes("res.status(429).json({\n                        error: 'Limite de dispositivos excedido'"));
+    assert.ok(!app.includes("res.status(429).json({\n                        error: 'Muitas tentativas de sessão'"));
+}
+
 async function main() {
     testSameIpAndUserAgentFourthIsBlocked();
     testDifferentIpsFourthIsBlocked();
@@ -345,6 +366,7 @@ async function main() {
     testDashboardCountsSessions();
     testSanitizationAndPreview();
     testAppIntegrationStaticChecks();
+    testHlsPlaybackCompatibilityStaticChecks();
     console.log('Device limit identification tests OK');
 }
 

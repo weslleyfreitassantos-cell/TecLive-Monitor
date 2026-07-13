@@ -126,6 +126,7 @@ const cookieRefreshQueue = new CookieRefreshQueue({
 const playbackSessions = new PlaybackSessionStore({
     filePath: path.join(__dirname, 'data', 'playback-sessions.json')
 });
+const DEFAULT_PUBLIC_HLS_BASE_URL = 'https://livemonitor.vps-kinghost.net';
 const removedPlaybackSessionsOnStartup = playbackSessions.pruneExpired();
 if (removedPlaybackSessionsOnStartup > 0) {
     console.log(`🧹 ${removedPlaybackSessionsOnStartup} sessão(ões) HLS expirada(s) removida(s) na inicialização.`);
@@ -920,7 +921,32 @@ function makeBandwidthForHeight(height) {
     return 8000000;
 }
 
-function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight }) {
+function normalizeManifestBaseUrl(value) {
+    try {
+        const parsed = new URL(String(value || '').trim());
+        if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+        if (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)) {
+            parsed.protocol = 'https:';
+        }
+        const pathname = parsed.pathname && parsed.pathname !== '/'
+            ? parsed.pathname.replace(/\/+$/g, '')
+            : '';
+        return `${parsed.protocol}//${parsed.host}${pathname}`;
+    } catch (_) {
+        return '';
+    }
+}
+
+function getPlaybackManifestBaseUrl(req) {
+    return normalizeManifestBaseUrl(
+        process.env.HLS_PUBLIC_BASE_URL ||
+        process.env.PUBLIC_BASE_URL ||
+        process.env.BASE_URL ||
+        DEFAULT_PUBLIC_HLS_BASE_URL
+    );
+}
+
+function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight, baseUrl = '' }) {
     const basePath = token
         ? `/neonews/t/${encodeURIComponent(token)}.m3u8`
         : `/neonews/${encodeURIComponent(videoId)}.m3u8`;
@@ -928,7 +954,9 @@ function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight }) {
     if (!token && owner) params.set('owner', owner);
     params.set('session', sessionId);
     if (maxHeight) params.set('max', String(maxHeight));
-    return `${basePath}?${params.toString()}`;
+    const pathAndQuery = `${basePath}?${params.toString()}`;
+    const normalizedBaseUrl = normalizeManifestBaseUrl(baseUrl);
+    return normalizedBaseUrl ? `${normalizedBaseUrl}${pathAndQuery}` : pathAndQuery;
 }
 
 function getAvailablePlaylistHeights(monitor) {
@@ -955,7 +983,8 @@ function buildPlaybackSessionMaster(monitor, {
     owner,
     sessionId,
     requestedMaxHeight,
-    fallbackMaxHeight
+    fallbackMaxHeight,
+    baseUrl
 }) {
     let heights = getAvailablePlaylistHeights(monitor);
     if (heights.length === 0) {
@@ -971,7 +1000,7 @@ function buildPlaybackSessionMaster(monitor, {
     const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
     for (const height of heights) {
         const width = Math.round(height * 16 / 9);
-        const url = buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight: height });
+        const url = buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight: height, baseUrl });
         lines.push(
             `#EXT-X-STREAM-INF:BANDWIDTH=${makeBandwidthForHeight(height)},RESOLUTION=${width}x${height},FRAME-RATE=30`,
             url
@@ -991,6 +1020,62 @@ function sendHlsManifest(res, content, extraHeaders = {}) {
         ...extraHeaders
     });
     res.end(content);
+}
+
+function sendHlsError(res, statusCode, message, extraHeaders = {}) {
+    if (res.headersSent) return;
+    res.writeHead(statusCode, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'private, no-store, no-cache',
+        'Vary': 'User-Agent',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        ...extraHeaders
+    });
+    res.end(`${message}\n`);
+}
+
+function findActiveHlsMonitor(videoId, owner = null) {
+    if (owner) {
+        const key = `${videoId}:${owner}`;
+        if (converter.activeMonitors.has(key)) {
+            return {
+                monitor: converter.activeMonitors.get(key),
+                actualOwner: owner,
+                keyFound: key
+            };
+        }
+    }
+
+    for (const [key, mon] of converter.activeMonitors.entries()) {
+        if (key.startsWith(videoId + ':')) {
+            return {
+                monitor: mon,
+                actualOwner: key.split(':')[1] || null,
+                keyFound: key
+            };
+        }
+    }
+
+    return { monitor: null, actualOwner: null, keyFound: null };
+}
+
+function handleHlsHead(videoId, owner, res) {
+    const found = findActiveHlsMonitor(videoId, owner);
+    if (!found.monitor || !found.monitor.m3u8Url) {
+        return sendHlsError(res, 404, 'stream_not_found');
+    }
+    res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'private, no-store, no-cache',
+        'Vary': 'User-Agent',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'X-Master': 'true'
+    });
+    res.end();
 }
 
 // ============================================================
@@ -1060,29 +1145,10 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
         console.log(`[${videoId}] 📺 Qualidade forçada via URL: ${finalMaxHeight}p (proxy de playlist)`);
     }
 
-    let monitor = null;
-    let keyFound = null;
-    let actualOwner = null;
-
-    if (queryOwner) {
-        const key = `${videoId}:${queryOwner}`;
-        if (converter.activeMonitors.has(key)) {
-            monitor = converter.activeMonitors.get(key);
-            actualOwner = queryOwner;
-            keyFound = key;
-        }
-    }
-
-    if (!monitor) {
-        for (const [key, mon] of converter.activeMonitors.entries()) {
-            if (key.startsWith(videoId + ':')) {
-                monitor = mon;
-                actualOwner = key.split(':')[1] || null;
-                keyFound = key;
-                break;
-            }
-        }
-    }
+    const foundMonitor = findActiveHlsMonitor(videoId, queryOwner);
+    let monitor = foundMonitor.monitor;
+    let keyFound = foundMonitor.keyFound;
+    let actualOwner = foundMonitor.actualOwner;
 
     if (!monitor) {
         const retryAfterSeconds = getGlobalExtractionRetryAfterSeconds();
@@ -1090,7 +1156,9 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             logRestoreBackoffSuppressed(videoId, queryOwner, retryAfterSeconds);
             logProxyAccess(videoId, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart });
             res.set('Retry-After', String(retryAfterSeconds));
-            return res.status(503).send('Stream extraction temporarily unavailable');
+            return sendHlsError(res, 503, 'stream_extraction_unavailable', {
+                'Retry-After': String(retryAfterSeconds)
+            });
         }
 
         try {
@@ -1126,13 +1194,14 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
 
     if (!monitor || !monitor.m3u8Url) {
         logProxyAccess(videoId, { statusCode: 404, fromCache: false, elapsedMs: Date.now() - reqStart });
-        return res.status(404).send('Stream not found');
+        return sendHlsError(res, 404, 'stream_not_found');
     }
 
     const trackingOwner = queryOwner || actualOwner;
     const localIp = req.query.localIp || null;
     const sessionIdFromRequest = String(req.query.session || '').trim();
     let activePlaybackSessionId = null;
+    const playbackManifestBaseUrl = getPlaybackManifestBaseUrl(req);
 
     if (trackingOwner) {
         const clientIp = getRequestIp(req);
@@ -1150,16 +1219,14 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 if (!touched.ok) {
                     const status = touched.code === 'expired' ? 410 : 403;
                     console.warn(`[${trackingOwner}:${videoId}] sessao HLS rejeitada (${touched.code}) session=${sessionPreview(sessionIdFromRequest)}`);
-                    return res.status(status).send('Playback session invalid');
+                    return sendHlsError(res, status, touched.code === 'expired' ? 'session_expired' : 'session_invalid');
                 }
                 activePlaybackSessionId = sessionIdFromRequest;
             } else {
                 if (isPlaybackSessionCreationRateLimited(clientIp, trackingOwner, videoId)) {
                     console.warn(`[${trackingOwner}:${videoId}] criacao de sessao HLS limitada por taxa para IP ${clientIp}`);
-                    res.set('Retry-After', '60');
-                    return res.status(429).json({
-                        error: 'Muitas tentativas de sessão',
-                        message: 'Tente novamente em instantes.'
+                    return sendHlsError(res, 429, 'session_rate_limited', {
+                        'Retry-After': '60'
                     });
                 }
                 const deviceLimit = getDeviceLimitForOwner(trackingOwner);
@@ -1175,10 +1242,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
 
                 if (!created.ok) {
                     console.log(`[${trackingOwner}:${videoId}] 🚫 Sessao HLS bloqueada: ${created.active} ativas, limite ${created.limit}`);
-                    return res.status(429).json({
-                        error: 'Limite de dispositivos excedido',
-                        message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
-                    });
+                    return sendHlsError(res, 429, 'limit_exceeded');
                 }
 
                 activePlaybackSessionId = created.session.sessionId;
@@ -1189,7 +1253,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     owner: trackingOwner,
                     sessionId: activePlaybackSessionId,
                     requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
-                    fallbackMaxHeight: finalMaxHeight
+                    fallbackMaxHeight: finalMaxHeight,
+                    baseUrl: playbackManifestBaseUrl
                 });
                 return sendHlsManifest(res, sessionMaster, {
                     'X-Playback-Session': sessionPreview(activePlaybackSessionId),
@@ -1249,7 +1314,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 owner: trackingOwner,
                 sessionId: activePlaybackSessionId,
                 requestedMaxHeight: null,
-                fallbackMaxHeight: finalMaxHeight
+                fallbackMaxHeight: finalMaxHeight,
+                baseUrl: playbackManifestBaseUrl
             })
             : monitor._masterContent.content;
         console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (sem filtro)'}`);
@@ -1288,7 +1354,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     owner: trackingOwner,
                     sessionId: activePlaybackSessionId,
                     requestedMaxHeight: null,
-                    fallbackMaxHeight: finalMaxHeight
+                    fallbackMaxHeight: finalMaxHeight,
+                    baseUrl: playbackManifestBaseUrl
                 });
             }
             console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (via cache)'}`);
@@ -1451,15 +1518,16 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
 
                 console.log(`[${videoId}] Renovação não concluiu em ${REFRESH_WAIT_MS}ms, respondendo 503.`);
                 logProxyAccess(videoId, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart });
-                res.set('Retry-After', '2');
-                return res.status(503).send('Stream renewing, retry shortly');
+                return sendHlsError(res, 503, 'stream_renewing', {
+                    'Retry-After': '2'
+                });
             }
         }
 
         console.error(`[${videoId}] Proxy error:`, err.message);
         if (!res.headersSent) {
             logProxyAccess(videoId, { statusCode: 500, fromCache: false, elapsedMs: Date.now() - reqStart });
-            res.status(500).send('Proxy error');
+            sendHlsError(res, 500, 'proxy_error');
         }
     }
 }
@@ -1759,6 +1827,10 @@ app.get('/api/keepalive', publicApiLimiter, (req, res) => {
 });
 
 // ========== PROXY HLS (rota com videoId) - compatibilidade ==========
+app.head('/neonews/:videoId.m3u8', (req, res) => {
+    handleHlsHead(req.params.videoId, req.query.owner || null, res);
+});
+
 app.get('/neonews/:videoId.m3u8', async (req, res) => {
     const videoId = req.params.videoId;
     const queryOwner = req.query.owner || null;
@@ -1773,11 +1845,19 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
 });
 
 // ========== PROXY HLS (rota com token) ==========
+app.head('/neonews/t/:token.m3u8', (req, res) => {
+    const info = getTokenInfo(req.params.token);
+    if (!info) {
+        return sendHlsError(res, 404, 'token_not_found');
+    }
+    handleHlsHead(info.videoId, info.owner, res);
+});
+
 app.get('/neonews/t/:token.m3u8', async (req, res) => {
     const token = req.params.token;
     const info = getTokenInfo(token);
     if (!info) {
-        return res.status(404).send('Token inválido ou expirado');
+        return sendHlsError(res, 404, 'token_not_found');
     }
     const { videoId, owner } = info;
     const allowedHeights = [144, 240, 360, 480, 720, 1080];
