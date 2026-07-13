@@ -183,6 +183,11 @@ function createExtractionBackoffState(seed = {}) {
         lastSuccessfulCookie: normalizeCookieName(seed.lastSuccessfulCookie) || null,
         lastSuccessfulExtractionSource: normalizeExtractionSource(seed.lastSuccessfulExtractionSource, seed.lastSuccessfulCookie),
         lastExtractionSuccessAt: seed.lastExtractionSuccessAt || null,
+        lastAutomaticCookieRefreshQueuedAt: Number(seed.lastAutomaticCookieRefreshQueuedAt) || 0,
+        automaticCookieRefreshReason: seed.automaticCookieRefreshReason || null,
+        automaticCookieRefreshJobs: Array.isArray(seed.automaticCookieRefreshJobs)
+            ? seed.automaticCookieRefreshJobs.slice(0, 10)
+            : [],
         _lastBackoffLogAt: 0,
         _lastBackoffLogRetryAt: 0,
         _recoveryLoggedForFailureSequence: false

@@ -338,7 +338,9 @@ function testGlobalExtractionCriticalAffectsSystemHealth() {
             consecutiveExtractionFailures: 2,
             lastFailureClassification: 'no_formats',
             nextRetryAt: now + 120000,
-            backoffSeconds: 120
+            backoffSeconds: 120,
+            lastAutomaticCookieRefreshQueuedAt: now - 5000,
+            automaticCookieRefreshReason: 'extracao global critica: no_formats'
         }
     };
 
@@ -353,6 +355,9 @@ function testGlobalExtractionCriticalAffectsSystemHealth() {
     assert.equal(system.status, 'critical');
     assert.equal(system.summary.activeMonitors, 0);
     assert.equal(system.components.extraction.status, 'critical');
+    assert.equal(system.components.extraction.actionCode, 'automatic_cookie_refresh_queued');
+    assert.ok(system.components.extraction.recommendedAction.includes('Renovacao automatica'));
+    assert.equal(system.components.extraction.automaticCookieRefreshReason, undefined);
     assert.ok(system.components.extraction.examples.some(item => item.includes('global')));
 }
 
@@ -397,6 +402,13 @@ function testAdminHealthRouteRequiresAdminSession() {
     assert.ok(!appSource.includes("app.use('/api/admin/health', authenticateCookieAgent"));
 }
 
+function testTerminalRestoreCleanupIsPresent() {
+    const appSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
+    assert.ok(appSource.includes('function isTerminalRestoreClassification'));
+    assert.ok(appSource.includes('isTerminalRestoreClassification(result?.classification)'));
+    assert.ok(appSource.includes('removePersistedMapping(videoId, owner)'));
+}
+
 function testDashboardUsesOperationalHealth() {
     const html = fs.readFileSync(path.join(__dirname, '../public/dashboard.html'), 'utf8');
     const appSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
@@ -409,6 +421,8 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('healthSummary || m.health'));
     assert.ok(html.includes('renderHealthChips'));
     assert.ok(html.includes('getHealthCssStatus'));
+    assert.ok(html.includes('health-component-action'));
+    assert.ok(html.includes('recommendedAction'));
     assert.ok(html.includes('Log do servidor'));
     assert.ok(html.includes('/api/admin/logs/timeline'));
     assert.ok(html.includes('serverLogContent'));
@@ -439,6 +453,7 @@ function main() {
     testInvalidTimestampsAndMissingFieldsAreSafe();
     testPublicHealthRouteDoesNotExposeSensitiveOperationalDetails();
     testAdminHealthRouteRequiresAdminSession();
+    testTerminalRestoreCleanupIsPresent();
     testDashboardUsesOperationalHealth();
     console.log('Phase 4 health dashboard tests OK');
 }

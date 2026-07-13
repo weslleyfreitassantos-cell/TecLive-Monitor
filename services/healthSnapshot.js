@@ -245,6 +245,10 @@ function aggregateComponent(monitors, key, emptyMessage) {
     const statuses = monitors.map(item => item.health.components[key]?.status || 'ok');
     const worst = worstStatus(statuses);
     const affected = monitors.filter(item => normalizeStatus(item.health.components[key]?.status) !== 'ok').length;
+    const worstComponents = monitors
+        .map(item => item.health.components[key])
+        .filter(component => normalizeStatus(component?.status) === worst);
+    const primaryWorst = worstComponents[0] || {};
     const messages = monitors
         .filter(item => normalizeStatus(item.health.components[key]?.status) === worst)
         .map(item => `${safeIdentifier(item.videoId)}: ${item.health.components[key]?.message}`)
@@ -255,7 +259,9 @@ function aggregateComponent(monitors, key, emptyMessage) {
         : `${COMPONENT_LABELS[key] || key} OK`, {
             affected,
             total: monitors.length,
-            examples: messages
+            examples: messages,
+            actionCode: primaryWorst.actionCode || null,
+            recommendedAction: primaryWorst.recommendedAction || null
         });
 }
 
@@ -296,6 +302,8 @@ function buildGlobalExtractionEntry(state, nowMs) {
     const retryAt = Number(state?.nextRetryAt) || 0;
     const retryAfterSeconds = retryAt > nowMs ? Math.ceil((retryAt - nowMs) / 1000) : 0;
     const classification = safeClassification(state?.lastFailureClassification || 'unknown');
+    const refreshQueuedAt = normalizeTimestampMs(state?.lastAutomaticCookieRefreshQueuedAt, 0);
+    const refreshQueued = refreshQueuedAt > 0;
     return {
         key: 'global',
         videoId: 'global',
@@ -309,7 +317,13 @@ function buildGlobalExtractionEntry(state, nowMs) {
                         classification,
                         retryAfterSeconds,
                         nextRetryAt: retryAt,
-                        consecutiveFailures: Number(state?.consecutiveExtractionFailures) || 0
+                        consecutiveFailures: Number(state?.consecutiveExtractionFailures) || 0,
+                        actionCode: refreshQueued ? 'automatic_cookie_refresh_queued' : 'cookie_refresh_recommended',
+                        recommendedAction: refreshQueued
+                            ? 'Renovacao automatica de cookies ja solicitada; acompanhe o agente.'
+                            : 'Se persistir, solicite Atualizar Todos ou aguarde a renovacao automatica.',
+                        automaticCookieRefreshQueuedAt: refreshQueuedAt || null,
+                        automaticCookieRefreshReason: state?.automaticCookieRefreshReason || null
                     })
             }
         }

@@ -149,6 +149,13 @@
             line-height: 1.35;
             margin-top: 4px;
         }
+        .health-component-action {
+            color: #f1c40f;
+            font-size: 12px;
+            line-height: 1.35;
+            margin-top: 6px;
+            font-weight: 700;
+        }
         .health-chip-row {
             display: flex;
             flex-wrap: wrap;
@@ -2202,10 +2209,12 @@
             const component = components[key] || { status: 'unknown', message: '—' };
             const componentCssStatus = getHealthCssStatus(component.status);
             const statusLabel = getHealthStatusLabel(component.status);
+            const recommendedAction = component.recommendedAction || '';
             return `<div class="health-component ${componentCssStatus}">
                 <div class="health-component-label">${escapeHtml(healthComponentLabels[key] || key)}</div>
                 <div class="health-component-status">${escapeHtml(statusLabel)}</div>
                 <div class="health-component-message">${escapeHtml(component.message || '—')}</div>
+                ${recommendedAction ? `<div class="health-component-action">${escapeHtml(recommendedAction)}</div>` : ''}
             </div>`;
         }).join('');
     }

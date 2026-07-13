@@ -31,6 +31,15 @@ function getDefaultMaxHeight() {
     return Number.isFinite(value) && value > 0 ? value : 720;
 }
 
+function positiveIntegerEnv(name, fallback) {
+    const value = parseInt(process.env[name], 10);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function cookieFileToQueueName(file) {
+    return String(file || '').replace(/\.txt$/i, '');
+}
+
 class ConvertAPI {
     constructor(emailAlerts, orchestrator, revokeTokenFn = null) {
         this.emailAlerts = emailAlerts;
@@ -111,7 +120,51 @@ class ConvertAPI {
         this.globalExtractionCritical = true;
         const retryIso = state.nextRetryAt ? new Date(state.nextRetryAt).toISOString() : 'n/a';
         console.log(`[GLOBAL] extracao critica apos ${videoId}: ${state.lastFailureClassification} backoff=${state.backoffSeconds}s proximoRetry=${retryIso}`);
+        this._queueCookieRefreshAfterGlobalExtractionFailure(videoId, state, now);
         return state;
+    }
+
+    _queueCookieRefreshAfterGlobalExtractionFailure(videoId, state, now = Date.now()) {
+        const refreshQueue = this.cookieRotator?.refreshQueue;
+        if (!refreshQueue || typeof refreshQueue.enqueue !== 'function') return [];
+
+        const threshold = positiveIntegerEnv('COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES', 2);
+        const cooldownMs = positiveIntegerEnv('COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS', 30 * 60 * 1000);
+        const consecutiveFailures = Number(state?.consecutiveExtractionFailures) || 0;
+        if (consecutiveFailures < threshold) return [];
+
+        const lastQueuedAt = Number(state?.lastAutomaticCookieRefreshQueuedAt) || 0;
+        if (lastQueuedAt > 0 && now - lastQueuedAt < cooldownMs) {
+            return [];
+        }
+
+        const classification = state?.lastFailureClassification || CLASSIFICATION.NO_FORMATS;
+        const reason = `extracao global critica: ${classification}`;
+        const results = [];
+        for (const file of DEFAULT_COOKIE_FILES) {
+            const cookie = cookieFileToQueueName(file);
+            try {
+                const result = refreshQueue.enqueue(cookie, 'automatic', reason, {
+                    requestedBy: 'global-extraction-watch'
+                });
+                results.push({
+                    cookie,
+                    created: Boolean(result?.created),
+                    jobId: result?.job?.id || null
+                });
+            } catch (err) {
+                console.warn(`[GLOBAL] falha ao solicitar renovacao automatica de ${cookie}: ${err.message}`);
+                results.push({ cookie, created: false, error: 'enqueue_failed' });
+            }
+        }
+
+        state.lastAutomaticCookieRefreshQueuedAt = now;
+        state.automaticCookieRefreshReason = reason;
+        state.automaticCookieRefreshJobs = results;
+        const created = results.filter(item => item.created).map(item => item.cookie);
+        const reused = results.filter(item => !item.created && !item.error).map(item => item.cookie);
+        console.log(`[GLOBAL] renovacao automatica de cookies solicitada apos falha confirmada em ${videoId}: criadas=${created.join(',') || '0'} existentes=${reused.join(',') || '0'}`);
+        return results;
     }
 
     _recordGlobalExtractionSuccess(now = Date.now()) {

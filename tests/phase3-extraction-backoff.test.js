@@ -321,10 +321,21 @@ async function testGlobalExtractionOutageBackoff() {
     const fakes = installConvertFakes();
     const capture = captureConsole();
     const previousGlobalBackoffMax = process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS;
+    const previousAutoRefreshFailures = process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES;
+    const previousAutoRefreshCooldown = process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS;
     try {
+        process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES = '2';
+        process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS = '600000';
         const api = new fakes.ConvertAPI(null, null);
         api._getVideoMetadata = async () => ({ title: 'Global outage', channel: 'Test' });
         api._persistMapping = () => {};
+        const queuedRefreshes = [];
+        api.cookieRotator.refreshQueue = {
+            enqueue(cookie, source, reason, meta) {
+                queuedRefreshes.push({ cookie, source, reason, requestedBy: meta?.requestedBy || null });
+                return { created: true, job: { id: `job-${cookie}`, cookie } };
+            }
+        };
 
         const attempts = [];
         api._runYtdlp = async (args) => {
@@ -346,17 +357,27 @@ async function testGlobalExtractionOutageBackoff() {
         assert.equal(api.globalExtractionCritical, true);
         assert.equal(api.globalExtractionBackoff.lastFailureClassification, CLASSIFICATION.NO_FORMATS);
         assert.ok(api.globalExtractionBackoff.nextRetryAt > Date.now());
+        assert.equal(queuedRefreshes.length, 0);
 
         const before = attempts.length;
         const suppressed = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL2', 'http://127.0.0.1', 'owner-b', { automatic: true });
         assert.equal(suppressed.success, false);
         assert.equal(suppressed.globalExtractionCritical, true);
         assert.equal(attempts.length, before);
+        assert.equal(queuedRefreshes.length, 0);
 
         api.globalExtractionBackoff.nextRetryAt = Date.now() - 1;
         const manual = await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL2', 'http://127.0.0.1', 'owner-b', { manual: true });
         assert.equal(manual.success, false);
         assert.ok(attempts.length > before);
+        assert.deepEqual(queuedRefreshes.map(item => item.cookie), ['cookie1', 'cookie2', 'cookie3']);
+        assert.ok(queuedRefreshes.every(item => item.source === 'automatic'));
+        assert.ok(queuedRefreshes.every(item => item.requestedBy === 'global-extraction-watch'));
+        assert.equal(api.globalExtractionBackoff.automaticCookieRefreshReason, 'extracao global critica: no_formats');
+
+        api.globalExtractionBackoff.nextRetryAt = Date.now() - 1;
+        await api.convert('https://www.youtube.com/watch?v=GLOBALFAIL3', 'http://127.0.0.1', 'owner-c', { manual: true });
+        assert.equal(queuedRefreshes.length, 3);
 
         process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS = '-1';
         const invalidEnvApi = new fakes.ConvertAPI(null, null);
@@ -369,6 +390,16 @@ async function testGlobalExtractionOutageBackoff() {
             delete process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS;
         } else {
             process.env.YTDLP_GLOBAL_EXTRACTION_BACKOFF_MAX_SECONDS = previousGlobalBackoffMax;
+        }
+        if (previousAutoRefreshFailures === undefined) {
+            delete process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES;
+        } else {
+            process.env.COOKIE_EXTRACTION_AUTO_REFRESH_FAILURES = previousAutoRefreshFailures;
+        }
+        if (previousAutoRefreshCooldown === undefined) {
+            delete process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS;
+        } else {
+            process.env.COOKIE_EXTRACTION_AUTO_REFRESH_COOLDOWN_MS = previousAutoRefreshCooldown;
         }
         capture.restore();
         fakes.cleanup();

@@ -291,6 +291,13 @@ async function restoreMonitorsPersistence() {
                         console.log(`✅ Monitor restaurado: ${key}`);
                     } else {
                         console.warn(`⚠️ Monitor não restaurado ${key}: ${result?.classification || 'unknown'} - ${result?.message || result?.error || 'sem stream ativa'}`);
+                        if (isTerminalRestoreClassification(result?.classification)) {
+                            const keyVideoId = key.includes(':') ? key.split(':')[0] : key;
+                            const extractedVideoId = converter.extractVideoId(entry.youtubeUrl);
+                            const videoId = extractedVideoId === 'url_invalida' ? keyVideoId : extractedVideoId;
+                            removePersistedMapping(videoId, owner);
+                            console.log(`🧹 Monitor persistido terminal removido apos restore: ${key} (${result.classification})`);
+                        }
                     }
                 }
             } catch (err) {
@@ -563,6 +570,10 @@ function isValidationTargetUnavailableClassification(classification) {
         CLASSIFICATION.MEMBERS_ONLY,
         CLASSIFICATION.GEO_RESTRICTED
     ].includes(classification);
+}
+
+function isTerminalRestoreClassification(classification) {
+    return isValidationTargetUnavailableClassification(classification);
 }
 
 function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
