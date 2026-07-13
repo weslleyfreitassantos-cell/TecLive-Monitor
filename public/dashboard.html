@@ -463,7 +463,7 @@
         /* ===== NOVO LAYOUT INFERIOR ===== */
         .bottom-grid {
             display: grid;
-            grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+            grid-template-columns: minmax(0, 1.05fr) minmax(380px, 0.95fr);
             gap: 24px;
             margin-top: 24px;
             align-items: stretch;
@@ -478,13 +478,14 @@
             display: flex;
             flex-direction: column;
             gap: 24px;
+            min-height: 100%;
         }
         .right-stack .card {
-            flex: 0 0 auto;
+            flex: 1 1 auto;
         }
 
         .right-stack .card:first-child {
-            min-height: 220px;
+            min-height: 420px;
         }
 
         .chart-item {
@@ -523,8 +524,8 @@
         .auth-container {
             display: flex;
             flex-direction: column;
-            gap: 10px;
-            min-height: 120px;
+            gap: 14px;
+            min-height: 320px;
             height: 100%;
             font-size: 13px;
             padding: 4px 0;
@@ -533,7 +534,7 @@
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
-            justify-content: center;
+            justify-content: stretch;
             margin-bottom: 4px;
         }
         .cookie-item {
@@ -546,6 +547,7 @@
             align-items: center;
             gap: 6px;
             flex-wrap: wrap;
+            flex: 1 1 220px;
         }
         .cookie-item.invalid {
             border-left-color: #e74c3c;
@@ -636,8 +638,8 @@
             background: rgba(0,0,0,0.25);
             border-left: 3px solid #5dade2;
             border-radius: 6px;
-            padding: 8px 10px;
-            min-height: 48px;
+            padding: 10px 12px;
+            min-height: 64px;
         }
         .automation-pill.ok { border-left-color: #2ecc71; }
         .automation-pill.warn { border-left-color: #f1c40f; }
@@ -725,10 +727,58 @@
         .automation-job.running, .automation-job.claimed { border-left-color: #5dade2; }
         .automation-job.succeeded { border-left-color: #2ecc71; }
         .automation-job.failed { border-left-color: #e74c3c; }
+        .progress-card {
+            background: rgba(0,0,0,0.24);
+            border: 1px solid rgba(93,173,226,0.18);
+            border-radius: 6px;
+            padding: 9px 11px;
+        }
+        .progress-card.ok { border-color: rgba(46,204,113,0.28); }
+        .progress-card.warn { border-color: rgba(241,196,15,0.28); }
+        .progress-card.fail { border-color: rgba(231,76,60,0.35); }
+        .progress-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 7px;
+            color: #dfe8f2;
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+        .progress-detail {
+            color: #7a8aa0;
+            font-size: 11px;
+            margin-top: 5px;
+            overflow-wrap: anywhere;
+        }
+        .progress-track {
+            height: 9px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(255,255,255,0.07);
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #5dade2, #2ecc71);
+            transition: width 0.2s ease;
+        }
+        .progress-fill.ok { background: linear-gradient(90deg, #2ecc71, #27ae60); }
+        .progress-fill.warn { background: linear-gradient(90deg, #f1c40f, #f39c12); }
+        .progress-fill.fail { background: linear-gradient(90deg, #e74c3c, #c0392b); }
+        .manual-upload-progress {
+            display: none;
+        }
+        .manual-upload-progress.active {
+            display: block;
+        }
 
         @media (min-width: 1100px) {
             .cookie-automation-card .automation-summary {
-                grid-template-columns: repeat(3, minmax(0, 1fr));
+                grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
 
@@ -1363,10 +1413,6 @@
 
         <div class="right-stack">
             <div class="card">
-                <div class="card-header"><h2>ATIVIDADE</h2><span class="badge">ULTIMOS 60 MIN</span></div>
-                <div class="card-content"><div id="chartContent"></div></div>
-            </div>
-            <div class="card">
                 <div class="card-header"><h2>EXTRAÇÃO VIA COOKIE</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
                 <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
             </div>
@@ -1532,6 +1578,7 @@
     let adminRedirectInProgress = false;
     let serverLogTimer = null;
     let serverLogLoading = false;
+    let manualUploadProgress = null;
 
     function redirectToAdminLoginOnce() {
         if (adminRedirectInProgress) return;
@@ -2263,11 +2310,13 @@
     }
 
     function updateChart(monitors) {
+        const chartContent = document.getElementById('chartContent');
+        if (!chartContent) return;
         const totalLives = monitors.length;
         const totalOnline = monitors.filter(m => m.status === 'online' || m.status === 'degraded').length;
         const totalFailures = monitors.reduce((sum, m) => sum + (m.failCount || 0), 0);
         const maxVal = Math.max(totalLives, totalOnline, totalFailures, renewalCount, 5);
-        document.getElementById('chartContent').innerHTML = `
+        chartContent.innerHTML = `
             <div class="chart-item">
                 <div class="chart-label"><span>TOTAL LIVES</span><span style="color:#2ecc71; font-weight:700;">${totalLives}</span></div>
                 <div class="chart-bar"><div class="chart-fill fill-green" style="width: ${(totalLives/maxVal)*100}%">${totalLives}</div></div>
@@ -2304,6 +2353,54 @@
         const date = new Date(value);
         if (Number.isNaN(date.getTime())) return '—';
         return date.toLocaleString('pt-BR');
+    }
+
+    function clampProgress(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number)) return 0;
+        return Math.max(0, Math.min(100, Math.round(number)));
+    }
+
+    function renderProgressBar({ label, percent, status = 'warn', detail = '', extraClass = '' }) {
+        const safeStatus = ['ok', 'warn', 'fail'].includes(status) ? status : 'warn';
+        const safePercent = clampProgress(percent);
+        return `<div class="progress-card ${safeStatus} ${escapeHtml(extraClass)}">
+            <div class="progress-header">
+                <span>${escapeHtml(label || 'Progresso')}</span>
+                <span>${safePercent}%</span>
+            </div>
+            <div class="progress-track"><div class="progress-fill ${safeStatus}" style="width:${safePercent}%"></div></div>
+            ${detail ? `<div class="progress-detail">${escapeHtml(detail)}</div>` : ''}
+        </div>`;
+    }
+
+    function getCookieJobProgress(job) {
+        if (!job) return { percent: 0, status: 'warn', detail: 'aguardando tarefa' };
+        if (job.status === 'pending') return { percent: 18, status: 'warn', detail: 'tarefa criada, aguardando o Agent' };
+        if (job.status === 'claimed') return { percent: 42, status: 'warn', detail: 'Agent assumiu a tarefa' };
+        if (job.status === 'running') return { percent: 72, status: 'warn', detail: 'Agent validando e promovendo cookie' };
+        if (job.status === 'succeeded') return { percent: 100, status: 'ok', detail: 'concluído' };
+        if (job.status === 'failed') return { percent: 100, status: 'fail', detail: 'falhou' };
+        if (job.status === 'cancelled') return { percent: 100, status: 'fail', detail: 'cancelado' };
+        return { percent: 0, status: 'warn', detail: job.status || 'desconhecido' };
+    }
+
+    function setManualUploadProgress(progress) {
+        manualUploadProgress = progress;
+        const target = document.getElementById('cookieManualUploadProgress');
+        if (!target) return;
+        if (!manualUploadProgress) {
+            target.classList.remove('active');
+            target.innerHTML = '';
+            return;
+        }
+        target.classList.add('active');
+        target.innerHTML = renderProgressBar({
+            label: manualUploadProgress.label,
+            percent: manualUploadProgress.percent,
+            status: manualUploadProgress.status,
+            detail: manualUploadProgress.detail
+        });
     }
 
     function getAutomationStage(job) {
@@ -2356,6 +2453,53 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
+        });
+    }
+
+    function uploadCookieFileWithProgress(type, file) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `/api/cookie/upload?type=${encodeURIComponent(type)}`);
+            xhr.withCredentials = true;
+
+            xhr.upload.onprogress = (event) => {
+                const percent = event.lengthComputable
+                    ? Math.max(3, Math.min(95, (event.loaded / event.total) * 95))
+                    : 20;
+                setManualUploadProgress({
+                    label: `Enviando Cookie ${type}`,
+                    percent,
+                    status: 'warn',
+                    detail: event.lengthComputable ? 'Upload em andamento' : 'Preparando envio'
+                });
+            };
+
+            xhr.onload = () => {
+                const data = (() => {
+                    try { return xhr.responseText ? JSON.parse(xhr.responseText) : {}; }
+                    catch (err) { return {}; }
+                })();
+                if (xhr.status >= 200 && xhr.status < 300 && data.success !== false) {
+                    resolve(data);
+                    return;
+                }
+                const err = new Error(getAdminApiErrorMessage(xhr.status, data));
+                err.status = xhr.status;
+                err.redirectToLogin = xhr.status === 401;
+                reject(err);
+            };
+
+            xhr.onerror = () => reject(new Error('Erro de rede ao enviar cookie'));
+
+            const formData = new FormData();
+            formData.append('cookie', file);
+            setManualUploadProgress({
+                label: `Enviando Cookie ${type}`,
+                percent: 1,
+                status: 'warn',
+                detail: 'Iniciando envio'
+            });
+            xhr.send(formData);
         });
     }
 
@@ -2439,6 +2583,22 @@
         };
         const stage = activeJob ? getAutomationStage(activeJob) : (agentMessages[agentState] || 'sem atividade recente');
         const agentStatus = agentState === 'online' ? 'ONLINE' : (agentState === 'degraded' ? 'DEGRADADO' : 'OFFLINE');
+        const activeProgress = activeJob ? getCookieJobProgress(activeJob) : null;
+        const automationProgress = activeProgress
+            ? renderProgressBar({
+                label: `Atualização ${String(activeJob.cookie || 'cookie').toUpperCase()}`,
+                percent: activeProgress.percent,
+                status: activeProgress.status,
+                detail: activeProgress.detail
+            })
+            : cookieAutomationBusy
+                ? renderProgressBar({
+                    label: 'Criando tarefa',
+                    percent: 12,
+                    status: 'warn',
+                    detail: 'Enviando solicitação ao servidor'
+                })
+                : '';
         const lastExecutionLabel = summary.lastExecutionAt
             ? `${formatDateTime(summary.lastExecutionAt)}`
             : '—';
@@ -2510,6 +2670,7 @@
                     <div class="automation-value">P:${counts.pending || 0} R:${(counts.running || 0) + (counts.claimed || 0)} OK:${counts.succeeded || 0} F:${counts.failed || 0}</div>
                 </div>
             </div>
+            ${automationProgress}
             <div class="automation-actions">
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie1')">Atualizar Cookie1</button>
                 <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie2')">Atualizar Cookie2</button>
@@ -2830,8 +2991,10 @@
                     ${renderCapabilityPill('Stream via cookie', streamStatus === 'ok' ? 'OK' : streamStatus === 'warn' ? 'DEGRADADA' : 'INCONCLUSIVA', `${streamReadyCount}/${totalCookies || 0} cookie(s) com HLS`, streamStatus)}
                     ${renderCapabilityPill('Fallback público', fallbackLabel, publicFallback.message || '—', fallbackStatus)}
                 </div>`;
+            html += `<div id="cookieManualUploadProgress" class="manual-upload-progress"></div>`;
             html += `<div style="margin-top:4px; font-size:11px; color:#7a8aa0; text-align:center;">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div>`;
             container.innerHTML = html;
+            setManualUploadProgress(manualUploadProgress);
 
             // Botão "Substituir" agora abre o seletor de arquivos do PC direto
             // e já envia o upload, sem navegar para outra página.
@@ -2848,12 +3011,13 @@
                     const file = e.target.files[0];
                     if (!file) return;
                     const type = input.getAttribute('data-cookie-type');
-                    const formData = new FormData();
-                    formData.append('cookie', file);
                     try {
-                        const data = await fetchAdminJson(`/api/cookie/upload?type=${type}`, {
-                            method: 'POST',
-                            body: formData
+                        const data = await uploadCookieFileWithProgress(type, file);
+                        setManualUploadProgress({
+                            label: `Cookie ${type} enviado`,
+                            percent: 100,
+                            status: 'ok',
+                            detail: 'Servidor recebeu o arquivo'
                         });
                         if (data.success) {
                             alert(`Cookie ${type} atualizado com sucesso!`);
@@ -2861,12 +3025,19 @@
                             alert(`Erro: ${data.message}`);
                         }
                     } catch (err) {
+                        setManualUploadProgress({
+                            label: `Falha no Cookie ${type}`,
+                            percent: 100,
+                            status: 'fail',
+                            detail: err.message
+                        });
                         alert(`Erro ao enviar cookie: ${err.message}`);
                         if (err.redirectToLogin) redirectToAdminLoginOnce();
                     } finally {
                         input.value = '';
                         loadFunctionalCookieStatus();
                         fetchData();
+                        setTimeout(() => setManualUploadProgress(null), 3000);
                     }
                 });
             });

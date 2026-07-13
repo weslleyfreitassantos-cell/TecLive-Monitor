@@ -453,6 +453,9 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('Stream via cookie'));
     assert.ok(html.includes('fallbackPublic'));
     assert.ok(appSource.includes('fallbackPublic'));
+    assert.ok(html.includes('manual-upload-progress'));
+    assert.ok(html.includes('getCookieJobProgress'));
+    assert.ok(!html.includes('<h2>ATIVIDADE</h2>'));
     assert.ok(html.includes('Log do servidor'));
     assert.ok(html.includes('/api/admin/logs/timeline'));
     assert.ok(html.includes('serverLogContent'));

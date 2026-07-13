@@ -587,6 +587,11 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(dashboard.includes('INCONCLUSIVO'));
     assert.ok(dashboard.includes('Arquivo/sync'));
     assert.ok(dashboard.includes('Stream via cookie'));
+    assert.ok(dashboard.includes('manual-upload-progress'));
+    assert.ok(dashboard.includes('uploadCookieFileWithProgress'));
+    assert.ok(dashboard.includes('getCookieJobProgress'));
+    assert.ok(dashboard.includes('progress-card'));
+    assert.ok(!dashboard.includes('<h2>ATIVIDADE</h2>'));
     assert.ok(dashboard.includes('Fallback público'));
     assert.ok(dashboard.includes('atividade recente, heartbeat atrasado'));
     assert.ok(dashboard.includes('/api/admin/cookie-refresh/enqueue/'));
