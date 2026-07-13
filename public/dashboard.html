@@ -121,8 +121,8 @@
             gap: 10px;
         }
         .server-status-indicator {
-            width: 54px;
-            height: 54px;
+            width: 44px;
+            height: 44px;
             border-radius: 50%;
             display: grid;
             place-items: center;
@@ -130,12 +130,12 @@
             border: 1px solid rgba(122,138,160,0.32);
         }
         .server-status-dot {
-            width: 25px;
-            height: 25px;
+            width: 20px;
+            height: 20px;
             border-radius: 50%;
             display: block;
             background: #7a8aa0;
-            box-shadow: 0 0 0 8px rgba(122,138,160,0.12);
+            box-shadow: 0 0 0 6px rgba(122,138,160,0.12);
         }
         .server-status-indicator.ok {
             background: rgba(46,204,113,0.11);
@@ -143,7 +143,7 @@
         }
         .server-status-indicator.ok .server-status-dot {
             background: #2ecc71;
-            box-shadow: 0 0 0 8px rgba(46,204,113,0.13), 0 0 22px rgba(46,204,113,0.45);
+            box-shadow: 0 0 0 6px rgba(46,204,113,0.13), 0 0 18px rgba(46,204,113,0.45);
         }
         .server-status-indicator.degraded {
             background: rgba(241,196,15,0.11);
@@ -151,7 +151,7 @@
         }
         .server-status-indicator.degraded .server-status-dot {
             background: #f1c40f;
-            box-shadow: 0 0 0 8px rgba(241,196,15,0.14), 0 0 22px rgba(241,196,15,0.38);
+            box-shadow: 0 0 0 6px rgba(241,196,15,0.14), 0 0 18px rgba(241,196,15,0.38);
         }
         .server-status-indicator.error {
             background: rgba(231,76,60,0.11);
@@ -159,17 +159,10 @@
         }
         .server-status-indicator.error .server-status-dot {
             background: #e74c3c;
-            box-shadow: 0 0 0 8px rgba(231,76,60,0.14), 0 0 22px rgba(231,76,60,0.38);
+            box-shadow: 0 0 0 6px rgba(231,76,60,0.14), 0 0 18px rgba(231,76,60,0.38);
         }
         .server-status-indicator.unknown .server-status-dot {
             background: #7a8aa0;
-        }
-        .server-stat-label {
-            color: #e0e8f0;
-            font-size: 22px;
-            font-weight: 900;
-            letter-spacing: 1px;
-            margin-top: 0;
         }
 
         .health-overview-grid {
