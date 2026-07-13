@@ -286,17 +286,20 @@ async function restoreMonitorsPersistence() {
             try {
                 const owner = key.includes(':') ? key.split(':')[1] : null;
                 if (entry.youtubeUrl) {
+                    const keyVideoId = key.includes(':') ? key.split(':')[0] : key;
+                    const extractedVideoId = converter.extractVideoId(entry.youtubeUrl);
+                    const restoreVideoId = extractedVideoId === 'url_invalida' ? keyVideoId : extractedVideoId;
                     const result = await converter.convert(entry.youtubeUrl, baseUrl, owner, { automatic: true });
                     if (result?.success && converter.activeMonitors.has(key)) {
                         console.log(`✅ Monitor restaurado: ${key}`);
                     } else {
                         console.warn(`⚠️ Monitor não restaurado ${key}: ${result?.classification || 'unknown'} - ${result?.message || result?.error || 'sem stream ativa'}`);
                         if (isTerminalRestoreClassification(result?.classification)) {
-                            const keyVideoId = key.includes(':') ? key.split(':')[0] : key;
-                            const extractedVideoId = converter.extractVideoId(entry.youtubeUrl);
-                            const videoId = extractedVideoId === 'url_invalida' ? keyVideoId : extractedVideoId;
-                            removePersistedMapping(videoId, owner);
+                            removePersistedMapping(restoreVideoId, owner);
                             console.log(`🧹 Monitor persistido terminal removido apos restore: ${key} (${result.classification})`);
+                        } else if (restoreVideoId && typeof converter.clearExtractionBackoff === 'function') {
+                            converter.clearExtractionBackoff(restoreVideoId, owner);
+                            console.log(`🧹 Estado de extracao de restore nao restaurado limpo: ${key}`);
                         }
                     }
                 }

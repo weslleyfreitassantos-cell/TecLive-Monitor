@@ -406,7 +406,8 @@ function testTerminalRestoreCleanupIsPresent() {
     const appSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
     assert.ok(appSource.includes('function isTerminalRestoreClassification'));
     assert.ok(appSource.includes('isTerminalRestoreClassification(result?.classification)'));
-    assert.ok(appSource.includes('removePersistedMapping(videoId, owner)'));
+    assert.ok(appSource.includes('removePersistedMapping(restoreVideoId, owner)'));
+    assert.ok(appSource.includes('converter.clearExtractionBackoff(restoreVideoId, owner)'));
 }
 
 function testDashboardUsesOperationalHealth() {
