@@ -487,6 +487,13 @@
         .right-stack .card:first-child {
             min-height: 420px;
         }
+        .right-stack .cookie-health-card {
+            align-self: stretch;
+            min-height: 0;
+        }
+        .right-stack .cookie-health-card:first-child {
+            min-height: 0;
+        }
 
         .chart-item {
             margin-bottom: 8px;
@@ -524,31 +531,68 @@
         .auth-container {
             display: flex;
             flex-direction: column;
-            gap: 14px;
-            min-height: 320px;
+            gap: 12px;
+            min-height: 0;
             height: 100%;
             font-size: 13px;
             padding: 4px 0;
         }
+        .cookie-health-card .card-content {
+            padding: 16px 18px;
+        }
+        .cookie-health-layout {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+            height: 100%;
+            align-content: start;
+        }
         .cookie-compact {
-            display: flex;
-            flex-wrap: wrap;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
             gap: 8px;
-            justify-content: stretch;
-            margin-bottom: 4px;
+            margin-bottom: 0;
         }
         .cookie-item {
             background: rgba(0,0,0,0.25);
             border-radius: 6px;
-            padding: 4px 12px;
+            padding: 10px 12px;
             border-left: 3px solid #2ecc71;
             font-size: 13px;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            flex-wrap: wrap;
-            flex: 1 1 220px;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 4px 8px;
+            align-content: start;
+            min-height: 78px;
         }
+        .cookie-name {
+            color: #e0e0e0;
+            font-size: 13px;
+            font-weight: 800;
+            text-transform: uppercase;
+            overflow-wrap: anywhere;
+        }
+        .cookie-state {
+            color: #2ecc71;
+            font-size: 10px;
+            font-weight: 800;
+            text-align: right;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .cookie-item.invalid .cookie-state { color: #e74c3c; }
+        .cookie-item.stream-warning .cookie-state { color: #f1c40f; }
+        .cookie-item.inconclusive .cookie-state { color: #9aa7b7; }
+        .cookie-issue-detail {
+            grid-column: 1 / -1;
+            color: #7a8aa0;
+            font-size: 11px;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .cookie-issue-detail.danger { color: #e74c3c; }
+        .cookie-issue-detail.warn { color: #f1c40f; }
+        .cookie-issue-detail.muted { color: #9aa7b7; }
         .cookie-item.invalid {
             border-left-color: #e74c3c;
             background: rgba(231,76,60,0.08);
@@ -563,15 +607,17 @@
         }
         .cookie-capability-summary {
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
             gap: 8px;
         }
         .cookie-capability-pill {
             background: rgba(0,0,0,0.22);
             border-left: 3px solid #7a8aa0;
             border-radius: 6px;
-            padding: 7px 9px;
-            min-height: 48px;
+            padding: 10px 11px;
+            min-height: 76px;
+            display: grid;
+            align-content: start;
         }
         .cookie-capability-pill.ok { border-left-color: #2ecc71; }
         .cookie-capability-pill.warn { border-left-color: #f1c40f; }
@@ -582,21 +628,31 @@
             font-size: 10px;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0;
             margin-bottom: 2px;
+            overflow-wrap: anywhere;
         }
         .cookie-capability-value {
             color: #e0e0e0;
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 800;
         }
         .cookie-capability-detail {
             color: #7a8aa0;
-            font-size: 10px;
+            font-size: 11px;
+            line-height: 1.35;
             margin-top: 2px;
             overflow-wrap: anywhere;
         }
+        .cookie-check-time {
+            color: #7a8aa0;
+            font-size: 11px;
+            text-align: right;
+            margin-top: -2px;
+        }
         .cookie-item .substituir-btn {
+            grid-column: 1 / -1;
+            justify-self: start;
             background: #e74c3c;
             color: #fff;
             border: none;
@@ -1289,6 +1345,9 @@
         @media (max-width: 600px) {
             .stats-grid { grid-template-columns: 1fr; }
             .health-overview-grid { grid-template-columns: 1fr; }
+            .cookie-compact { grid-template-columns: 1fr; }
+            .cookie-capability-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .cookie-item { min-height: 0; }
             .header { flex-direction: column; align-items: stretch; text-align: center; }
             .header-right { justify-content: center; flex-wrap: wrap; }
             .monitor-table td, .monitor-table th { font-size: 13px; padding: 10px 4px; }
@@ -1412,7 +1471,7 @@
         </div>
 
         <div class="right-stack">
-            <div class="card">
+            <div class="card cookie-health-card">
                 <div class="card-header"><h2>EXTRAÇÃO VIA COOKIE</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
                 <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
             </div>
@@ -2901,7 +2960,7 @@
             const authReadyCount = countWhere((info) => info.authReady === true || (info.valid === true && info.authValid !== false));
             const streamReadyCount = countWhere((info) => info.streamReady === true);
 
-            let html = `<div class="cookie-compact">`;
+            let html = `<div class="cookie-health-layout"><div class="cookie-compact">`;
             for (const [fullName, info] of entries) {
                 const shortName = getCookieShortName(fullName);
                 const type = getCookieType(shortName);
@@ -2955,10 +3014,11 @@
                 const lastFail = lastEvent ? new Date(lastEvent).getTime() : 0;
                 const lastFailStr = lastFail ? ` (última falha ${new Date(lastFail).toLocaleTimeString('pt-BR')})` : '';
 
+                const issueClass = authProblem ? 'danger' : streamProblem ? 'warn' : 'muted';
                 html += `<div class="cookie-item ${statusClass}">
-                            <strong>${escapeHtml(shortName.toUpperCase())}</strong>
-                            ${escapeHtml(statusText)}
-                            ${(authProblem || streamProblem || inconclusive) ? `<span style="color:${authProblem ? '#e74c3c' : streamProblem ? '#f1c40f' : '#9aa7b7'}; font-size:10px;">${escapeHtml(reason)}${escapeHtml(lastFailStr)}</span>` : ''}
+                            <div class="cookie-name">${escapeHtml(shortName.toUpperCase())}</div>
+                            <div class="cookie-state">${escapeHtml(statusText)}</div>
+                            ${(authProblem || streamProblem || inconclusive) ? `<div class="cookie-issue-detail ${issueClass}">${escapeHtml(reason)}${escapeHtml(lastFailStr)}</div>` : `<div class="cookie-issue-detail">Sem alerta recente</div>`}
                             ${authProblem ? `
                                 <button type="button" class="substituir-btn" data-cookie-type="${type}">Substituir</button>
                                 <input type="file" class="cookie-file-input" data-cookie-type="${type}" accept=".txt" style="display:none">
@@ -2992,7 +3052,7 @@
                     ${renderCapabilityPill('Fallback público', fallbackLabel, publicFallback.message || '—', fallbackStatus)}
                 </div>`;
             html += `<div id="cookieManualUploadProgress" class="manual-upload-progress"></div>`;
-            html += `<div style="margin-top:4px; font-size:11px; color:#7a8aa0; text-align:center;">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div>`;
+            html += `<div class="cookie-check-time">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div></div>`;
             container.innerHTML = html;
             setManualUploadProgress(manualUploadProgress);
 
