@@ -575,6 +575,7 @@ function testSecurityAndDashboardStaticChecks() {
 
     const dashboard = readDashboard();
     assert.ok(dashboard.includes('AUTOMAÇÃO DE COOKIES'));
+    assert.ok(dashboard.includes('EXTRAÇÃO VIA COOKIE'));
     assert.ok(dashboard.includes('Status do agente'));
     assert.ok(dashboard.includes('Último heartbeat'));
     assert.ok(dashboard.includes('Última execução'));
@@ -584,6 +585,8 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(dashboard.includes('DEGRADADO'));
     assert.ok(dashboard.includes('STREAM DEGRADADO'));
     assert.ok(dashboard.includes('INCONCLUSIVO'));
+    assert.ok(dashboard.includes('Arquivo/sync'));
+    assert.ok(dashboard.includes('Stream via cookie'));
     assert.ok(dashboard.includes('Fallback público'));
     assert.ok(dashboard.includes('atividade recente, heartbeat atrasado'));
     assert.ok(dashboard.includes('/api/admin/cookie-refresh/enqueue/'));

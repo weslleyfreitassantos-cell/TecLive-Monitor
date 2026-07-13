@@ -448,6 +448,11 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('recommendedAction'));
     assert.ok(html.includes('stream-warning'));
     assert.ok(html.includes('capabilityStatus'));
+    assert.ok(html.includes('EXTRAÇÃO VIA COOKIE'));
+    assert.ok(html.includes('Arquivo/sync'));
+    assert.ok(html.includes('Stream via cookie'));
+    assert.ok(html.includes('fallbackPublic'));
+    assert.ok(appSource.includes('fallbackPublic'));
     assert.ok(html.includes('Log do servidor'));
     assert.ok(html.includes('/api/admin/logs/timeline'));
     assert.ok(html.includes('serverLogContent'));

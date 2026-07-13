@@ -2056,7 +2056,37 @@ app.get('/api/cookie/functional-status', isAuthenticated, (req, res) => {
         return res.status(500).json({ error: 'CookieRotator não disponível' });
     }
     const functional = converter.cookieRotator.getFunctionalStatus();
-    res.json({ functional, timestamp: new Date().toISOString() });
+    const fallbackPublic = {
+        status: 'unknown',
+        activeMonitors: 0,
+        publicActive: 0,
+        cookieActive: 0,
+        message: 'Sem streams ativos'
+    };
+
+    if (converter.activeMonitors) {
+        for (const monitor of converter.activeMonitors.values()) {
+            if (!monitor || monitor.liveState === 'ended' || monitor._liveEnded) continue;
+            fallbackPublic.activeMonitors += 1;
+            if (monitor.lastSuccessfulExtractionSource === 'public') {
+                fallbackPublic.publicActive += 1;
+            } else if (monitor.lastSuccessfulExtractionSource) {
+                fallbackPublic.cookieActive += 1;
+            }
+        }
+    }
+
+    if (converter.globalExtractionCritical) {
+        fallbackPublic.status = 'error';
+        fallbackPublic.message = 'Fallback público indisponível na última falha global';
+    } else if (fallbackPublic.publicActive > 0) {
+        fallbackPublic.status = 'ok';
+        fallbackPublic.message = `${fallbackPublic.publicActive}/${fallbackPublic.activeMonitors} live(s) usando fallback público`;
+    } else if (fallbackPublic.activeMonitors > 0) {
+        fallbackPublic.message = 'Sem uso ativo';
+    }
+
+    res.json({ functional, fallbackPublic, timestamp: new Date().toISOString() });
 });
 
 app.get('/api/admin/health', isAdminApiAuthenticated, (req, res) => {

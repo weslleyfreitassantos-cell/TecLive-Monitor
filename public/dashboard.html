@@ -559,6 +559,41 @@
             border-left-color: #7a8aa0;
             background: rgba(122,138,160,0.08);
         }
+        .cookie-capability-summary {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .cookie-capability-pill {
+            background: rgba(0,0,0,0.22);
+            border-left: 3px solid #7a8aa0;
+            border-radius: 6px;
+            padding: 7px 9px;
+            min-height: 48px;
+        }
+        .cookie-capability-pill.ok { border-left-color: #2ecc71; }
+        .cookie-capability-pill.warn { border-left-color: #f1c40f; }
+        .cookie-capability-pill.fail { border-left-color: #e74c3c; }
+        .cookie-capability-pill.unknown { border-left-color: #7a8aa0; }
+        .cookie-capability-label {
+            color: #7a8aa0;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 2px;
+        }
+        .cookie-capability-value {
+            color: #e0e0e0;
+            font-size: 12px;
+            font-weight: 800;
+        }
+        .cookie-capability-detail {
+            color: #7a8aa0;
+            font-size: 10px;
+            margin-top: 2px;
+            overflow-wrap: anywhere;
+        }
         .cookie-item .substituir-btn {
             background: #e74c3c;
             color: #fff;
@@ -1332,7 +1367,7 @@
                 <div class="card-content"><div id="chartContent"></div></div>
             </div>
             <div class="card">
-                <div class="card-header"><h2>AUTENTICAÇÃO</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
+                <div class="card-header"><h2>EXTRAÇÃO VIA COOKIE</h2><span class="badge" id="cookieStatusBadge">NENHUM</span></div>
                 <div class="card-content"><div id="cookieContent" class="auth-container"></div></div>
             </div>
         </div>
@@ -2654,7 +2689,8 @@
             let hasStreamWarning = false;
             let hasInconclusive = false;
             let problemCookies = [];
-            let streamCookies = [];
+            const entries = Object.entries(functional);
+            const totalCookies = entries.length;
 
             // Mapeia nomes curtos para números
             const getCookieShortName = (name) => {
@@ -2665,9 +2701,47 @@
                 const match = name.match(/cookie(\d+)/);
                 return match ? parseInt(match[1]) : 0;
             };
+            const cookieClassificationLabels = {
+                auth_cookie: 'autenticação recusada',
+                no_formats: 'sem formatos HLS',
+                invalid_hls: 'HLS inválido',
+                dash_only: 'somente DASH',
+                player_response_invalid: 'resposta inválida',
+                youtube_changed: 'YouTube mudou',
+                rate_limit: 'limite temporário',
+                timeout: 'timeout',
+                network: 'rede',
+                server_5xx: 'erro 5xx',
+                live_ended: 'live encerrada',
+                video_unavailable: 'vídeo indisponível',
+                unknown: 'falha desconhecida'
+            };
+            const safeCount = (value) => {
+                const number = Number(value);
+                return Number.isFinite(number) && number > 0 ? number : 0;
+            };
+            const getCookieIssueSummary = (info, authProblem, streamProblem, inconclusive) => {
+                const classification = String(info.extractionClassification || '').trim();
+                if (authProblem) {
+                    if (classification === 'auth_cookie') return cookieClassificationLabels.auth_cookie;
+                    if (info.authValid === false || info.state === 'invalid') return 'autenticação inválida';
+                    return 'troca pendente';
+                }
+                if (streamProblem) {
+                    const label = cookieClassificationLabels[classification] || (classification ? classification : 'stream indisponível');
+                    const failures = safeCount(info.consecutiveStreamFailures || info.failCount);
+                    return failures > 0 ? `${label} · ${failures} falha(s)` : label;
+                }
+                if (inconclusive) return 'probe inconclusiva';
+                return '';
+            };
+            const countWhere = (predicate) => entries.filter(([, info]) => predicate(info || {})).length;
+            const fileReadyCount = countWhere((info) => info.fileExists !== false && info.state !== 'missing');
+            const authReadyCount = countWhere((info) => info.authReady === true || (info.valid === true && info.authValid !== false));
+            const streamReadyCount = countWhere((info) => info.streamReady === true);
 
             let html = `<div class="cookie-compact">`;
-            for (const [fullName, info] of Object.entries(functional)) {
+            for (const [fullName, info] of entries) {
                 const shortName = getCookieShortName(fullName);
                 const type = getCookieType(shortName);
 
@@ -2696,7 +2770,6 @@
                 }
                 if (streamProblem) {
                     hasStreamWarning = true;
-                    streamCookies.push(shortName.toUpperCase());
                 }
                 if (inconclusive) {
                     hasInconclusive = true;
@@ -2716,13 +2789,14 @@
                     statusClass = 'inconclusive';
                 }
 
-                const reason = info.reason || info.extractionClassification || info.streamProbeStatus || (info.failCount > 0 ? `${info.failCount} falhas` : '');
-                const lastFail = info.lastFailure ? new Date(info.lastFailure).getTime() : 0;
+                const reason = getCookieIssueSummary(info, authProblem, streamProblem, inconclusive);
+                const lastEvent = streamProblem ? (info.lastExtractionFailure || info.lastProbeAt || info.lastFailure) : info.lastFailure;
+                const lastFail = lastEvent ? new Date(lastEvent).getTime() : 0;
                 const lastFailStr = lastFail ? ` (última falha ${new Date(lastFail).toLocaleTimeString('pt-BR')})` : '';
 
                 html += `<div class="cookie-item ${statusClass}">
-                            <strong>${shortName.toUpperCase()}</strong>
-                            ${statusText}
+                            <strong>${escapeHtml(shortName.toUpperCase())}</strong>
+                            ${escapeHtml(statusText)}
                             ${(authProblem || streamProblem || inconclusive) ? `<span style="color:${authProblem ? '#e74c3c' : streamProblem ? '#f1c40f' : '#9aa7b7'}; font-size:10px;">${escapeHtml(reason)}${escapeHtml(lastFailStr)}</span>` : ''}
                             ${authProblem ? `
                                 <button type="button" class="substituir-btn" data-cookie-type="${type}">Substituir</button>
@@ -2731,6 +2805,31 @@
                         </div>`;
             }
             html += `</div>`;
+            const publicFallback = data.fallbackPublic || {};
+            const fallbackStatus = publicFallback.status === 'ok'
+                ? 'ok'
+                : publicFallback.status === 'error'
+                    ? 'fail'
+                    : 'unknown';
+            const fallbackLabel = publicFallback.status === 'ok'
+                ? 'OK'
+                : publicFallback.status === 'error'
+                    ? 'ERRO'
+                    : 'DESCONHECIDO';
+            const fileStatus = totalCookies === 0 ? 'unknown' : fileReadyCount === totalCookies ? 'ok' : 'fail';
+            const authStatus = totalCookies === 0 ? 'unknown' : hasProblem ? 'fail' : authReadyCount === totalCookies ? 'ok' : 'unknown';
+            const streamStatus = totalCookies === 0 ? 'unknown' : streamReadyCount === totalCookies ? 'ok' : hasStreamWarning ? 'warn' : hasInconclusive ? 'unknown' : 'unknown';
+            const renderCapabilityPill = (label, value, detail, status) => `<div class="cookie-capability-pill ${status}">
+                    <div class="cookie-capability-label">${escapeHtml(label)}</div>
+                    <div class="cookie-capability-value">${escapeHtml(value)}</div>
+                    <div class="cookie-capability-detail">${escapeHtml(detail || '—')}</div>
+                </div>`;
+            html += `<div class="cookie-capability-summary">
+                    ${renderCapabilityPill('Arquivo/sync', fileStatus === 'ok' ? 'OK' : fileStatus === 'fail' ? 'ERRO' : 'DESCONHECIDO', `${fileReadyCount}/${totalCookies || 0} arquivo(s) disponível(is)`, fileStatus)}
+                    ${renderCapabilityPill('Autenticação', authStatus === 'ok' ? 'OK' : authStatus === 'fail' ? 'ERRO' : 'INCONCLUSIVA', `${authReadyCount}/${totalCookies || 0} cookie(s) autenticado(s)`, authStatus)}
+                    ${renderCapabilityPill('Stream via cookie', streamStatus === 'ok' ? 'OK' : streamStatus === 'warn' ? 'DEGRADADA' : 'INCONCLUSIVA', `${streamReadyCount}/${totalCookies || 0} cookie(s) com HLS`, streamStatus)}
+                    ${renderCapabilityPill('Fallback público', fallbackLabel, publicFallback.message || '—', fallbackStatus)}
+                </div>`;
             html += `<div style="margin-top:4px; font-size:11px; color:#7a8aa0; text-align:center;">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div>`;
             container.innerHTML = html;
 
@@ -2780,10 +2879,6 @@
             if (hasProblem) {
                 const names = problemCookies.join(', ');
                 bannerMessage.textContent = ` ${names} com problema! Substitua-o imediatamente.`;
-                emergencyBanner.style.display = 'flex';
-            } else if (hasStreamWarning) {
-                const names = streamCookies.join(', ');
-                bannerMessage.textContent = ` ${names} autenticado(s), mas com stream por cookie degradado. Fallback público será usado quando disponível.`;
                 emergencyBanner.style.display = 'flex';
             } else {
                 emergencyBanner.style.display = 'none';
