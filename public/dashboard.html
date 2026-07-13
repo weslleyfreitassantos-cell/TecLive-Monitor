@@ -845,6 +845,20 @@
         .maintenance-modal-content .automation-actions button.danger {
             grid-column: auto;
         }
+        #cookieMaintenanceModal .modal-header {
+            position: relative;
+            justify-content: center;
+            text-align: center;
+        }
+        #cookieMaintenanceModal .modal-header h3 {
+            width: 100%;
+        }
+        #cookieMaintenanceModal .modal-close {
+            position: absolute;
+            right: 18px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
         .automation-actions {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1654,7 +1668,7 @@
 <div class="modal-overlay" id="cookieMaintenanceModal">
     <div class="modal-box maintenance-modal-box">
         <div class="modal-header">
-            <h3>Manutenção de cookies</h3>
+            <h3>Manutenção</h3>
             <button class="modal-close" id="cookieMaintenanceClose">&times;</button>
         </div>
         <div class="maintenance-modal-content" id="cookieMaintenanceActions"></div>
