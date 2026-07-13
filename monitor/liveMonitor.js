@@ -10,6 +10,8 @@ const {
     classifyYtdlpError,
     isCookieAuthClassification,
     getYtdlpDiagnostics,
+    buildYtdlpArgsForSource,
+    buildYtdlpDumpJsonArgs,
     selectHlsStream,
     safeUrlPreview,
     sanitizeYtdlpMessage,
@@ -242,12 +244,11 @@ class LiveMonitor {
                 return true;
             });
 
-            let finalArgs = [...filteredArgs];
-            let cookieIndex = finalArgs.indexOf('--cookies');
+            let finalArgs = buildYtdlpArgsForSource(filteredArgs, { source: 'public' });
+            let cookieIndex = filteredArgs.indexOf('--cookies');
             let selectedCookiePath = null;
-            if (cookieIndex !== -1 && finalArgs.length > cookieIndex + 1) {
-                selectedCookiePath = finalArgs[cookieIndex + 1];
-                finalArgs.splice(cookieIndex, 2);
+            if (cookieIndex !== -1 && filteredArgs.length > cookieIndex + 1) {
+                selectedCookiePath = filteredArgs[cookieIndex + 1];
             }
 
             if (!selectedCookiePath) {
@@ -272,9 +273,11 @@ class LiveMonitor {
 
             const execWithCookie = (cookieName) => {
                 return new Promise((resolveExec, rejectExec) => {
-                    const argsWithCookie = [...finalArgs];
                     const cookiePath = resolveCookiePath(this.cookiesDir, cookieName);
-                    if (cookiePath) argsWithCookie.unshift('--cookies', cookiePath);
+                    const argsWithCookie = buildYtdlpArgsForSource(finalArgs, {
+                        source: cookiePath ? 'cookie' : 'public',
+                        cookiePath
+                    });
 
                     const child = spawn(ytCmd, argsWithCookie);
                     let stdout = '', stderr = '';
@@ -445,8 +448,11 @@ class LiveMonitor {
         let cookiePath = null;
         try {
             cookiePath = this.getCookiePath();
-            const args = ['--dump-json', '--skip-download', '--no-playlist', this.youtubeUrl];
-            if (cookiePath) args.unshift('--cookies', cookiePath);
+            const args = buildYtdlpDumpJsonArgs({
+                url: this.youtubeUrl,
+                source: cookiePath ? 'cookie' : 'public',
+                cookiePath
+            });
             const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
             const metadata = JSON.parse(stdout);
             const diagnostics = getYtdlpDiagnostics(metadata);

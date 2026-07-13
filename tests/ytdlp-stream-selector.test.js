@@ -2,6 +2,9 @@ const assert = require('assert');
 
 const {
     CLASSIFICATION,
+    YOUTUBE_COOKIE_EXTRACTOR_ARGS,
+    buildYtdlpArgsForSource,
+    buildYtdlpDumpJsonArgs,
     classifyYtdlpError,
     getYtdlpDiagnostics,
     selectHlsStream,
@@ -190,6 +193,59 @@ function testGlobalExtractionOutagePattern() {
     ], { classification: CLASSIFICATION.LIVE_ENDED }), false);
 }
 
+function testYtdlpArgsBuilder() {
+    const spacedCookiePath = '/tmp/Cookie Dir/cookie 1.txt';
+    const cookieArgs = buildYtdlpDumpJsonArgs({
+        url: 'https://www.youtube.com/watch?v=COOKIEARG01',
+        source: 'cookie',
+        cookiePath: spacedCookiePath
+    });
+    assert.deepEqual(cookieArgs.slice(0, 4), [
+        '--cookies',
+        spacedCookiePath,
+        '--extractor-args',
+        YOUTUBE_COOKIE_EXTRACTOR_ARGS
+    ]);
+    assert.ok(cookieArgs.includes('--dump-json'));
+    assert.ok(cookieArgs.includes('--skip-download'));
+    assert.ok(cookieArgs.includes('--no-playlist'));
+
+    const publicArgs = buildYtdlpDumpJsonArgs({
+        url: 'https://www.youtube.com/watch?v=PUBLICARG01',
+        source: 'public'
+    });
+    assert.equal(publicArgs.includes('--cookies'), false);
+    assert.equal(publicArgs.includes('--extractor-args'), false);
+    assert.equal(publicArgs.includes(YOUTUBE_COOKIE_EXTRACTOR_ARGS), false);
+
+    const strippedPublicArgs = buildYtdlpArgsForSource(cookieArgs, { source: 'public' });
+    assert.equal(strippedPublicArgs.includes('--cookies'), false);
+    assert.equal(strippedPublicArgs.includes('--extractor-args'), false);
+    assert.equal(strippedPublicArgs.includes(YOUTUBE_COOKIE_EXTRACTOR_ARGS), false);
+
+    const rebuiltCookieArgs = buildYtdlpArgsForSource(cookieArgs, {
+        source: 'cookie',
+        cookiePath: '/tmp/cookie2.txt'
+    });
+    assert.equal(rebuiltCookieArgs.filter(arg => arg === '--extractor-args').length, 1);
+    assert.equal(rebuiltCookieArgs[1], '/tmp/cookie2.txt');
+
+    const replacedPlayerClient = buildYtdlpArgsForSource([
+        '--cookies',
+        '/tmp/cookie-old.txt',
+        '--extractor-args',
+        'youtube:player_client=tv',
+        '--dump-json',
+        'https://www.youtube.com/watch?v=REPLACE001'
+    ], {
+        source: 'cookie',
+        cookiePath: '/tmp/cookie-new.txt'
+    });
+    assert.equal(replacedPlayerClient.filter(arg => arg === '--extractor-args').length, 1);
+    assert.equal(replacedPlayerClient.includes('youtube:player_client=tv'), false);
+    assert.equal(replacedPlayerClient.includes(YOUTUBE_COOKIE_EXTRACTOR_ARGS), true);
+}
+
 testClassifications();
 testHlsSelectionFromFormatsWithoutM3u8Extension();
 testManifestUrlSelection();
@@ -200,5 +256,6 @@ testTopLevelProtocolSelection();
 testDashOnlyAndNoFormats();
 testMaxHeightFallbackAndDiagnostics();
 testGlobalExtractionOutagePattern();
+testYtdlpArgsBuilder();
 
 console.log('yt-dlp stream selector tests OK');

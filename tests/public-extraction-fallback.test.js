@@ -5,6 +5,7 @@ const path = require('path');
 
 const {
     CLASSIFICATION,
+    YOUTUBE_COOKIE_EXTRACTOR_ARGS,
     classifyYtdlpError,
     shouldAttemptPublicFallback
 } = require('../services/ytdlpStreamSelector');
@@ -30,6 +31,11 @@ function hlsMetadata(height = 720) {
 function cookieFromArgs(args) {
     const index = args.indexOf('--cookies');
     return index === -1 ? null : path.basename(args[index + 1]);
+}
+
+function usesCookieMweb(args) {
+    const index = args.indexOf('--extractor-args');
+    return index !== -1 && args[index + 1] === YOUTUBE_COOKIE_EXTRACTOR_ARGS;
 }
 
 function captureConsole() {
@@ -145,9 +151,11 @@ async function testConvertPublicFallbackSuccess() {
         api._persistMapping = () => {};
 
         const attempts = [];
+        const mwebByAttempt = [];
         api._runYtdlp = async (args) => {
             const cookie = cookieFromArgs(args);
             attempts.push(cookie || 'public');
+            mwebByAttempt.push(usesCookieMweb(args));
             if (cookie) {
                 throw new Error('No video formats found at https://manifest.googlevideo.com/api/manifest/hls_variant/expire/1783885887/sig/secret/file/index.m3u8?token=secret Authorization: Bearer secret-token');
             }
@@ -158,6 +166,7 @@ async function testConvertPublicFallbackSuccess() {
         assert.equal(result.success, true);
         assert.equal(result.extractionSource, 'public');
         assert.deepEqual(attempts, ['cookie2.txt', 'cookie1.txt', 'cookie3.txt', 'public']);
+        assert.deepEqual(mwebByAttempt, [true, true, true, false]);
         assert.equal(fakes.calls.filter(call => call.op === 'success').length, 0);
         assert.equal(fakes.calls.filter(call => call.op === 'failure').length, 0);
 
@@ -195,8 +204,10 @@ async function testConvertCookieSuccessDoesNotUsePublicFallback() {
         api._persistMapping = () => {};
 
         const attempts = [];
+        const mwebByAttempt = [];
         api._runYtdlp = async (args) => {
             attempts.push(cookieFromArgs(args) || 'public');
+            mwebByAttempt.push(usesCookieMweb(args));
             return JSON.stringify(hlsMetadata(480));
         };
 
@@ -204,6 +215,7 @@ async function testConvertCookieSuccessDoesNotUsePublicFallback() {
         assert.equal(result.success, true);
         assert.equal(result.extractionSource, 'cookie1');
         assert.deepEqual(attempts, ['cookie1.txt']);
+        assert.deepEqual(mwebByAttempt, [true]);
         assert.deepEqual(fakes.calls.filter(call => call.op === 'success').map(call => call.file), ['cookie1.txt']);
     } finally {
         capture.restore();
@@ -428,6 +440,7 @@ async function testLiveMonitorPublicFallbackCreatesStream() {
 
         const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
         assert.deepEqual(attemptCookies, ['cookie1.txt', 'cookie2.txt', 'cookie3.txt', null]);
+        assert.deepEqual(fakeSpawn.calls.map(usesCookieMweb), [true, true, true, false]);
         assert.equal(calls.length, 0);
         assert.equal(monitor.lastSuccessfulCookie, null);
         assert.equal(monitor.lastSuccessfulExtractionSource, 'public');
@@ -489,6 +502,7 @@ async function testLiveMonitorPublicSuccessIsTriedFirstNextRound() {
 
         const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
         assert.deepEqual(attemptCookies, [null]);
+        assert.deepEqual(fakeSpawn.calls.map(usesCookieMweb), [false]);
         assert.equal(calls.length, 0);
         assert.equal(monitor.lastSuccessfulCookie, null);
         assert.equal(monitor.lastSuccessfulExtractionSource, 'public');
@@ -549,6 +563,7 @@ async function testLiveMonitorPublicSuccessRechecksCookiesPeriodically() {
 
         const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
         assert.deepEqual(attemptCookies, ['cookie1.txt', 'cookie2.txt', 'cookie3.txt', null]);
+        assert.deepEqual(fakeSpawn.calls.map(usesCookieMweb), [true, true, true, false]);
         assert.equal(calls.length, 0);
         assert.equal(monitor.lastSuccessfulCookie, null);
         assert.equal(monitor.lastSuccessfulExtractionSource, 'public');
@@ -609,6 +624,7 @@ async function testLiveMonitorPublicFailureFallsBackToCookies() {
 
         const attemptCookies = fakeSpawn.calls.map(cookieFromArgs);
         assert.deepEqual(attemptCookies, [null, 'cookie1.txt']);
+        assert.deepEqual(fakeSpawn.calls.map(usesCookieMweb), [false, true]);
         assert.deepEqual(calls, [{ op: 'success', file: 'cookie1.txt' }]);
         assert.equal(monitor.lastSuccessfulCookie, 'cookie1.txt');
         assert.equal(monitor.lastSuccessfulExtractionSource, 'cookie1');

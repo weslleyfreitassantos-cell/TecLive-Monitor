@@ -9,6 +9,7 @@ const {
     classifyYtdlpError,
     isCookieAuthClassification,
     getYtdlpDiagnostics,
+    buildYtdlpDumpJsonArgs,
     selectHlsStream,
     sanitizeYtdlpMessage,
     shouldAttemptPublicFallback,
@@ -506,7 +507,11 @@ class ConvertAPI {
         console.log(`[${videoId}] ordem de cookies da rodada: ${cookieAttemptOrder.join(' -> ') || 'nenhum cookie disponivel'}`);
         for (const file of cookieAttemptOrder) {
             const fullPath = resolveCookiePath(cookiesDir, file);
-            const argsWithCookie = ['--cookies', fullPath, '--dump-json', '--skip-download', '--no-playlist', youtubeUrl];
+            const argsWithCookie = buildYtdlpDumpJsonArgs({
+                url: youtubeUrl,
+                source: 'cookie',
+                cookiePath: fullPath
+            });
             try {
                 console.log(`🍪 Tentando ${file}...`);
                 const stdout = await this._runYtdlp(argsWithCookie, 60000);
@@ -559,7 +564,10 @@ class ConvertAPI {
         }
 
         if (!streamUrl && shouldAttemptPublicFallback(failedCookies)) {
-            const publicArgs = ['--dump-json', '--skip-download', '--no-playlist', youtubeUrl];
+            const publicArgs = buildYtdlpDumpJsonArgs({
+                url: youtubeUrl,
+                source: 'public'
+            });
             try {
                 console.log(`[${videoId}] ordem de extracao final: ${cookieAttemptOrder.join(' -> ') || 'sem cookies'} -> public`);
                 console.log(`[${videoId}] tentando extracao publica sem cookie...`);

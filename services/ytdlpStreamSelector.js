@@ -20,8 +20,62 @@ const CLASSIFICATION = Object.freeze({
     UNKNOWN: 'unknown'
 });
 
+const YOUTUBE_COOKIE_PLAYER_CLIENT = 'mweb';
+const YOUTUBE_COOKIE_EXTRACTOR_ARGS = `youtube:player_client=${YOUTUBE_COOKIE_PLAYER_CLIENT}`;
+
 function normalizeText(value) {
     return String(value || '').toLowerCase();
+}
+
+function stripCookieArgs(args = []) {
+    const result = [];
+    for (let index = 0; index < args.length; index++) {
+        if (args[index] === '--cookies') {
+            index++;
+            continue;
+        }
+        result.push(args[index]);
+    }
+    return result;
+}
+
+function isYoutubePlayerClientExtractorArg(value) {
+    return /^youtube:.*\bplayer_client=/i.test(String(value || ''));
+}
+
+function stripCookiePlayerClientArgs(args = []) {
+    const result = [];
+    for (let index = 0; index < args.length; index++) {
+        if (args[index] === '--extractor-args' && isYoutubePlayerClientExtractorArg(args[index + 1])) {
+            index++;
+            continue;
+        }
+        result.push(args[index]);
+    }
+    return result;
+}
+
+function buildYtdlpArgsForSource(baseArgs = [], options = {}) {
+    const source = options.source === 'cookie' ? 'cookie' : 'public';
+    const cookiePath = options.cookiePath || null;
+    const args = stripCookiePlayerClientArgs(stripCookieArgs(baseArgs));
+
+    if (source !== 'cookie') {
+        return args;
+    }
+
+    if (cookiePath) {
+        args.unshift('--cookies', cookiePath);
+    }
+    args.splice(cookiePath ? 2 : 0, 0, '--extractor-args', YOUTUBE_COOKIE_EXTRACTOR_ARGS);
+    return args;
+}
+
+function buildYtdlpDumpJsonArgs(options = {}) {
+    const url = options.url || options.youtubeUrl;
+    const baseArgs = ['--dump-json', '--skip-download', '--no-playlist'];
+    if (url) baseArgs.push(url);
+    return buildYtdlpArgsForSource(baseArgs, options);
 }
 
 function classifyYtdlpError(error) {
@@ -365,6 +419,10 @@ function selectHlsStream(metadata, options = {}) {
 
 module.exports = {
     CLASSIFICATION,
+    YOUTUBE_COOKIE_PLAYER_CLIENT,
+    YOUTUBE_COOKIE_EXTRACTOR_ARGS,
+    buildYtdlpArgsForSource,
+    buildYtdlpDumpJsonArgs,
     classifyYtdlpError,
     isCookieAuthClassification,
     getYtdlpDiagnostics,

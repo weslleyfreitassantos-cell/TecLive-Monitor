@@ -21,6 +21,7 @@ const {
     CLASSIFICATION,
     classifyYtdlpError,
     getYtdlpDiagnostics,
+    buildYtdlpDumpJsonArgs,
     selectHlsStream,
     sanitizeYtdlpMessage
 } = require('./services/ytdlpStreamSelector');
@@ -728,13 +729,11 @@ async function validateCookieSimple(cookiePath) {
     console.log('✅ Estrutura do cookie OK');
     try {
         console.log('🔍 Testando extração real do cookie...');
-        const stdout = await runYtdlp([
-            '--cookies', cookiePath,
-            '--dump-json',
-            '--skip-download',
-            '--no-playlist',
-            getCookieStreamTestUrl()
-        ], 45000, false);
+        const stdout = await runYtdlp(buildYtdlpDumpJsonArgs({
+            url: getCookieStreamTestUrl(),
+            source: 'cookie',
+            cookiePath
+        }), 45000, false);
         const metadata = JSON.parse(stdout);
         const selection = selectHlsStream(metadata, {
             maxHeight: parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 720,
@@ -2706,13 +2705,11 @@ startCookieAgentAlertWatcher();
 
         try {
             console.log(`🔍 Testando ${file} com extração real de stream...`);
-            const stdout = await runYtdlp([
-                '--cookies', fullPath,
-                '--dump-json',
-                '--skip-download',
-                '--no-playlist',
-                TEST_URL
-            ], 45000, false);
+            const stdout = await runYtdlp(buildYtdlpDumpJsonArgs({
+                url: TEST_URL,
+                source: 'cookie',
+                cookiePath: fullPath
+            }), 45000, false);
 
             const metadata = JSON.parse(stdout);
             const diagnostics = getYtdlpDiagnostics(metadata);
