@@ -112,6 +112,65 @@
         .stat-value.status-critical { color: #e74c3c; }
         .stat-value.status-unknown { color: #7a8aa0; }
         .stat-label { font-size: 15px; letter-spacing: 1.5px; text-transform: uppercase; color: #7a8aa0; margin-top: 4px; }
+        .server-status-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 126px;
+            gap: 10px;
+        }
+        .server-status-indicator {
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: rgba(122,138,160,0.1);
+            border: 1px solid rgba(122,138,160,0.32);
+        }
+        .server-status-dot {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            display: block;
+            background: #7a8aa0;
+            box-shadow: 0 0 0 8px rgba(122,138,160,0.12);
+        }
+        .server-status-indicator.ok {
+            background: rgba(46,204,113,0.11);
+            border-color: rgba(46,204,113,0.42);
+        }
+        .server-status-indicator.ok .server-status-dot {
+            background: #2ecc71;
+            box-shadow: 0 0 0 8px rgba(46,204,113,0.13), 0 0 22px rgba(46,204,113,0.45);
+        }
+        .server-status-indicator.degraded {
+            background: rgba(241,196,15,0.11);
+            border-color: rgba(241,196,15,0.45);
+        }
+        .server-status-indicator.degraded .server-status-dot {
+            background: #f1c40f;
+            box-shadow: 0 0 0 8px rgba(241,196,15,0.14), 0 0 22px rgba(241,196,15,0.38);
+        }
+        .server-status-indicator.error {
+            background: rgba(231,76,60,0.11);
+            border-color: rgba(231,76,60,0.45);
+        }
+        .server-status-indicator.error .server-status-dot {
+            background: #e74c3c;
+            box-shadow: 0 0 0 8px rgba(231,76,60,0.14), 0 0 22px rgba(231,76,60,0.38);
+        }
+        .server-status-indicator.unknown .server-status-dot {
+            background: #7a8aa0;
+        }
+        .server-stat-label {
+            color: #e0e8f0;
+            font-size: 22px;
+            font-weight: 900;
+            letter-spacing: 1px;
+            margin-top: 0;
+        }
 
         .health-overview-grid {
             display: grid;
@@ -1407,7 +1466,12 @@
 
     <!-- STATS -->
     <div class="stats-grid">
-        <div class="stat-card"><div class="stat-value" id="mainStatus">---</div><div class="stat-label">SERVIDOR</div></div>
+        <div class="stat-card server-status-card">
+            <div class="server-status-indicator unknown" id="mainStatus" role="img" aria-label="Servidor: desconhecido" title="Servidor: desconhecido">
+                <span class="server-status-dot"></span>
+            </div>
+            <div class="stat-label server-stat-label">SERVIDOR</div>
+        </div>
         <div class="stat-card"><div class="stat-value" id="activeLivesCard">0</div><div class="stat-label">LIVES ATIVAS</div></div>
         <div class="stat-card"><div class="stat-value" id="mainUptime">0m</div><div class="stat-label">UPTIME</div></div>
     </div>
@@ -3133,8 +3197,9 @@
             const mainStatus = document.getElementById('mainStatus');
             const displayStatus = getHealthStatusLabel(healthPayload.status || 'unknown');
             const cssStatus = getHealthCssStatus(healthPayload.status || 'unknown');
-            mainStatus.textContent = displayStatus;
-            mainStatus.className = `stat-value status-${cssStatus}`;
+            mainStatus.className = `server-status-indicator ${cssStatus}`;
+            mainStatus.setAttribute('aria-label', `Servidor: ${displayStatus}`);
+            mainStatus.title = `Servidor: ${displayStatus}`;
             renderSystemHealth(healthPayload);
             const activeCount = monitors.monitors?.filter(m => m.status === 'online' || m.status === 'degraded').length || 0;
             document.getElementById('activeLivesCard').textContent = activeCount;
