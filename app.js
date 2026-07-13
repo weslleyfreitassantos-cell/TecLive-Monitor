@@ -1001,6 +1001,7 @@ let requestLogCount = 0;
 let lastLogTime = 0;
 const LOG_INTERVAL_MS = 5000;
 const playbackSessionCreationWindows = new Map();
+const restoreBackoffLogTracker = new Map();
 
 function isPlaybackSessionCreationRateLimited(ip, owner, videoId) {
     const limit = parseInt(process.env.PLAYBACK_SESSION_CREATE_LIMIT_PER_MINUTE, 10) || 30;
@@ -1025,6 +1026,21 @@ function logRequestSummary(videoId, ip, owner) {
         requestLogCount = 0;
         lastLogTime = now;
     }
+}
+
+function getGlobalExtractionRetryAfterSeconds(now = Date.now()) {
+    const nextRetryAt = Number(converter?.globalExtractionBackoff?.nextRetryAt) || 0;
+    if (nextRetryAt <= now) return 0;
+    return Math.ceil((nextRetryAt - now) / 1000);
+}
+
+function logRestoreBackoffSuppressed(videoId, owner, retryAfterSeconds) {
+    const key = `${owner || 'public'}:${videoId}`;
+    const now = Date.now();
+    const last = restoreBackoffLogTracker.get(key) || 0;
+    if (now - last < 30000) return;
+    restoreBackoffLogTracker.set(key, now);
+    console.log(`[${videoId}] recriacao de monitor suprimida por circuit breaker global; retry em ${retryAfterSeconds}s (owner: ${owner || 'n/a'})`);
 }
 
 // ============================================================
@@ -1070,6 +1086,14 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     }
 
     if (!monitor) {
+        const retryAfterSeconds = getGlobalExtractionRetryAfterSeconds();
+        if (retryAfterSeconds > 0) {
+            logRestoreBackoffSuppressed(videoId, queryOwner, retryAfterSeconds);
+            logProxyAccess(videoId, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart });
+            res.set('Retry-After', String(retryAfterSeconds));
+            return res.status(503).send('Stream extraction temporarily unavailable');
+        }
+
         try {
             const map = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
             const keysToTry = queryOwner

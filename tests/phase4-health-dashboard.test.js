@@ -463,6 +463,8 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(appSource.includes('sanitizeServerLogLine'));
     assert.ok(appSource.includes('sanitizeYtdlpArgsForLog'));
     assert.ok(!appSource.includes('runYtdlp args: ${finalArgs.join'));
+    assert.ok(appSource.includes('getGlobalExtractionRetryAfterSeconds'));
+    assert.ok(appSource.includes('Stream extraction temporarily unavailable'));
     assert.equal((html.match(/setInterval\(fetchData/g) || []).length, 1);
     assert.equal((html.match(/fetchAdminJson\('\/api\/admin\/health'/g) || []).length, 1);
     assert.ok(!html.includes('onclick="openClientDetailModal'));
