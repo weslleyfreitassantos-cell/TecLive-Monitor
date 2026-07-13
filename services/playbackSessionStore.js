@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_TTL_MS = 90000;
+const DEFAULT_REUSE_STALE_AFTER_MS = 45000;
 
 function safeText(value, limit = 300) {
     return String(value || '')
@@ -28,6 +29,14 @@ class PlaybackSessionStore {
         this.filePath = options.filePath || path.join(__dirname, '..', 'data', 'playback-sessions.json');
         const configuredTtl = Number(options.ttlMs || process.env.PLAYBACK_SESSION_TTL_MS);
         this.ttlMs = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : DEFAULT_TTL_MS;
+        const configuredReuseStaleAfter = Number(
+            options.reuseStaleAfterMs !== undefined
+                ? options.reuseStaleAfterMs
+                : process.env.PLAYBACK_SESSION_REUSE_STALE_AFTER_MS
+        );
+        this.reuseStaleAfterMs = Number.isFinite(configuredReuseStaleAfter) && configuredReuseStaleAfter >= 0
+            ? configuredReuseStaleAfter
+            : DEFAULT_REUSE_STALE_AFTER_MS;
         this.maxUserAgentLength = Number(options.maxUserAgentLength || 240);
         this._ensureStore();
     }
@@ -109,6 +118,40 @@ class PlaybackSessionStore {
             .filter(session => this._matches(session, filters.owner, filters.videoId));
     }
 
+    _lastSeenMs(session) {
+        const parsed = Date.parse(session?.lastSeenAt || session?.createdAt || '');
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    _matchesClient(session, { publicIp, userAgent, fingerprint }) {
+        const normalizedPublicIp = safeText(publicIp, 80);
+        const normalizedUserAgent = safeText(userAgent, this.maxUserAgentLength);
+        if (!normalizedPublicIp || !normalizedUserAgent) return false;
+        if (session.publicIp !== normalizedPublicIp || session.userAgent !== normalizedUserAgent) return false;
+
+        const normalizedFingerprint = fingerprint ? safeText(fingerprint, 240) : null;
+        const sessionFingerprint = session.fingerprint || null;
+        if (normalizedFingerprint || sessionFingerprint) {
+            return normalizedFingerprint === sessionFingerprint;
+        }
+        return true;
+    }
+
+    _findReusableStaleSession(store, { owner, videoId, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+        if (!this.reuseStaleAfterMs) return null;
+        const candidates = Object.entries(store.sessions)
+            .filter(([, session]) => this._matches(session, owner, videoId))
+            .filter(([, session]) => !this._isExpired(session, nowMs))
+            .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint }))
+            .filter(([, session]) => nowMs - this._lastSeenMs(session) >= this.reuseStaleAfterMs)
+            .sort(([, a], [, b]) => this._lastSeenMs(b) - this._lastSeenMs(a));
+        if (candidates.length === 0) return null;
+        return {
+            sessionId: candidates[0][0],
+            session: candidates[0][1]
+        };
+    }
+
     createSession({ owner, videoId, limit = 0, publicIp = '', userAgent = '', source = 'hls', fingerprint = null } = {}, nowMs = Date.now()) {
         const normalizedOwner = safeText(owner, 120);
         const normalizedVideoId = safeText(videoId, 40);
@@ -127,6 +170,31 @@ class PlaybackSessionStore {
             return {
                 ok: false,
                 code: 'limit_unavailable',
+                active: active.length,
+                limit: numericLimit
+            };
+        }
+
+        const reusable = this._findReusableStaleSession(store, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
+        if (reusable) {
+            const nowIso = this._nowIso(nowMs);
+            reusable.session.lastSeenAt = nowIso;
+            reusable.session.publicIp = safeText(publicIp, 80);
+            reusable.session.userAgent = safeText(userAgent, this.maxUserAgentLength);
+            reusable.session.status = 'active';
+            reusable.session.source = safeText(source, 80);
+            reusable.session.fingerprint = fingerprint ? safeText(fingerprint, 240) : null;
+            this._writeStore(store);
+            return {
+                ok: true,
+                code: 'reused_stale',
+                session: reusable.session,
                 active: active.length,
                 limit: numericLimit
             };

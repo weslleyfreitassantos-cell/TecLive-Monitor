@@ -24,7 +24,8 @@ function tempFile() {
 function createStore(options = {}) {
     return new PlaybackSessionStore({
         filePath: tempFile(),
-        ttlMs: options.ttlMs || 90000
+        ttlMs: options.ttlMs || 90000,
+        reuseStaleAfterMs: options.reuseStaleAfterMs
     });
 }
 
@@ -96,6 +97,70 @@ function testIdenticalDevicesReceiveDifferentSessionIds() {
     assert.notEqual(first.session.sessionId, second.session.sessionId);
     assert.equal(first.session.publicIp, IP);
     assert.equal(first.session.userAgent, USER_AGENT);
+}
+
+function testFreshIdenticalClientStillCountsAsSeparateDevice() {
+    const store = createStore({ reuseStaleAfterMs: 45000 });
+    const first = create(store, {}, NOW);
+    const second = create(store, {}, NOW + 10000);
+
+    assert.equal(first.ok, true);
+    assert.equal(first.code, 'created');
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(first.session.sessionId, second.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 2);
+}
+
+function testStaleIdenticalClientReusesSession() {
+    const store = createStore({ reuseStaleAfterMs: 45000 });
+    const first = create(store, {}, NOW);
+    const reopened = create(store, {}, NOW + 46000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_stale');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 46000), 1);
+}
+
+function testStaleReuseCanAvoidFalseLimitExceeded() {
+    const store = createStore({ reuseStaleAfterMs: 45000 });
+    const first = create(store, {}, NOW);
+    create(store, { publicIp: '187.40.208.119' }, NOW);
+    create(store, { publicIp: '187.40.208.120' }, NOW);
+
+    const reopened = create(store, {}, NOW + 46000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_stale');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 46000), 3);
+}
+
+function testStaleDifferentClientDoesNotReuseSession() {
+    const store = createStore({ reuseStaleAfterMs: 45000 });
+    const first = create(store, {}, NOW);
+    const second = create(store, { userAgent: 'ExoMedia 4.3.0 / Android 14 / Another Stick' }, NOW + 46000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(first.session.sessionId, second.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 46000), 2);
+}
+
+function testFingerprintPreventsStaleReuseAcrossDifferentLocalIdentity() {
+    const store = createStore({ reuseStaleAfterMs: 45000 });
+    const first = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW);
+    const second = create(store, { fingerprint: 'localIp:192.168.0.11' }, NOW + 46000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(first.session.sessionId, second.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 46000), 2);
 }
 
 function testPlaylistRefreshKeepsSameSession() {
@@ -308,6 +373,7 @@ function testAppIntegrationStaticChecks() {
     assert.ok(app.includes("require('./services/playbackSessionStore')"));
     assert.ok(app.includes('playbackSessions.createSession'));
     assert.ok(app.includes('playbackSessions.touchSession'));
+    assert.ok(app.includes("created.code === 'reused_stale'"));
     assert.ok(app.includes('buildPlaybackSessionMaster'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store'"));
     assert.ok(app.includes("'Vary': 'User-Agent'"));
@@ -351,6 +417,11 @@ async function main() {
     testDifferentIpsFourthIsBlocked();
     testLimitsOneTwoAndInvalid();
     testIdenticalDevicesReceiveDifferentSessionIds();
+    testFreshIdenticalClientStillCountsAsSeparateDevice();
+    testStaleIdenticalClientReusesSession();
+    testStaleReuseCanAvoidFalseLimitExceeded();
+    testStaleDifferentClientDoesNotReuseSession();
+    testFingerprintPreventsStaleReuseAcrossDifferentLocalIdentity();
     testPlaylistRefreshKeepsSameSession();
     testExpiredSessionFreesSlot();
     testExpiredSessionIsRejectedOnRefresh();
