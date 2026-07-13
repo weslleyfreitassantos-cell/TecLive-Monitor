@@ -819,12 +819,31 @@
             transform: translateY(-1px);
         }
         .maintenance-modal-box {
-            max-width: 520px;
+            width: min(92vw, 380px);
+            max-width: 380px;
         }
         .maintenance-modal-content {
             display: flex;
             flex-direction: column;
+            align-items: center;
             gap: 12px;
+        }
+        .maintenance-modal-content .automation-action-panel {
+            width: 100%;
+            padding: 14px;
+        }
+        .maintenance-modal-content .automation-actions {
+            grid-template-columns: 1fr;
+            justify-items: center;
+        }
+        .maintenance-modal-content .automation-actions button {
+            width: min(100%, 250px);
+            min-height: 38px;
+            padding: 9px 12px;
+            font-size: 11px;
+        }
+        .maintenance-modal-content .automation-actions button.danger {
+            grid-column: auto;
         }
         .automation-actions {
             display: grid;
@@ -1008,6 +1027,8 @@
         }
         /* Modal de IPs deve ficar à frente do modal de detalhes */
         #ipModal { z-index: 300; }
+        #cookieMaintenanceModal { z-index: 340; }
+        #serverLogModal { z-index: 360; }
         .modal-overlay.active { display: flex; }
 
         .modal-box.wide {
