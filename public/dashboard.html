@@ -595,9 +595,10 @@
         .cookie-health-layout {
             display: grid;
             grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            grid-template-rows: 1fr auto auto;
             gap: 16px;
             height: 100%;
-            align-content: start;
+            align-content: stretch;
             align-items: start;
         }
         .cookie-compact {
@@ -704,7 +705,9 @@
             color: #7a8aa0;
             font-size: 12px;
             text-align: center;
-            margin-top: 0;
+            margin-top: 4px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(122,138,160,0.14);
         }
         .cookie-item .substituir-btn {
             grid-column: 1 / -1;
@@ -788,6 +791,40 @@
             border-left: 4px solid rgba(93,173,226,0.65);
             border-radius: 8px;
             padding: 12px;
+        }
+        .automation-maintenance-footer {
+            display: flex;
+            justify-content: center;
+            margin-top: auto;
+            padding-top: 4px;
+        }
+        .maintenance-open-button {
+            min-width: 190px;
+            min-height: 42px;
+            background: rgba(93,173,226,0.12);
+            border: 1px solid rgba(93,173,226,0.32);
+            color: #5dade2;
+            border-radius: 8px;
+            padding: 10px 18px;
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+        }
+        .maintenance-open-button:hover {
+            background: rgba(93,173,226,0.22);
+            border-color: rgba(93,173,226,0.52);
+            transform: translateY(-1px);
+        }
+        .maintenance-modal-box {
+            max-width: 520px;
+        }
+        .maintenance-modal-content {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
         }
         .automation-actions {
             display: grid;
@@ -1434,6 +1471,7 @@
             .health-overview-grid { grid-template-columns: 1fr; }
             .cookie-compact { grid-template-columns: 1fr; }
             .cookie-capability-summary { grid-template-columns: 1fr; }
+            .automation-actions { grid-template-columns: 1fr; }
             .cookie-item { min-height: 0; }
             .header { flex-direction: column; align-items: stretch; text-align: center; }
             .header-right { justify-content: center; flex-wrap: wrap; }
@@ -1591,6 +1629,17 @@
     </div>
 </div>
 
+<!-- ===== MODAL MANUTENÇÃO DE COOKIES ===== -->
+<div class="modal-overlay" id="cookieMaintenanceModal">
+    <div class="modal-box maintenance-modal-box">
+        <div class="modal-header">
+            <h3>Manutenção de cookies</h3>
+            <button class="modal-close" id="cookieMaintenanceClose">&times;</button>
+        </div>
+        <div class="maintenance-modal-content" id="cookieMaintenanceActions"></div>
+    </div>
+</div>
+
 <!-- ===== MODAL IPs (COM BUSCA) ===== -->
 <div class="modal-overlay" id="ipModal">
     <div class="modal-box">
@@ -1721,6 +1770,9 @@
     const serverLogAuto = document.getElementById('serverLogAuto');
     const serverLogStatus = document.getElementById('serverLogStatus');
     const serverLogContent = document.getElementById('serverLogContent');
+    const cookieMaintenanceModal = document.getElementById('cookieMaintenanceModal');
+    const cookieMaintenanceClose = document.getElementById('cookieMaintenanceClose');
+    const cookieMaintenanceActions = document.getElementById('cookieMaintenanceActions');
 
     const emergencyBanner = document.getElementById('emergencyBanner');
     const bannerMessage = document.getElementById('bannerMessage');
@@ -1850,6 +1902,46 @@
     serverLogRefresh.addEventListener('click', loadServerLogs);
     serverLogAuto.addEventListener('change', startServerLogPolling);
     serverLogModal.addEventListener('click', (e) => { if (e.target === serverLogModal) closeServerLogModal(); });
+
+    function renderCookieMaintenanceActions(status) {
+        if (!cookieMaintenanceActions) return;
+        if (!status || !status.enabled) {
+            cookieMaintenanceActions.innerHTML = '<div class="public-mode-card">Automação de cookies desativada.</div>';
+            return;
+        }
+
+        const recentJobs = status.recentJobs || [];
+        const pendingCancelable = recentJobs.some(item => item.status === 'pending');
+        const disabledAttr = cookieAutomationBusy ? 'disabled' : '';
+        const cancelDisabledAttr = cookieAutomationBusy || !pendingCancelable ? 'disabled' : '';
+
+        cookieMaintenanceActions.innerHTML = `
+            <div class="automation-action-panel">
+                <div class="automation-actions">
+                    <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie1')">Atualizar Cookie1</button>
+                    <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie2')">Atualizar Cookie2</button>
+                    <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie3')">Atualizar Cookie3</button>
+                    <button type="button" class="strong" ${disabledAttr} onclick="enqueueCookieRefresh('all')">Atualizar Todos</button>
+                    <button type="button" class="danger" ${cancelDisabledAttr} onclick="cancelPendingCookieRefresh()">Cancelar tarefa pendente</button>
+                    <button type="button" class="secondary" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
+                    <button type="button" class="server-log-button" onclick="openServerLogModal()">LOG</button>
+                </div>
+            </div>
+        `;
+    }
+
+    function openCookieMaintenanceModal() {
+        renderCookieMaintenanceActions(lastCookieAutomationStatus);
+        cookieMaintenanceModal.classList.add('active');
+    }
+
+    function closeCookieMaintenanceModal() {
+        cookieMaintenanceModal.classList.remove('active');
+    }
+
+    window.openCookieMaintenanceModal = openCookieMaintenanceModal;
+    cookieMaintenanceClose.addEventListener('click', closeCookieMaintenanceModal);
+    cookieMaintenanceModal.addEventListener('click', (e) => { if (e.target === cookieMaintenanceModal) closeCookieMaintenanceModal(); });
 
     // ============================================================
     // DETALHES DO CLIENTE (AGRUPAMENTO)
@@ -2707,6 +2799,7 @@
         if (!status || !status.enabled) {
             badge.textContent = 'DESATIVADA';
             badge.classList.remove('ok', 'warn', 'fail');
+            renderCookieMaintenanceActions(status);
             container.innerHTML = `
                 <div class="public-mode-card">
                     AUTOMAÇÃO DESATIVADA<br>
@@ -2718,13 +2811,9 @@
 
         const agent = status.agent;
         const activeJob = (status.activeJobs || [])[0] || null;
-        const recentJobs = status.recentJobs || [];
         const counts = status.counts || {};
         const cookies = status.cookies || {};
         const summary = status.summary || {};
-        const pendingCancelable = recentJobs.some(item => item.status === 'pending');
-        const disabledAttr = cookieAutomationBusy ? 'disabled' : '';
-        const cancelDisabledAttr = cookieAutomationBusy || !pendingCancelable ? 'disabled' : '';
         const agentState = agent?.status || 'offline';
         const agentClass = agentState === 'online' ? 'ok' : (agentState === 'degraded' ? 'warn' : 'fail');
         const agentMessages = {
@@ -2766,6 +2855,7 @@
         badge.textContent = agentStatus;
         badge.classList.remove('ok', 'warn', 'fail');
         badge.classList.add(agentClass);
+        renderCookieMaintenanceActions(status);
 
         const cookieRows = ['cookie1', 'cookie2', 'cookie3'].map(name => {
             const info = cookies[name] || {};
@@ -2820,16 +2910,8 @@
                 ${cookieRows}
             </div>
             ${automationProgress}
-            <div class="automation-action-panel">
-                <div class="automation-actions">
-                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie1')">Atualizar Cookie1</button>
-                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie2')">Atualizar Cookie2</button>
-                <button type="button" ${disabledAttr} onclick="enqueueCookieRefresh('cookie3')">Atualizar Cookie3</button>
-                <button type="button" class="strong" ${disabledAttr} onclick="enqueueCookieRefresh('all')">Atualizar Todos</button>
-                <button type="button" class="danger" ${cancelDisabledAttr} onclick="cancelPendingCookieRefresh()">Cancelar tarefa pendente</button>
-                <button type="button" class="secondary" ${disabledAttr} onclick="loadCookieAutomationStatus()">Atualizar status</button>
-                <button type="button" class="server-log-button" onclick="openServerLogModal()">LOG</button>
-                </div>
+            <div class="automation-maintenance-footer">
+                <button type="button" class="maintenance-open-button" onclick="openCookieMaintenanceModal()">Manutenção</button>
             </div>
         `;
     }
