@@ -2612,6 +2612,7 @@ startCookieAgentAlertWatcher();
     console.log('🔍 Validando cookies na inicialização (extração real de HLS)...');
     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
     const TEST_URL = process.env.COOKIE_STREAM_VALIDATION_URL || 'https://www.youtube.com/watch?v=aSXLerQStXA';
+    let validationInconclusive = false;
 
     for (const file of cookieFiles) {
         const fullPath = path.join(cookiesDir, file);
@@ -2661,6 +2662,9 @@ startCookieAgentAlertWatcher();
             if (err.diagnostics) {
                 console.log(`[startup:${file}] Diagnóstico seguro: ${JSON.stringify(err.diagnostics)}`);
             }
+            if (isValidationTargetUnavailableClassification(classification)) {
+                validationInconclusive = true;
+            }
             if (classification === CLASSIFICATION.AUTH_COOKIE || converter.cookieRotator.isCookieAuthError(err.message)) {
                 converter.cookieRotator.markFailure(cookieKey, err.message, 'startup-validation');
             } else {
@@ -2678,6 +2682,8 @@ startCookieAgentAlertWatcher();
         if (emailAlerts && emailAlerts.sendCookieFailureSummaryAlert) {
             emailAlerts.sendCookieFailureSummaryAlert(problematic);
         }
+    } else if (validationInconclusive) {
+        console.log('ℹ️ Validação de stream dos cookies inconclusiva: a URL de validação está indisponível/encerrada. Estado dos cookies preservado.');
     } else {
         const allValid = Object.values(statusAfterValidation).every(v => v.valid === true);
         if (allValid) {
@@ -2687,11 +2693,13 @@ startCookieAgentAlertWatcher();
         }
     }
 
-    if (emailAlerts && emailAlerts.checkCookiesHealthAlert) {
+    if (emailAlerts && emailAlerts.checkCookiesHealthAlert && !validationInconclusive) {
         setTimeout(() => {
             console.log('🔄 Iniciando verificação periódica de cookies após validação...');
             emailAlerts.checkCookiesHealthAlert();
         }, 1000);
+    } else if (validationInconclusive) {
+        console.log('ℹ️ Alerta periódico de cookies pulado nesta inicialização por validação inconclusiva.');
     }
 
     setTimeout(async () => {
