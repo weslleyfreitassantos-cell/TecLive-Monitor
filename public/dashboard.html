@@ -594,43 +594,44 @@
         }
         .cookie-health-layout {
             display: grid;
-            grid-template-columns: 1fr;
-            gap: 14px;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 16px;
             height: 100%;
             align-content: start;
+            align-items: start;
         }
         .cookie-compact {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 10px;
+            grid-template-columns: 1fr;
+            gap: 12px;
             margin-bottom: 0;
         }
         .cookie-item {
             background: rgba(0,0,0,0.25);
             border-radius: 6px;
-            padding: 14px 16px;
+            padding: 16px 18px;
             border-left: 4px solid #2ecc71;
-            font-size: 13px;
+            font-size: 14px;
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto;
             gap: 6px 10px;
             align-content: start;
-            min-height: 96px;
+            min-height: 104px;
         }
         .cookie-name {
             color: #e0e0e0;
-            font-size: 14px;
+            font-size: 16px;
             font-weight: 800;
             text-transform: uppercase;
             overflow-wrap: anywhere;
         }
         .cookie-state {
             color: #2ecc71;
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 800;
             text-align: right;
             text-transform: uppercase;
-            white-space: nowrap;
+            overflow-wrap: anywhere;
         }
         .cookie-item.invalid .cookie-state { color: #e74c3c; }
         .cookie-item.stream-warning .cookie-state { color: #f1c40f; }
@@ -638,7 +639,7 @@
         .cookie-issue-detail {
             grid-column: 1 / -1;
             color: #7a8aa0;
-            font-size: 12px;
+            font-size: 13px;
             line-height: 1.35;
             overflow-wrap: anywhere;
         }
@@ -659,15 +660,15 @@
         }
         .cookie-capability-summary {
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 10px;
+            grid-template-columns: 1fr;
+            gap: 12px;
         }
         .cookie-capability-pill {
             background: rgba(0,0,0,0.22);
             border-left: 4px solid #7a8aa0;
             border-radius: 6px;
-            padding: 14px 16px;
-            min-height: 96px;
+            padding: 16px 18px;
+            min-height: 104px;
             display: grid;
             align-content: start;
         }
@@ -677,7 +678,7 @@
         .cookie-capability-pill.unknown { border-left-color: #7a8aa0; }
         .cookie-capability-label {
             color: #7a8aa0;
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0;
@@ -686,15 +687,18 @@
         }
         .cookie-capability-value {
             color: #e0e0e0;
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 800;
         }
         .cookie-capability-detail {
             color: #7a8aa0;
-            font-size: 12px;
+            font-size: 13px;
             line-height: 1.35;
             margin-top: 4px;
             overflow-wrap: anywhere;
+        }
+        .cookie-health-footer {
+            grid-column: 1 / -1;
         }
         .cookie-check-time {
             color: #7a8aa0;
@@ -1373,6 +1377,7 @@
             .container { padding: 16px; }
             .bottom-grid { grid-template-columns: 1fr; }
             .automation-detail-grid { grid-template-columns: 1fr; }
+            .cookie-health-layout { grid-template-columns: 1fr; }
             .health-overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .footer { padding: 8px 16px; flex-direction: column; text-align: center; }
@@ -1398,7 +1403,7 @@
             .stats-grid { grid-template-columns: 1fr; }
             .health-overview-grid { grid-template-columns: 1fr; }
             .cookie-compact { grid-template-columns: 1fr; }
-            .cookie-capability-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .cookie-capability-summary { grid-template-columns: 1fr; }
             .cookie-item { min-height: 0; }
             .header { flex-direction: column; align-items: stretch; text-align: center; }
             .header-right { justify-content: center; flex-wrap: wrap; }
@@ -1416,7 +1421,7 @@
             .stat-value { font-size: 40px; }
             .card-header h2 { font-size: 16px; }
             .filter-btn { font-size: 13px; padding: 4px 12px; }
-            .cookie-item { font-size: 12px; }
+            .cookie-item { font-size: 13px; }
             .automation-summary { grid-template-columns: 1fr; }
             .monitor-table .canal-cell { max-width: 80px; }
             .cadastro-modal .modal-box { max-width: 100%; margin: 10px; }
@@ -2774,9 +2779,6 @@
                     <div class="automation-label">Última consulta à fila</div>
                     <div class="automation-value">${escapeHtml(lastQueueCheck)}</div>
                 </div>
-                ${cookieRows}
-            </div>
-            <div class="automation-detail-grid">
                 <div class="automation-pill">
                     <div class="automation-label">Versão do agente</div>
                     <div class="automation-value">${escapeHtml(agent?.version || '—')}</div>
@@ -2785,6 +2787,7 @@
                     <div class="automation-label">Tarefas</div>
                     <div class="automation-value">P:${counts.pending || 0} R:${(counts.running || 0) + (counts.claimed || 0)} OK:${counts.succeeded || 0} F:${counts.failed || 0}</div>
                 </div>
+                ${cookieRows}
             </div>
             ${automationProgress}
             <div class="automation-actions">
@@ -3108,8 +3111,8 @@
                     ${renderCapabilityPill('Stream via cookie', streamStatus === 'ok' ? 'OK' : streamStatus === 'warn' ? 'DEGRADADA' : 'INCONCLUSIVA', `${streamReadyCount}/${totalCookies || 0} cookie(s) com HLS`, streamStatus)}
                     ${renderCapabilityPill('Fallback público', fallbackLabel, publicFallback.message || '—', fallbackStatus)}
                 </div>`;
-            html += `<div id="cookieManualUploadProgress" class="manual-upload-progress"></div>`;
-            html += `<div class="cookie-check-time">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div></div>`;
+            html += `<div id="cookieManualUploadProgress" class="manual-upload-progress cookie-health-footer"></div>`;
+            html += `<div class="cookie-check-time cookie-health-footer">Última verificação: ${data.timestamp ? new Date(data.timestamp).toLocaleString('pt-BR') : 'N/A'}</div></div>`;
             container.innerHTML = html;
             setManualUploadProgress(manualUploadProgress);
 
