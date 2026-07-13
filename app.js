@@ -15,7 +15,9 @@ const { parseTrustProxyConfig, resolveBindHost } = require('./services/httpRunti
 const {
     buildMonitorHealth,
     buildSystemHealth,
-    getMonitorDisplayStatus
+    getMonitorDisplayStatus,
+    isMonitorEnding,
+    isMonitorTerminalAvailability
 } = require('./services/healthSnapshot');
 const {
     CLASSIFICATION,
@@ -2355,6 +2357,12 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
             const healthSummary = buildMonitorHealth(monitor, { nowMs });
             const rawStatus = monitor.liveState || (monitor.isLive ? 'online' : 'offline');
             const displayStatus = getMonitorDisplayStatus(monitor, healthSummary);
+            const ending = isMonitorEnding(monitor);
+            const terminalAvailability = isMonitorTerminalAvailability(monitor);
+            const liveEndedFirstDetection = Number(monitor._liveEndedFirstDetection) || 0;
+            const removalDelaySeconds = ending && liveEndedFirstDetection
+                ? Math.max(0, 120 - Math.floor((nowMs - liveEndedFirstDetection) / 1000))
+                : 0;
             monitors.push({
                 videoId,
                 youtubeUrl: monitor.youtubeUrl,
@@ -2363,6 +2371,9 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
                 status: displayStatus,
                 rawStatus,
                 isLive: displayStatus === 'online',
+                ending,
+                terminalAvailability,
+                removalDelaySeconds,
                 failCount: monitor.failCount || 0,
                 lastRenewSuccess: monitor.lastSuccessTime || monitor.lastUpdate,
                 health: monitor.health,

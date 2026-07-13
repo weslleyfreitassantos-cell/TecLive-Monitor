@@ -5,7 +5,9 @@ const path = require('path');
 const {
     buildMonitorHealth,
     buildSystemHealth,
-    getMonitorDisplayStatus
+    getMonitorDisplayStatus,
+    isMonitorEnding,
+    isMonitorTerminalAvailability
 } = require('../services/healthSnapshot');
 
 function healthyLegacyHealth() {
@@ -320,6 +322,79 @@ function testTerminalAvailabilityDoesNotPolluteGlobalHealth() {
     assert.equal(system.summary.pendingExtractions, 0);
 }
 
+function testEndingLiveDoesNotDegradeSystemHealth() {
+    const now = Date.now();
+    const endingMonitor = fakeMonitor({
+        liveState: 'degraded',
+        _liveEndedFirstDetection: now - 30000,
+        lastFailureClassification: 'live_ended',
+        health: {
+            ...healthyLegacyHealth(),
+            metadata: { status: 'warning', message: 'Confirmando encerramento (0.5/2min)' }
+        }
+    });
+    const endingHealth = buildMonitorHealth(endingMonitor, { nowMs: now });
+
+    assert.equal(isMonitorEnding(endingMonitor), true);
+    assert.equal(getMonitorDisplayStatus(endingMonitor, endingHealth), 'ending');
+
+    const system = buildSystemHealth({
+        converter: {
+            activeMonitors: new Map([
+                ['ENDING:owner-a', endingMonitor],
+                ['HEALTHY:owner-b', fakeMonitor()]
+            ])
+        },
+        cookieFunctionalStatus: cookieStatus(true),
+        cookieRefreshStatus: agentStatus('online'),
+        auth: { sessionAdmin: true, adminPasswordConfigured: true },
+        nowMs: now
+    });
+
+    assert.equal(system.status, 'ok');
+    assert.equal(system.components.extraction.status, 'ok');
+    assert.equal(system.components.manifest.status, 'ok');
+    assert.equal(system.components.stream.status, 'ok');
+    assert.equal(system.summary.activeMonitors, 1);
+    assert.equal(system.summary.endingMonitors, 1);
+    assert.equal(system.summary.degradedMonitors, 0);
+}
+
+function testRestrictedLiveDoesNotDegradeSystemHealth() {
+    const now = Date.now();
+    const restrictedMonitor = fakeMonitor({
+        liveState: 'degraded',
+        lastFailureClassification: 'members_only',
+        health: {
+            ...healthyLegacyHealth(),
+            metadata: { status: 'warning', message: 'members_only' }
+        }
+    });
+    const restrictedHealth = buildMonitorHealth(restrictedMonitor, { nowMs: now });
+
+    assert.equal(isMonitorEnding(restrictedMonitor), false);
+    assert.equal(isMonitorTerminalAvailability(restrictedMonitor), true);
+    assert.equal(getMonitorDisplayStatus(restrictedMonitor, restrictedHealth), 'degraded');
+
+    const system = buildSystemHealth({
+        converter: {
+            activeMonitors: new Map([
+                ['MEMBERS:owner-a', restrictedMonitor],
+                ['HEALTHY:owner-b', fakeMonitor()]
+            ])
+        },
+        cookieFunctionalStatus: cookieStatus(true),
+        cookieRefreshStatus: agentStatus('online'),
+        auth: { sessionAdmin: true, adminPasswordConfigured: true },
+        nowMs: now
+    });
+
+    assert.equal(system.status, 'ok');
+    assert.equal(system.components.extraction.status, 'ok');
+    assert.equal(system.summary.activeMonitors, 1);
+    assert.equal(system.summary.terminalAvailabilityMonitors, 1);
+}
+
 function testConversionBackoffWithoutActiveMonitorAffectsSystemHealth() {
     const now = Date.now();
     const converter = {
@@ -459,6 +534,11 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('Log do servidor'));
     assert.ok(html.includes('/api/admin/logs/timeline'));
     assert.ok(html.includes('serverLogContent'));
+    assert.ok(html.includes('LIVE ENCERRANDO'));
+    assert.ok(html.includes('status-ending'));
+    assert.ok(html.includes('terminalAvailability'));
+    assert.ok(html.includes('server-log-modal-box'));
+    assert.ok(html.includes('grid-template-columns: minmax(0, 1fr) auto'));
     assert.ok(appSource.includes("app.get('/api/admin/logs/timeline', isAdminApiAuthenticated"));
     assert.ok(appSource.includes('sanitizeServerLogLine'));
     assert.ok(appSource.includes('sanitizeYtdlpArgsForLog'));
@@ -484,6 +564,8 @@ function main() {
     testCriticalCookiesDoNotHideOtherComponents();
     testAuthenticatedCookiesWithDegradedStreamAreWarning();
     testTerminalAvailabilityDoesNotPolluteGlobalHealth();
+    testEndingLiveDoesNotDegradeSystemHealth();
+    testRestrictedLiveDoesNotDegradeSystemHealth();
     testConversionBackoffWithoutActiveMonitorAffectsSystemHealth();
     testGlobalExtractionCriticalAffectsSystemHealth();
     testInvalidTimestampsAndMissingFieldsAreSafe();

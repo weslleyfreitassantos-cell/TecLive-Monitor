@@ -60,6 +60,31 @@ function isTerminalAvailabilityClassification(classification) {
     return TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(safeClassification(classification));
 }
 
+function isMonitorEnding(monitor) {
+    if (!monitor || monitor._liveEnded || monitor.liveState === 'ended') return false;
+    if (monitor._liveEndedFirstDetection) return true;
+
+    const classification = safeClassification(monitor.lastFailureClassification ||
+        monitor.lastExtractionFailureClassification ||
+        null);
+    if (classification === 'live_ended') return true;
+
+    const metadataMessage = String(monitor.health?.metadata?.message || '').toLowerCase();
+    return metadataMessage.includes('live possivelmente encerrada') ||
+        metadataMessage.includes('confirmando encerramento') ||
+        metadataMessage.includes('live encerrada');
+}
+
+function isMonitorTerminalAvailability(monitor) {
+    if (!monitor || monitor._liveEnded || monitor.liveState === 'ended') return false;
+    if (isMonitorEnding(monitor)) return true;
+
+    const classification = safeClassification(monitor.lastFailureClassification ||
+        monitor.lastExtractionFailureClassification ||
+        null);
+    return isTerminalAvailabilityClassification(classification);
+}
+
 function isAuthCookieClassification(classification) {
     return safeClassification(classification) === 'auth_cookie';
 }
@@ -443,6 +468,7 @@ function classifyAgent(cookieRefreshStatus = {}) {
 function getMonitorDisplayStatus(monitor, monitorHealth) {
     const raw = monitor?.liveState || (monitor?.isLive ? 'online' : 'offline');
     if (raw === 'ended' || monitor?._liveEnded) return 'ended';
+    if (isMonitorEnding(monitor)) return 'ending';
     if (raw === 'offline') return 'offline';
     if (monitorHealth?.status && monitorHealth.status !== 'ok') return 'degraded';
     return raw;
@@ -452,24 +478,32 @@ function buildSystemHealth(options = {}) {
     const converter = options.converter;
     const nowMs = normalizeTimestampMs(options.nowMs);
     const monitorEntries = [];
+    const operationalMonitorEntries = [];
     const activeKeys = new Set();
     if (converter?.activeMonitors) {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             if (monitor?._monitorStopped || monitor?._liveEnded || monitor?.liveState === 'ended') continue;
             const [videoId, owner] = String(key).split(':');
             const health = buildMonitorHealth(monitor, { nowMs });
+            const displayStatus = getMonitorDisplayStatus(monitor, health);
+            const ending = displayStatus === 'ending';
+            const terminalAvailability = isMonitorTerminalAvailability(monitor);
             activeKeys.add(key);
-            monitorEntries.push({
+            const entry = {
                 key,
                 videoId: safeIdentifier(videoId),
                 owner: owner ? safeIdentifier(owner, null) : null,
-                status: getMonitorDisplayStatus(monitor, health),
+                status: displayStatus,
+                ending,
+                terminalAvailability,
                 health
-            });
+            };
+            monitorEntries.push(entry);
+            if (!terminalAvailability) operationalMonitorEntries.push(entry);
         }
     }
 
-    const extractionEntries = [...monitorEntries];
+    const extractionEntries = [...operationalMonitorEntries];
     if (converter?.extractionBackoff instanceof Map) {
         for (const [key, state] of converter.extractionBackoff.entries()) {
             if (activeKeys.has(key)) continue;
@@ -496,7 +530,7 @@ function buildSystemHealth(options = {}) {
         }
     }
 
-    const monitorCookieAggregate = aggregateComponent(monitorEntries, 'cookies', 'Cookies dos monitores OK');
+    const monitorCookieAggregate = aggregateComponent(operationalMonitorEntries, 'cookies', 'Cookies dos monitores OK');
     const functionalCookies = classifyCookies(options.cookieFunctionalStatus || {});
     const cookieStatus = worstStatus([functionalCookies.status, monitorCookieAggregate.status]);
     const cookies = makeComponent(cookieStatus, monitorCookieAggregate.status !== 'ok'
@@ -520,7 +554,7 @@ function buildSystemHealth(options = {}) {
             }
         });
 
-    const authCookieFailures = monitorEntries.filter(item =>
+    const authCookieFailures = operationalMonitorEntries.filter(item =>
         normalizeStatus(item.health?.components?.cookies?.status) === 'error' ||
         normalizeStatus(item.health?.components?.cookies?.status) === 'critical' ||
         isAuthCookieClassification(item.health?.lastFailureClassification)
@@ -536,8 +570,8 @@ function buildSystemHealth(options = {}) {
         authentication,
         cookies,
         extraction: aggregateComponent(extractionEntries, 'extraction', 'Sem extracao ativa'),
-        manifest: aggregateComponent(monitorEntries, 'manifest', 'Sem manifestos ativos'),
-        stream: aggregateComponent(monitorEntries, 'stream', 'Sem streams ativos'),
+        manifest: aggregateComponent(operationalMonitorEntries, 'manifest', 'Sem manifestos ativos'),
+        stream: aggregateComponent(operationalMonitorEntries, 'stream', 'Sem streams ativos'),
         agent: classifyAgent(options.cookieRefreshStatus || {})
     };
 
@@ -547,10 +581,12 @@ function buildSystemHealth(options = {}) {
         score: scoreComponents(components),
         components,
         summary: {
-            activeMonitors: monitorEntries.length,
-            degradedMonitors: monitorEntries.filter(item => item.status === 'degraded').length,
+            activeMonitors: operationalMonitorEntries.length,
+            endingMonitors: monitorEntries.filter(item => item.status === 'ending').length,
+            terminalAvailabilityMonitors: monitorEntries.filter(item => item.terminalAvailability).length,
+            degradedMonitors: operationalMonitorEntries.filter(item => item.status === 'degraded').length,
             backoffMonitors: extractionEntries.filter(item => item.health?.components?.extraction?.retryAfterSeconds > 0).length,
-            pendingExtractions: extractionEntries.length - monitorEntries.length
+            pendingExtractions: extractionEntries.length - operationalMonitorEntries.length
         },
         timestamp: safeIsoTimestamp(nowMs)
     };
@@ -561,6 +597,8 @@ module.exports = {
     buildMonitorHealth,
     buildSystemHealth,
     getMonitorDisplayStatus,
+    isMonitorEnding,
+    isMonitorTerminalAvailability,
     normalizeStatus,
     overallFromComponents,
     scoreComponents

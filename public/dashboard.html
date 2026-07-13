@@ -112,6 +112,13 @@
         .stat-value.status-critical { color: #e74c3c; }
         .stat-value.status-unknown { color: #7a8aa0; }
         .stat-label { font-size: 15px; letter-spacing: 1.5px; text-transform: uppercase; color: #7a8aa0; margin-top: 4px; }
+        .server-stat-label {
+            width: 100%;
+            text-align: center;
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: 1.8px;
+        }
         .server-status-card {
             display: flex;
             flex-direction: column;
@@ -413,7 +420,8 @@
         .status-online,
         .status-offline,
         .status-ended,
-        .status-degraded {
+        .status-degraded,
+        .status-ending {
             font-size: 18px;
             font-weight: 700;
         }
@@ -421,6 +429,17 @@
         .status-offline { color: #e74c3c; }
         .status-ended { color: #ff0000; text-transform: uppercase; letter-spacing: 0.5px; }
         .status-degraded { color: #f1c40f; }
+        .status-ending { color: #f1c40f; }
+        .status-subtext {
+            display: block;
+            margin-top: 3px;
+            font-size: 0.72rem;
+            line-height: 1.25;
+            color: #9aa7b7;
+            font-weight: 500;
+            text-transform: none;
+            letter-spacing: 0;
+        }
 
         .health-bar-container {
             width: 100px;
@@ -1502,6 +1521,59 @@
             #emergencyBanner { padding: 12px 16px; }
         }
         @media (max-width: 600px) {
+            .modal-overlay { padding: 8px; align-items: stretch; }
+            .server-log-modal-box {
+                max-width: none;
+                width: 100%;
+                max-height: calc(100vh - 16px);
+                display: flex;
+                flex-direction: column;
+            }
+            .server-log-modal-box .modal-header {
+                padding: 12px 14px;
+                flex: 0 0 auto;
+            }
+            .server-log-modal-box .modal-header h3 { font-size: 17px; }
+            .server-log-toolbar {
+                padding: 10px 12px;
+                align-items: stretch;
+                flex: 0 0 auto;
+            }
+            .server-log-status {
+                width: 100%;
+                font-size: 12px;
+                text-align: center;
+            }
+            .server-log-controls {
+                width: 100%;
+                justify-content: space-between;
+            }
+            .server-log-controls button {
+                min-height: 38px;
+                flex: 1;
+            }
+            .server-log-list {
+                max-height: none;
+                flex: 1 1 auto;
+                min-height: 0;
+                padding: 8px;
+                font-size: 11px;
+                line-height: 1.35;
+            }
+            .server-log-line {
+                grid-template-columns: minmax(0, 1fr) auto;
+                gap: 3px 8px;
+                padding: 7px 2px;
+            }
+            .server-log-time { font-size: 11px; }
+            .server-log-source {
+                font-size: 10px;
+                text-align: right;
+            }
+            .server-log-message {
+                grid-column: 1 / -1;
+                font-size: 11.5px;
+            }
             .stats-grid { grid-template-columns: 1fr; }
             .health-overview-grid { grid-template-columns: 1fr; }
             .cookie-compact { grid-template-columns: 1fr; }
@@ -2029,7 +2101,7 @@
         } else {
             monitors.forEach(m => {
                 const score = computeHealthScore(m.healthSummary || m.health);
-                const statusDisp = getStatusDisplay(m.status, m.healthSummary);
+                const statusDisp = getStatusDisplay(m.status, m.healthSummary, m);
                 const mainCause = getMainCause(m);
                 const lastRenew = m.lastRenewSuccess ? new Date(m.lastRenewSuccess).toLocaleTimeString('pt-BR') : 'N/A';
                 const healthColor = score >= 80 ? '#2ecc71' : (score >= 50 ? '#f1c40f' : '#e74c3c');
@@ -2062,6 +2134,7 @@
                     <td class="video-id" title="${escapeHtml(liveTitle)}">${escapeHtml(m.videoId || 'N/A')}</td>
                     <td class="${statusDisp.class}">
                         <div>${escapeHtml(statusDisp.label)}</div>
+                        ${statusDisp.subLabel ? `<div class="status-subtext">${escapeHtml(statusDisp.subLabel)}</div>` : ''}
                         ${mainCause ? `<div style="font-size: 0.7rem; opacity:0.8;">[${escapeHtml(mainCause)}]</div>` : ''}
                     </td>
                     <td>
@@ -2511,7 +2584,32 @@
         return score;
     }
 
-    function getStatusDisplay(status, healthSummary) {
+    function formatCountdown(seconds) {
+        const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+        if (safeSeconds >= 60) {
+            const minutes = Math.floor(safeSeconds / 60);
+            const rest = safeSeconds % 60;
+            return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`;
+        }
+        return `${safeSeconds}s`;
+    }
+
+    function isEndingMonitor(monitor) {
+        return monitor?.status === 'ending' || monitor?.ending === true;
+    }
+
+    function isTerminalAvailabilityMonitor(monitor) {
+        return isEndingMonitor(monitor) || monitor?.terminalAvailability === true;
+    }
+
+    function getEndingSubLabel(monitor) {
+        const delay = Number(monitor?.removalDelaySeconds) || 0;
+        return delay > 0
+            ? `aguardando ${formatCountdown(delay)} para remover`
+            : 'aguardando remoção';
+    }
+
+    function getStatusDisplay(status, healthSummary, monitor = null) {
         const effectiveStatus = status === 'online' && healthSummary?.status && healthSummary.status !== 'ok'
             ? 'degraded'
             : status;
@@ -2523,12 +2621,14 @@
             case 'error': return { icon: '', label: 'ERRO', class: 'status-offline' };
             case 'critical': return { icon: '', label: 'CRÍTICO', class: 'status-ended' };
             case 'offline': return { icon: '', label: 'OFFLINE', class: 'status-offline' };
+            case 'ending': return { icon: '', label: 'LIVE ENCERRANDO', class: 'status-ending', subLabel: getEndingSubLabel(monitor) };
             case 'ended': return { icon: '', label: 'ENCERRADA', class: 'status-ended' };
             default: return { icon: '', label: effectiveStatus || 'DESCONHECIDO', class: 'status-offline' };
         }
     }
 
     function getMainCause(monitor) {
+        if (isEndingMonitor(monitor)) return '';
         if (monitor.status !== 'degraded' && monitor.healthSummary?.status === 'ok') return '';
         const health = getHealthComponents(monitor);
         const order = monitor.healthSummary?.components ? monitorComponentOrder : ['playlist', 'cookies', 'network', 'metadata'];
@@ -2976,7 +3076,7 @@
     function filterAndDisplayMonitors() {
         let filtered = [...allMonitorsData];
         if (currentFilter === 'online') filtered = filtered.filter(m => m.status === 'online');
-        else if (currentFilter === 'offline') filtered = filtered.filter(m => m.status === 'ended' || m.status === 'offline');
+        else if (currentFilter === 'offline') filtered = filtered.filter(m => m.status === 'ended' || m.status === 'offline' || isEndingMonitor(m));
         else if (currentFilter === 'degraded') filtered = filtered.filter(m => m.status === 'degraded');
 
         if (currentSearch.trim() !== '') {
@@ -3015,10 +3115,14 @@
             const clientMonitors = groups[owner];
             const totalLives = clientMonitors.length;
             const onlineLives = clientMonitors.filter(m => m.status === 'online').length;
-            const degradedLives = clientMonitors.filter(m => m.status === 'degraded').length;
+            const degradedLives = clientMonitors.filter(m => m.status === 'degraded' && !isTerminalAvailabilityMonitor(m)).length;
+            const endingLives = clientMonitors.filter(isEndingMonitor).length;
+            const operationalMonitors = clientMonitors.filter(m => !isTerminalAvailabilityMonitor(m));
             
             // Cálculos agregados
-            const avgScore = Math.round(clientMonitors.reduce((acc, m) => acc + computeHealthScore(m.healthSummary || m.health), 0) / totalLives);
+            const avgScore = operationalMonitors.length
+                ? Math.round(operationalMonitors.reduce((acc, m) => acc + computeHealthScore(m.healthSummary || m.health), 0) / operationalMonitors.length)
+                : 100;
             const totalViewers = clientMonitors.reduce((acc, m) => acc + (Number(m.viewers) || 0), 0);
             
             // Determinar status visual do grupo
@@ -3027,6 +3131,12 @@
             if (degradedLives > 0) {
                 statusLabel = 'INSTÁVEL';
                 statusClass = 'status-degraded';
+            } else if (onlineLives > 0) {
+                statusLabel = 'ONLINE';
+                statusClass = 'status-online';
+            } else if (endingLives > 0) {
+                statusLabel = 'LIVE ENCERRANDO';
+                statusClass = 'status-ending';
             } else if (onlineLives === 0) {
                 statusLabel = 'OFFLINE';
                 statusClass = 'status-offline';
