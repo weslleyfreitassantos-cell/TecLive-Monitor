@@ -1248,7 +1248,9 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 }
 
                 activePlaybackSessionId = created.session.sessionId;
-                const sessionAction = created.code === 'reused_stale' ? 'reaproveitada' : 'criada';
+                const sessionAction = created.code === 'reused_stale' || created.code === 'reused_expired'
+                    ? 'reaproveitada'
+                    : 'criada';
                 console.log(`[${trackingOwner}:${videoId}] 📱 Sessao HLS ${sessionAction}: ${sessionPreview(activePlaybackSessionId)} (${clientIp} | ${userAgent.substring(0, 30)}...)`);
                 const sessionMaster = buildPlaybackSessionMaster(monitor, {
                     token: routeContext.token || null,

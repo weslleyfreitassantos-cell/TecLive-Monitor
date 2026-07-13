@@ -25,7 +25,8 @@ function createStore(options = {}) {
     return new PlaybackSessionStore({
         filePath: tempFile(),
         ttlMs: options.ttlMs || 90000,
-        reuseStaleAfterMs: options.reuseStaleAfterMs
+        reuseStaleAfterMs: options.reuseStaleAfterMs,
+        reuseExpiredGraceMs: options.reuseExpiredGraceMs
     });
 }
 
@@ -195,6 +196,56 @@ function testExpiredSessionFreesSlot() {
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, afterTtl), 1);
 }
 
+function testExpiredSameClientReusesWithinGrace() {
+    const store = createStore({
+        ttlMs: 1000,
+        reuseStaleAfterMs: 500,
+        reuseExpiredGraceMs: 10000
+    });
+    const first = create(store, {}, NOW);
+    const afterTtl = NOW + 2000;
+
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, afterTtl), 0);
+
+    const reopened = create(store, {}, afterTtl);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_expired');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, afterTtl), 1);
+}
+
+function testExpiredSameClientDoesNotBypassFullLimit() {
+    const store = createStore({
+        ttlMs: 1000,
+        reuseStaleAfterMs: 500,
+        reuseExpiredGraceMs: 10000
+    });
+    create(store, {}, NOW);
+    const afterTtl = NOW + 2000;
+
+    create(store, { publicIp: '187.40.208.119', userAgent: 'Player A' }, afterTtl);
+    create(store, { publicIp: '187.40.208.120', userAgent: 'Player B' }, afterTtl);
+    create(store, { publicIp: '187.40.208.121', userAgent: 'Player C' }, afterTtl);
+
+    const reopened = create(store, {}, afterTtl);
+    assert.equal(reopened.ok, false);
+    assert.equal(reopened.code, 'limit_exceeded');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, afterTtl), 3);
+}
+
+function testExpiredSessionRemovedAfterReuseGrace() {
+    const store = createStore({
+        ttlMs: 1000,
+        reuseExpiredGraceMs: 5000
+    });
+    create(store, {}, NOW);
+    const afterGrace = NOW + 7000;
+
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, afterGrace), 0);
+    const raw = JSON.parse(fs.readFileSync(store.filePath, 'utf8'));
+    assert.equal(Object.keys(raw.sessions).length, 0);
+}
+
 function testExpiredSessionIsRejectedOnRefresh() {
     const store = createStore({ ttlMs: 1000 });
     const created = create(store, {}, NOW);
@@ -298,7 +349,7 @@ function testPersistenceAcrossRestartWithinTtl() {
 
 function testRestartRemovesExpiredSession() {
     const filePath = tempFile();
-    const firstStore = new PlaybackSessionStore({ filePath, ttlMs: 1000 });
+    const firstStore = new PlaybackSessionStore({ filePath, ttlMs: 1000, reuseExpiredGraceMs: 0 });
     const created = firstStore.createSession({
         owner: OWNER,
         videoId: VIDEO_ID,
@@ -308,7 +359,7 @@ function testRestartRemovesExpiredSession() {
     }, NOW);
     assert.equal(created.ok, true);
 
-    const secondStore = new PlaybackSessionStore({ filePath, ttlMs: 1000 });
+    const secondStore = new PlaybackSessionStore({ filePath, ttlMs: 1000, reuseExpiredGraceMs: 0 });
     assert.equal(secondStore.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 2000), 0);
     const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     assert.equal(Object.keys(raw.sessions).length, 0);
@@ -374,6 +425,7 @@ function testAppIntegrationStaticChecks() {
     assert.ok(app.includes('playbackSessions.createSession'));
     assert.ok(app.includes('playbackSessions.touchSession'));
     assert.ok(app.includes("created.code === 'reused_stale'"));
+    assert.ok(app.includes("created.code === 'reused_expired'"));
     assert.ok(app.includes('buildPlaybackSessionMaster'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store'"));
     assert.ok(app.includes("'Vary': 'User-Agent'"));
@@ -424,6 +476,9 @@ async function main() {
     testFingerprintPreventsStaleReuseAcrossDifferentLocalIdentity();
     testPlaylistRefreshKeepsSameSession();
     testExpiredSessionFreesSlot();
+    testExpiredSameClientReusesWithinGrace();
+    testExpiredSameClientDoesNotBypassFullLimit();
+    testExpiredSessionRemovedAfterReuseGrace();
     testExpiredSessionIsRejectedOnRefresh();
     await testConcurrentCreationDoesNotExceedLimit();
     testSessionScopeValidation();

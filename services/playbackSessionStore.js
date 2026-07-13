@@ -4,6 +4,7 @@ const path = require('path');
 
 const DEFAULT_TTL_MS = 90000;
 const DEFAULT_REUSE_STALE_AFTER_MS = 45000;
+const DEFAULT_REUSE_EXPIRED_GRACE_MS = 30 * 60 * 1000;
 
 function safeText(value, limit = 300) {
     return String(value || '')
@@ -37,6 +38,14 @@ class PlaybackSessionStore {
         this.reuseStaleAfterMs = Number.isFinite(configuredReuseStaleAfter) && configuredReuseStaleAfter >= 0
             ? configuredReuseStaleAfter
             : DEFAULT_REUSE_STALE_AFTER_MS;
+        const configuredReuseExpiredGrace = Number(
+            options.reuseExpiredGraceMs !== undefined
+                ? options.reuseExpiredGraceMs
+                : process.env.PLAYBACK_SESSION_REUSE_EXPIRED_GRACE_MS
+        );
+        this.reuseExpiredGraceMs = Number.isFinite(configuredReuseExpiredGrace) && configuredReuseExpiredGrace >= 0
+            ? configuredReuseExpiredGrace
+            : DEFAULT_REUSE_EXPIRED_GRACE_MS;
         this.maxUserAgentLength = Number(options.maxUserAgentLength || 240);
         this._ensureStore();
     }
@@ -95,10 +104,16 @@ class PlaybackSessionStore {
         return nowMs - lastSeen > this.ttlMs;
     }
 
+    _isPastRetention(session, nowMs = Date.now()) {
+        const lastSeen = this._lastSeenMs(session);
+        if (!lastSeen) return true;
+        return nowMs - lastSeen > this.ttlMs + this.reuseExpiredGraceMs;
+    }
+
     _pruneExpiredInStore(store, nowMs = Date.now()) {
         let removed = 0;
         for (const [sessionId, session] of Object.entries(store.sessions)) {
-            if (this._isExpired(session, nowMs)) {
+            if (this._isPastRetention(session, nowMs)) {
                 delete store.sessions[sessionId];
                 removed += 1;
             }
@@ -141,14 +156,33 @@ class PlaybackSessionStore {
         if (!this.reuseStaleAfterMs) return null;
         const candidates = Object.entries(store.sessions)
             .filter(([, session]) => this._matches(session, owner, videoId))
-            .filter(([, session]) => !this._isExpired(session, nowMs))
+            .filter(([, session]) => !this._isPastRetention(session, nowMs))
             .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint }))
             .filter(([, session]) => nowMs - this._lastSeenMs(session) >= this.reuseStaleAfterMs)
             .sort(([, a], [, b]) => this._lastSeenMs(b) - this._lastSeenMs(a));
         if (candidates.length === 0) return null;
         return {
             sessionId: candidates[0][0],
-            session: candidates[0][1]
+            session: candidates[0][1],
+            expired: this._isExpired(candidates[0][1], nowMs)
+        };
+    }
+
+    _reuseSession(store, reusable, { publicIp, userAgent, source, fingerprint }, nowMs, activeCount, limit) {
+        const nowIso = this._nowIso(nowMs);
+        reusable.session.lastSeenAt = nowIso;
+        reusable.session.publicIp = safeText(publicIp, 80);
+        reusable.session.userAgent = safeText(userAgent, this.maxUserAgentLength);
+        reusable.session.status = 'active';
+        reusable.session.source = safeText(source, 80);
+        reusable.session.fingerprint = fingerprint ? safeText(fingerprint, 240) : null;
+        this._writeStore(store);
+        return {
+            ok: true,
+            code: reusable.expired ? 'reused_expired' : 'reused_stale',
+            session: reusable.session,
+            active: activeCount + (reusable.expired ? 1 : 0),
+            limit
         };
     }
 
@@ -182,22 +216,13 @@ class PlaybackSessionStore {
             userAgent,
             fingerprint
         }, nowMs);
-        if (reusable) {
-            const nowIso = this._nowIso(nowMs);
-            reusable.session.lastSeenAt = nowIso;
-            reusable.session.publicIp = safeText(publicIp, 80);
-            reusable.session.userAgent = safeText(userAgent, this.maxUserAgentLength);
-            reusable.session.status = 'active';
-            reusable.session.source = safeText(source, 80);
-            reusable.session.fingerprint = fingerprint ? safeText(fingerprint, 240) : null;
-            this._writeStore(store);
-            return {
-                ok: true,
-                code: 'reused_stale',
-                session: reusable.session,
-                active: active.length,
-                limit: numericLimit
-            };
+        if (reusable && !reusable.expired) {
+            return this._reuseSession(store, reusable, {
+                publicIp,
+                userAgent,
+                source,
+                fingerprint
+            }, nowMs, active.length, numericLimit);
         }
 
         if (active.length >= numericLimit) {
@@ -208,6 +233,15 @@ class PlaybackSessionStore {
                 active: active.length,
                 limit: numericLimit
             };
+        }
+
+        if (reusable && reusable.expired) {
+            return this._reuseSession(store, reusable, {
+                publicIp,
+                userAgent,
+                source,
+                fingerprint
+            }, nowMs, active.length, numericLimit);
         }
 
         let sessionId = this._newSessionId();
@@ -252,7 +286,7 @@ class PlaybackSessionStore {
         if (session.owner !== owner) return { ok: false, code: 'owner_mismatch', session };
         if (session.videoId !== videoId) return { ok: false, code: 'video_mismatch', session };
         if (this._isExpired(session, nowMs)) {
-            delete store.sessions[id];
+            session.status = 'expired';
             this._pruneExpiredInStore(store, nowMs);
             this._writeStore(store);
             return { ok: false, code: 'expired' };
