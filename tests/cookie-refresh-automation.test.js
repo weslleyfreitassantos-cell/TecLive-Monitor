@@ -284,6 +284,8 @@ function testRotatorSeparatesAuthAndStreamValidity() {
     assert.equal(functional.cookie1.capabilityStatus, 'degraded');
     assert.equal(functional.cookie1.consecutiveStreamFailures, 1);
     assert.equal(functional.cookie1.extractionClassification, 'no_formats');
+    assert.equal(functional.cookie1.lastStreamFailureClassification, 'no_formats');
+    assert.ok(functional.cookie1.lastStreamFailureAt);
 
     rotator.markExtractionSuccess('cookie1.txt');
     functional = rotator.getFunctionalStatus();
@@ -292,6 +294,13 @@ function testRotatorSeparatesAuthAndStreamValidity() {
     assert.equal(functional.cookie1.capabilityStatus, 'ok');
     assert.equal(functional.cookie1.extractionValid, true);
     assert.equal(functional.cookie1.streamValid, true);
+    assert.equal(functional.cookie1.hlsValid, true);
+    assert.equal(functional.cookie1.streamProbeStatus, 'ok');
+    assert.equal(functional.cookie1.consecutiveStreamFailures, 0);
+    assert.equal(functional.cookie1.lastStreamFailureAt, null);
+    assert.equal(functional.cookie1.lastStreamFailureClassification, null);
+    assert.equal(functional.cookie1.streamProbeReason, null);
+    assert.ok(functional.cookie1.lastStreamSuccessAt);
 
     rotator.markExtractionFailure('cookie1.txt', 'live_ended', 'Falha de validação de stream: live_ended', 'startup-validation');
     functional = rotator.getFunctionalStatus();
@@ -299,6 +308,66 @@ function testRotatorSeparatesAuthAndStreamValidity() {
     assert.equal(functional.cookie1.extractionValid, true);
     assert.equal(functional.cookie1.streamValid, true);
     assert.equal(functional.cookie1.capabilityStatus, 'ok');
+
+    for (const classification of [
+        'members_only',
+        'video_private',
+        'geo_restricted',
+        'live_ended',
+        'video_unavailable',
+        'video_removed',
+        'age_restricted'
+    ]) {
+        rotator.markExtractionFailure('cookie1.txt', classification, `Falha de validacao: ${classification}`, 'startup-validation', {
+            hlsValid: false,
+            formatsValid: false
+        });
+        functional = rotator.getFunctionalStatus();
+        assert.equal(functional.cookie1.valid, true);
+        assert.equal(functional.cookie1.extractionValid, true);
+        assert.equal(functional.cookie1.streamValid, true);
+        assert.equal(functional.cookie1.hlsValid, true);
+        assert.equal(functional.cookie1.streamReady, true);
+        assert.equal(functional.cookie1.capabilityStatus, 'ok');
+        assert.equal(functional.cookie1.consecutiveStreamFailures, 0);
+        assert.equal(functional.cookie1.extractionClassification, null);
+        assert.equal(functional.cookie1.lastStreamFailureClassification, null);
+    }
+
+    rotator.markExtractionFailure('cookie1.txt', 'auth_cookie', 'Sign in to confirm you are not a bot', 'auth-test');
+    functional = rotator.getFunctionalStatus();
+    assert.equal(functional.cookie1.authValid, false);
+    assert.equal(functional.cookie1.streamReady, false);
+    assert.equal(functional.cookie1.capabilityStatus, 'error');
+    assert.equal(functional.cookie1.extractionClassification, 'auth_cookie');
+    assert.equal(functional.cookie1.lastStreamFailureClassification, 'auth_cookie');
+    assert.equal(functional.cookie1.consecutiveStreamFailures, 1);
+
+    rotator.status['cookie1.txt'].state = 'valid';
+    rotator.status['cookie1.txt'].authValid = true;
+    rotator.status['cookie1.txt'].extractionValid = false;
+    rotator.status['cookie1.txt'].streamValid = false;
+    rotator.status['cookie1.txt'].hlsValid = false;
+    rotator.status['cookie1.txt'].streamProbeStatus = 'degraded';
+    rotator.status['cookie1.txt'].consecutiveStreamFailures = 21;
+    rotator.status['cookie1.txt'].streamFailureVideoIds = ['restricted-live'];
+    rotator.status['cookie1.txt'].lastExtractionFailure = new Date().toISOString();
+    rotator.status['cookie1.txt'].lastStreamFailureAt = rotator.status['cookie1.txt'].lastExtractionFailure;
+    rotator.status['cookie1.txt'].lastStreamFailureClassification = 'members_only';
+    rotator.status['cookie1.txt'].extractionClassification = 'members_only';
+    rotator.status['cookie1.txt'].streamProbeReason = 'members_only';
+    rotator.markSuccess('cookie1.txt');
+    functional = rotator.getFunctionalStatus();
+    assert.equal(functional.cookie1.streamReady, true);
+    assert.equal(functional.cookie1.capabilityStatus, 'ok');
+    assert.equal(functional.cookie1.consecutiveStreamFailures, 0);
+    assert.deepEqual(functional.cookie1.streamFailureVideoIds, []);
+    assert.equal(functional.cookie1.hlsValid, true);
+    assert.equal(functional.cookie1.streamProbeStatus, 'ok');
+    assert.equal(functional.cookie1.extractionClassification, null);
+    assert.equal(functional.cookie1.lastStreamFailureAt, null);
+    assert.equal(functional.cookie1.lastStreamFailureClassification, null);
+    assert.equal(functional.cookie1.streamProbeReason, null);
 
     const statusPath = path.join(dir, 'poisoned-status.json');
     fs.writeFileSync(statusPath, JSON.stringify({
@@ -312,17 +381,34 @@ function testRotatorSeparatesAuthAndStreamValidity() {
             lastSuccess: new Date().toISOString(),
             lastExtractionCheck: new Date().toISOString(),
             lastExtractionFailure: new Date().toISOString(),
-            lastStreamSuccess: null,
-            extractionClassification: 'live_ended',
+            lastStreamSuccess: new Date().toISOString(),
+            lastStreamSuccessAt: new Date().toISOString(),
+            lastStreamFailureAt: new Date().toISOString(),
+            lastStreamFailureClassification: 'members_only',
+            extractionClassification: 'members_only',
             reason: 'Falha de validação de stream: live_ended',
+            streamProbeReason: 'members_only',
+            consecutiveStreamFailures: 21,
+            streamFailureVideoIds: ['restricted-live'],
+            hlsValid: false,
+            streamProbeStatus: 'degraded',
             alertActive: false
         }
     }), 'utf8');
-    const repaired = new CookieRotator(dir, statusPath).getFunctionalStatus();
+    const repairedRotator = new CookieRotator(dir, statusPath);
+    const repaired = repairedRotator.getFunctionalStatus();
     assert.equal(repaired.cookie1.valid, true);
     assert.equal(repaired.cookie1.extractionValid, true);
     assert.equal(repaired.cookie1.streamValid, true);
+    assert.equal(repaired.cookie1.streamReady, true);
+    assert.equal(repaired.cookie1.capabilityStatus, 'ok');
+    assert.equal(repaired.cookie1.consecutiveStreamFailures, 0);
+    assert.equal(repaired.cookie1.lastStreamFailureAt, null);
+    assert.equal(repaired.cookie1.lastStreamFailureClassification, null);
     assert.equal(repaired.cookie1.extractionClassification, null);
+    const afterFirstMigration = fs.readFileSync(statusPath, 'utf8');
+    new CookieRotator(dir, statusPath);
+    assert.equal(fs.readFileSync(statusPath, 'utf8'), afterFirstMigration);
 }
 
 function testAgentStatusClassification() {

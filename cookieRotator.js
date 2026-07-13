@@ -87,6 +87,9 @@ class CookieRotator {
             lastExtractionCheck: null,
             lastExtractionFailure: null,
             lastStreamSuccess: null,
+            lastStreamSuccessAt: null,
+            lastStreamFailureAt: null,
+            lastStreamFailureClassification: null,
             lastProbeVideoId: null,
             lastProbeAt: null,
             consecutiveStreamFailures: 0,
@@ -95,10 +98,98 @@ class CookieRotator {
             formatsValid: null,
             hlsValid: null,
             streamProbeStatus: 'unknown',
+            streamProbeReason: null,
             extractionClassification: null,
             reason: null,
             alertActive: false
         };
+    }
+
+    _reasonLooksLikeTerminalAvailability(reason) {
+        const value = String(reason || '').toLowerCase();
+        if (!value) return false;
+        return [
+            'live_ended',
+            'live ended',
+            'this live event has ended',
+            'video_private',
+            'private video',
+            'video_unavailable',
+            'video unavailable',
+            'video_removed',
+            'removed',
+            'members_only',
+            'members-only',
+            'members only',
+            'geo_restricted',
+            'geo restricted',
+            'age_restricted',
+            'age restricted'
+        ].some(pattern => value.includes(pattern));
+    }
+
+    _clearTerminalAvailabilityResidue(cookie) {
+        let changed = false;
+        const hasTerminalClassification =
+            TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(cookie.extractionClassification) ||
+            TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(cookie.lastStreamFailureClassification);
+        const hasTerminalReason = this._reasonLooksLikeTerminalAvailability(cookie.reason) ||
+            this._reasonLooksLikeTerminalAvailability(cookie.streamProbeReason);
+
+        if (!hasTerminalClassification && !hasTerminalReason) return false;
+
+        if (cookie.extractionClassification !== null &&
+            TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(cookie.extractionClassification)) {
+            cookie.extractionClassification = null;
+            changed = true;
+        }
+        if (cookie.lastStreamFailureClassification !== null &&
+            TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(cookie.lastStreamFailureClassification)) {
+            cookie.lastStreamFailureClassification = null;
+            changed = true;
+        }
+        if (this._reasonLooksLikeTerminalAvailability(cookie.reason)) {
+            cookie.reason = null;
+            changed = true;
+        }
+        if (this._reasonLooksLikeTerminalAvailability(cookie.streamProbeReason)) {
+            cookie.streamProbeReason = null;
+            changed = true;
+        }
+        if ((Number(cookie.consecutiveStreamFailures) || 0) > 0) {
+            cookie.consecutiveStreamFailures = 0;
+            changed = true;
+        }
+        if (Array.isArray(cookie.streamFailureVideoIds) && cookie.streamFailureVideoIds.length > 0) {
+            cookie.streamFailureVideoIds = [];
+            changed = true;
+        }
+        if (cookie.lastExtractionFailure !== null) {
+            cookie.lastExtractionFailure = null;
+            changed = true;
+        }
+        if (cookie.lastStreamFailureAt !== null) {
+            cookie.lastStreamFailureAt = null;
+            changed = true;
+        }
+        if (cookie.extractionValid === false) {
+            cookie.extractionValid = true;
+            changed = true;
+        }
+        if (cookie.streamValid === false) {
+            cookie.streamValid = true;
+            changed = true;
+        }
+        if (cookie.hlsValid === false) {
+            cookie.hlsValid = cookie.lastStreamSuccess || cookie.lastStreamSuccessAt ? true : null;
+            changed = true;
+        }
+        if (cookie.streamProbeStatus === 'error' || cookie.streamProbeStatus === 'degraded') {
+            cookie.streamProbeStatus = cookie.lastStreamSuccess || cookie.lastStreamSuccessAt ? 'ok' : 'unknown';
+            changed = true;
+        }
+
+        return changed;
     }
 
     _ensureStatusFields(cookieName) {
@@ -170,6 +261,18 @@ class CookieRotator {
             cookie.lastStreamSuccess = null;
             changed = true;
         }
+        if (cookie.lastStreamSuccessAt === undefined) {
+            cookie.lastStreamSuccessAt = cookie.lastStreamSuccess || null;
+            changed = true;
+        }
+        if (cookie.lastStreamFailureAt === undefined) {
+            cookie.lastStreamFailureAt = null;
+            changed = true;
+        }
+        if (cookie.lastStreamFailureClassification === undefined) {
+            cookie.lastStreamFailureClassification = null;
+            changed = true;
+        }
         if (cookie.lastProbeVideoId === undefined) {
             cookie.lastProbeVideoId = null;
             changed = true;
@@ -204,23 +307,15 @@ class CookieRotator {
                 : 'unknown';
             changed = true;
         }
+        if (cookie.streamProbeReason === undefined) {
+            cookie.streamProbeReason = null;
+            changed = true;
+        }
         if (cookie.extractionClassification === undefined) {
             cookie.extractionClassification = null;
             changed = true;
         }
-        if (
-            cookie.state === 'valid' &&
-            TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(cookie.extractionClassification) &&
-            (cookie.extractionValid === false || cookie.streamValid === false)
-        ) {
-            cookie.extractionValid = true;
-            cookie.streamValid = true;
-            cookie.lastExtractionFailure = null;
-            cookie.extractionClassification = null;
-            cookie.streamProbeStatus = 'inconclusive';
-            if (String(cookie.reason || '').includes('live_ended') || String(cookie.reason || '').includes('video_')) {
-                cookie.reason = null;
-            }
+        if (cookie.state === 'valid' && this._clearTerminalAvailabilityResidue(cookie)) {
             changed = true;
         }
 
@@ -377,6 +472,9 @@ class CookieRotator {
         cookie.formatsValid = false;
         cookie.hlsValid = false;
         cookie.streamProbeStatus = 'error';
+        cookie.streamProbeReason = errorMsg;
+        cookie.lastStreamFailureAt = cookie.lastFailure;
+        cookie.lastStreamFailureClassification = 'auth_cookie';
 
         console.log(`⚠️ Cookie ${cookieName} falhou${context}: ${this._shortError(errorMsg)} (${Math.min(cookie.failCount, 3)}/3)`);
 
@@ -423,10 +521,20 @@ class CookieRotator {
         cookie.lastSuccess = new Date().toISOString();
         cookie.lastExtractionCheck = cookie.lastSuccess;
         cookie.lastStreamSuccess = cookie.lastSuccess;
+        cookie.lastStreamSuccessAt = cookie.lastSuccess;
         cookie.lastExtractionFailure = null;
+        cookie.lastStreamFailureAt = null;
+        cookie.lastStreamFailureClassification = null;
         cookie.extractionClassification = null;
         cookie.lastFailure = null;
         cookie.reason = null;
+        cookie.streamProbeReason = null;
+        cookie.metadataValid = true;
+        cookie.formatsValid = true;
+        cookie.hlsValid = true;
+        cookie.streamProbeStatus = 'ok';
+        cookie.consecutiveStreamFailures = 0;
+        cookie.streamFailureVideoIds = [];
         cookie.alertActive = false;
         this.saveStatus();
 
@@ -458,27 +566,33 @@ class CookieRotator {
         const cookie = this.status[cookieName];
         const nowIso = new Date().toISOString();
         const normalizedClassification = classification || 'unknown';
+        const isTerminalAvailability = TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(normalizedClassification);
         cookie.lastExtractionCheck = nowIso;
         cookie.lastProbeAt = nowIso;
         cookie.lastProbeVideoId = options.probeVideoId || options.videoId || cookie.lastProbeVideoId || null;
-        cookie.metadataValid = options.metadataValid ?? cookie.metadataValid;
-        cookie.formatsValid = options.formatsValid ?? cookie.formatsValid;
-        if (options.hlsValid !== undefined) {
-            cookie.hlsValid = options.hlsValid;
-        }
-        cookie.extractionClassification = normalizedClassification;
-        if (TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(normalizedClassification)) {
-            cookie.streamProbeStatus = 'inconclusive';
+
+        if (isTerminalAvailability) {
+            if (options.metadataValid === true) cookie.metadataValid = true;
+            if (options.formatsValid === true) cookie.formatsValid = true;
+            if (options.hlsValid === true) cookie.hlsValid = true;
+            this._clearTerminalAvailabilityResidue(cookie);
             const suffix = context ? ` (${context})` : '';
             console.log(`ℹ️ Cookie ${cookieName} preservado${suffix}: ${normalizedClassification} pertence ao video de validacao, nao ao cookie.`);
             this.saveStatus();
             return false;
         }
 
+        cookie.metadataValid = options.metadataValid ?? cookie.metadataValid;
+        cookie.formatsValid = options.formatsValid ?? cookie.formatsValid;
+        if (options.hlsValid !== undefined) {
+            cookie.hlsValid = options.hlsValid;
+        }
+        cookie.extractionClassification = normalizedClassification;
         if (TRANSIENT_EXTRACTION_CLASSIFICATIONS.has(normalizedClassification)) {
             cookie.lastExtractionFailure = nowIso;
             cookie.streamProbeStatus = 'inconclusive';
             cookie.reason = errorMsg || cookie.reason;
+            cookie.streamProbeReason = errorMsg || cookie.streamProbeReason;
             const suffix = context ? ` (${context})` : '';
             console.log(`ℹ️ Cookie ${cookieName} com validação de stream inconclusiva${suffix}: ${cookie.extractionClassification} - ${this._shortError(errorMsg)}`);
             this.saveStatus();
@@ -486,6 +600,9 @@ class CookieRotator {
         }
 
         cookie.lastExtractionFailure = nowIso;
+        cookie.lastStreamFailureAt = nowIso;
+        cookie.lastStreamFailureClassification = normalizedClassification;
+        cookie.streamProbeReason = errorMsg || cookie.streamProbeReason;
         cookie.consecutiveStreamFailures = (Number(cookie.consecutiveStreamFailures) || 0) + 1;
         this._rememberStreamFailureVideo(cookie, cookie.lastProbeVideoId);
         if (STREAM_CAPABILITY_FAILURE_CLASSIFICATIONS.has(normalizedClassification)) {
@@ -516,6 +633,9 @@ class CookieRotator {
         cookie.formatsValid = true;
         cookie.hlsValid = true;
         cookie.streamProbeStatus = 'ok';
+        cookie.streamProbeReason = null;
+        cookie.lastStreamFailureAt = null;
+        cookie.lastStreamFailureClassification = null;
         cookie.consecutiveStreamFailures = 0;
         cookie.streamFailureVideoIds = [];
         return this.markSuccess(cookieName);
@@ -547,6 +667,8 @@ class CookieRotator {
         cookie.reason = null;
         cookie.lastFailure = null;
         cookie.lastExtractionFailure = null;
+        cookie.lastStreamFailureAt = null;
+        cookie.lastStreamFailureClassification = null;
         cookie.lastProbeAt = cookie.lastSuccess;
         cookie.lastProbeVideoId = null;
         cookie.consecutiveStreamFailures = 0;
@@ -555,11 +677,13 @@ class CookieRotator {
         cookie.formatsValid = true;
         cookie.hlsValid = true;
         cookie.streamProbeStatus = 'ok';
+        cookie.streamProbeReason = null;
         cookie.extractionClassification = null;
         cookie.alertActive = false;
         cookie.lastSuccess = new Date().toISOString();
         cookie.lastExtractionCheck = cookie.lastSuccess;
         cookie.lastStreamSuccess = cookie.lastSuccess;
+        cookie.lastStreamSuccessAt = cookie.lastSuccess;
         this.saveStatus();
 
         this.sendManualRecoveryAlert(cookieName);
@@ -658,6 +782,9 @@ class CookieRotator {
                 lastExtractionCheck: status.lastExtractionCheck || null,
                 lastExtractionFailure: status.lastExtractionFailure || null,
                 lastStreamSuccess: status.lastStreamSuccess || null,
+                lastStreamSuccessAt: status.lastStreamSuccessAt || null,
+                lastStreamFailureAt: status.lastStreamFailureAt || null,
+                lastStreamFailureClassification: status.lastStreamFailureClassification || null,
                 lastProbeVideoId: status.lastProbeVideoId || null,
                 lastProbeAt: status.lastProbeAt || null,
                 consecutiveStreamFailures: Number(status.consecutiveStreamFailures) || 0,
@@ -668,6 +795,7 @@ class CookieRotator {
                 formatsValid: status.formatsValid ?? null,
                 hlsValid: status.hlsValid ?? null,
                 streamProbeStatus: status.streamProbeStatus || 'unknown',
+                streamProbeReason: status.streamProbeReason || null,
                 extractionClassification: status.extractionClassification || null,
                 reason: status.reason,
                 fileExists,
