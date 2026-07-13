@@ -7,6 +7,10 @@ const session = require('express-session');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const CookieRefreshQueue = require('./services/cookieRefreshQueue');
+const {
+    PlaybackSessionStore,
+    sessionPreview
+} = require('./services/playbackSessionStore');
 const { parseTrustProxyConfig, resolveBindHost } = require('./services/httpRuntimeConfig');
 const {
     buildMonitorHealth,
@@ -111,6 +115,13 @@ if (!fs.existsSync(cookiesDir)) fs.mkdirSync(cookiesDir, { recursive: true });
 const cookieRefreshQueue = new CookieRefreshQueue({
     filePath: path.join(__dirname, 'data', 'cookie-refresh-jobs.json')
 });
+const playbackSessions = new PlaybackSessionStore({
+    filePath: path.join(__dirname, 'data', 'playback-sessions.json')
+});
+const removedPlaybackSessionsOnStartup = playbackSessions.pruneExpired();
+if (removedPlaybackSessionsOnStartup > 0) {
+    console.log(`🧹 ${removedPlaybackSessionsOnStartup} sessão(ões) HLS expirada(s) removida(s) na inicialização.`);
+}
 
 // ========== ARQUIVO DE CLIENTES ==========
 const clientesFile = path.join(cookiesDir, 'clientes.json');
@@ -346,6 +357,13 @@ setInterval(() => {
     if (accessChanged) saveViewerAccess(viewerAccess);
 }, 15000);
 
+setInterval(() => {
+    const removed = playbackSessions.pruneExpired();
+    if (removed > 0) {
+        console.log(`🧹 ${removed} sessão(ões) HLS expirada(s) removida(s).`);
+    }
+}, Math.max(30000, Math.min(playbackSessions.ttlMs, 60000)));
+
 function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
     const now = Date.now();
     const key = owner ? `${owner}:${videoId}` : videoId;
@@ -450,44 +468,22 @@ function renewViewersForMonitor(owner, videoId) {
 }
 
 function getActiveDevicesForOwnerAndVideo(owner, videoId) {
-    const key = `${owner}:${videoId}`;
-    const viewers = ownerViewers.get(key);
-    if (!viewers) return 0;
-    const now = Date.now();
-    let count = 0;
-    for (const [ip, timestamp] of viewers.entries()) {
-        if (now - timestamp <= VIEWER_WINDOW_MS) count++;
-    }
-    return count;
+    if (!owner || !videoId) return 0;
+    return playbackSessions.countActive({ owner, videoId });
 }
 
 function getActiveViewerIPsForOwnerAndVideo(owner, videoId) {
-    const key = `${owner}:${videoId}`;
-    const viewers = ownerViewers.get(key);
-    if (!viewers) return [];
-    const now = Date.now();
-    const devices = [];
-    for (const [deviceId, timestamp] of viewers.entries()) {
-        if (now - timestamp <= VIEWER_WINDOW_MS) {
-            const parts = deviceId.split('|');
-            const ip = parts[0] || 'unknown';
-            const userAgent = parts[1] || '';
-            const localIp = parts[2] || null;
-            devices.push({ deviceId, ip, userAgent, localIp });
-        }
-    }
-    return devices;
-}
-
-function isIpActiveForOwnerAndVideo(owner, videoId, ip, userAgent = '') {
-    if (!owner || !videoId || isLocalIp(ip)) return true;
-    const key = `${owner}:${videoId}`;
-    const viewers = ownerViewers.get(key);
-    if (!viewers) return false;
-    
-    if (viewers.has(ip)) return true;
-    const deviceId = `${ip}|${userAgent}`;
-    return viewers.has(deviceId);
+    if (!owner || !videoId) return [];
+    return playbackSessions.listActive({ owner, videoId }).map(session => ({
+        sessionPreview: sessionPreview(session.sessionId),
+        deviceId: sessionPreview(session.sessionId),
+        ip: session.publicIp || 'unknown',
+        userAgent: session.userAgent || '',
+        localIp: null,
+        createdAt: session.createdAt,
+        lastSeenAt: session.lastSeenAt,
+        source: session.source || 'hls'
+    }));
 }
 
 function getDeviceLimitForOwner(owner) {
@@ -497,14 +493,7 @@ function getDeviceLimitForOwner(owner) {
 }
 
 function getTotalViewers() {
-    const now = Date.now();
-    const uniqueIps = new Set();
-    for (const viewers of ownerViewers.values()) {
-        for (const [ip, timestamp] of viewers.entries()) {
-            if (now - timestamp <= VIEWER_WINDOW_MS) uniqueIps.add(ip);
-        }
-    }
-    return uniqueIps.size;
+    return playbackSessions.countActive();
 }
 
 // ============================================================
@@ -846,12 +835,110 @@ function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, st
     console.log(`[${videoId}] 📡 Acesso m3u8: status=${statusCode} cache=${fromCache ? 'HIT' : 'MISS'} ${elapsedMs}ms${info}${staleTag}`);
 }
 
+function makeBandwidthForHeight(height) {
+    if (height <= 240) return 300000;
+    if (height <= 360) return 600000;
+    if (height <= 480) return 1200000;
+    if (height <= 720) return 2500000;
+    if (height <= 1080) return 5000000;
+    return 8000000;
+}
+
+function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight }) {
+    const basePath = token
+        ? `/neonews/t/${encodeURIComponent(token)}.m3u8`
+        : `/neonews/${encodeURIComponent(videoId)}.m3u8`;
+    const params = new URLSearchParams();
+    if (!token && owner) params.set('owner', owner);
+    params.set('session', sessionId);
+    if (maxHeight) params.set('max', String(maxHeight));
+    return `${basePath}?${params.toString()}`;
+}
+
+function getAvailablePlaylistHeights(monitor) {
+    return Object.keys(monitor?._playlistUrls || {})
+        .map(value => Number(value))
+        .filter(value => Number.isFinite(value) && value > 0)
+        .sort((a, b) => b - a);
+}
+
+function extractHeightsFromMasterContent(content) {
+    const heights = [];
+    const pattern = /#EXT-X-STREAM-INF:[^\n]*RESOLUTION=\d+x(\d+)/ig;
+    let match;
+    while ((match = pattern.exec(String(content || ''))) !== null) {
+        const height = Number(match[1]);
+        if (Number.isFinite(height) && height > 0) heights.push(height);
+    }
+    return Array.from(new Set(heights)).sort((a, b) => b - a);
+}
+
+function buildPlaybackSessionMaster(monitor, {
+    token,
+    videoId,
+    owner,
+    sessionId,
+    requestedMaxHeight,
+    fallbackMaxHeight
+}) {
+    let heights = getAvailablePlaylistHeights(monitor);
+    if (heights.length === 0) {
+        heights = extractHeightsFromMasterContent(monitor?._masterContent?.content);
+    }
+    if (heights.length === 0 && fallbackMaxHeight) {
+        heights = [fallbackMaxHeight];
+    }
+    if (requestedMaxHeight && heights.includes(requestedMaxHeight)) {
+        heights = [requestedMaxHeight];
+    }
+
+    const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
+    for (const height of heights) {
+        const width = Math.round(height * 16 / 9);
+        const url = buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight: height });
+        lines.push(
+            `#EXT-X-STREAM-INF:BANDWIDTH=${makeBandwidthForHeight(height)},RESOLUTION=${width}x${height},FRAME-RATE=30`,
+            url
+        );
+    }
+    return `${lines.join('\n')}\n`;
+}
+
+function sendHlsManifest(res, content, extraHeaders = {}) {
+    res.writeHead(200, {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'private, no-store',
+        'Vary': 'User-Agent',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        ...extraHeaders
+    });
+    res.end(content);
+}
+
 // ============================================================
 // CONTROLE DE VERBOSIDADE DOS LOGS (rate limiting)
 // ============================================================
 let requestLogCount = 0;
 let lastLogTime = 0;
 const LOG_INTERVAL_MS = 5000;
+const playbackSessionCreationWindows = new Map();
+
+function isPlaybackSessionCreationRateLimited(ip, owner, videoId) {
+    const limit = parseInt(process.env.PLAYBACK_SESSION_CREATE_LIMIT_PER_MINUTE, 10) || 30;
+    const windowMs = 60 * 1000;
+    const now = Date.now();
+    const key = `${ip}|${owner}|${videoId}`;
+    const current = playbackSessionCreationWindows.get(key) || { startedAt: now, count: 0 };
+    if (now - current.startedAt > windowMs) {
+        current.startedAt = now;
+        current.count = 0;
+    }
+    current.count += 1;
+    playbackSessionCreationWindows.set(key, current);
+    return current.count > limit;
+}
 
 function logRequestSummary(videoId, ip, owner) {
     requestLogCount++;
@@ -866,7 +953,7 @@ function logRequestSummary(videoId, ip, owner) {
 // ============================================================
 // HANDLER DO PROXY M3U8 (com logs reduzidos e proxy de playlists)
 // ============================================================
-async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
+async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext = {}) {
     const reqStart = Date.now();
     const queryOwner = owner || req.query.owner || null;
 
@@ -940,33 +1027,75 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
 
     const trackingOwner = queryOwner || actualOwner;
     const localIp = req.query.localIp || null;
+    const sessionIdFromRequest = String(req.query.session || '').trim();
+    let activePlaybackSessionId = null;
 
     if (trackingOwner) {
         const clientIp = getRequestIp(req);
         const userAgent = req.headers['user-agent'] || '';
 
         if (!isLocalIp(clientIp)) {
-            const activeDevices = getActiveDevicesForOwnerAndVideo(trackingOwner, videoId);
-            const deviceLimit = getDeviceLimitForOwner(trackingOwner);
-            const isAlreadyActive = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp, userAgent);
+            if (sessionIdFromRequest) {
+                const touched = playbackSessions.touchSession({
+                    sessionId: sessionIdFromRequest,
+                    owner: trackingOwner,
+                    videoId,
+                    publicIp: clientIp,
+                    userAgent
+                });
+                if (!touched.ok) {
+                    const status = touched.code === 'expired' ? 410 : 403;
+                    console.warn(`[${trackingOwner}:${videoId}] sessao HLS rejeitada (${touched.code}) session=${sessionPreview(sessionIdFromRequest)}`);
+                    return res.status(status).send('Playback session invalid');
+                }
+                activePlaybackSessionId = sessionIdFromRequest;
+            } else {
+                if (isPlaybackSessionCreationRateLimited(clientIp, trackingOwner, videoId)) {
+                    console.warn(`[${trackingOwner}:${videoId}] criacao de sessao HLS limitada por taxa para IP ${clientIp}`);
+                    res.set('Retry-After', '60');
+                    return res.status(429).json({
+                        error: 'Muitas tentativas de sessão',
+                        message: 'Tente novamente em instantes.'
+                    });
+                }
+                const deviceLimit = getDeviceLimitForOwner(trackingOwner);
+                const created = playbackSessions.createSession({
+                    owner: trackingOwner,
+                    videoId,
+                    limit: deviceLimit,
+                    publicIp: clientIp,
+                    userAgent,
+                    source: 'hls',
+                    fingerprint: localIp ? `localIp:${localIp}` : null
+                });
 
-            if (!isAlreadyActive && deviceLimit > 0 && activeDevices >= deviceLimit) {
-                console.log(`[${trackingOwner}:${videoId}] 🚫 Dispositivo bloqueado: ${activeDevices} ativos, IP ${clientIp} excederia limite ${deviceLimit}`);
-                return res.status(429).json({
-                    error: 'Limite de dispositivos excedido',
-                    message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
+                if (!created.ok) {
+                    console.log(`[${trackingOwner}:${videoId}] 🚫 Sessao HLS bloqueada: ${created.active} ativas, limite ${created.limit}`);
+                    return res.status(429).json({
+                        error: 'Limite de dispositivos excedido',
+                        message: `Você atingiu o limite de ${deviceLimit} dispositivos simultâneos para esta live.`
+                    });
+                }
+
+                activePlaybackSessionId = created.session.sessionId;
+                console.log(`[${trackingOwner}:${videoId}] 📱 Sessao HLS criada: ${sessionPreview(activePlaybackSessionId)} (${clientIp} | ${userAgent.substring(0, 30)}...)`);
+                const sessionMaster = buildPlaybackSessionMaster(monitor, {
+                    token: routeContext.token || null,
+                    videoId,
+                    owner: trackingOwner,
+                    sessionId: activePlaybackSessionId,
+                    requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
+                    fallbackMaxHeight: finalMaxHeight
+                });
+                return sendHlsManifest(res, sessionMaster, {
+                    'X-Playback-Session': sessionPreview(activePlaybackSessionId),
+                    'X-Master': 'true'
                 });
             }
-            
-            trackViewerByOwner(trackingOwner, clientIp, videoId, userAgent, localIp);
-            console.log(`[${trackingOwner}:${videoId}] 📱 Dispositivo registrado via Proxy: ${clientIp} | ${userAgent.substring(0, 30)}...`);
         }
     } else {
         console.warn(`[${videoId}] Acesso sem owner definido - dispositivo não será rastreado.`);
     }
-    const clientIpActivity = getRequestIp(req);
-    const userAgentActivity = req.headers['user-agent'] || '';
-    trackViewer(trackingOwner, videoId, clientIpActivity, userAgentActivity, localIp);
 
     monitor.lastAccess = Date.now();
 
@@ -989,14 +1118,15 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
             }
             const result = await fetchM3u8WithCache(cacheKey, playlistUrl);
             let content = result.content;
-            // Log do início do conteúdo para verificar se é uma playlist válida
-            console.log(`[${videoId}] 🔍 Playlist ${urlMaxHeight}p recebida (${content.length} bytes), primeiros 200 chars: ${content.substring(0, 200).replace(/\n/g, ' ')}`);
+            console.log(`[${videoId}] 🔍 Playlist ${urlMaxHeight}p recebida (${content.length} bytes)`);
             res.writeHead(200, {
                 'Content-Type': 'application/vnd.apple.mpegurl',
                 'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Cache-Control': 'private, no-store',
+                'Vary': 'User-Agent',
                 'Pragma': 'no-cache',
-                'Expires': '0'
+                'Expires': '0',
+                ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
             });
             res.end(content);
             return;
@@ -1008,17 +1138,21 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
 
     // Se não for requisição de qualidade, verifica se é o master
     if (monitor._masterContent && monitor._masterContent.isMaster) {
-        const rawContent = monitor._masterContent.content;
-        console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (sem filtro)`);
-        res.writeHead(200, {
-            'Content-Type': 'application/vnd.apple.mpegurl',
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Expires': '0',
-            'X-Master': 'true'
+        const content = activePlaybackSessionId && trackingOwner
+            ? buildPlaybackSessionMaster(monitor, {
+                token: routeContext.token || null,
+                videoId,
+                owner: trackingOwner,
+                sessionId: activePlaybackSessionId,
+                requestedMaxHeight: null,
+                fallbackMaxHeight: finalMaxHeight
+            })
+            : monitor._masterContent.content;
+        console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (sem filtro)'}`);
+        sendHlsManifest(res, content, {
+            'X-Master': 'true',
+            ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
         });
-        res.end(rawContent);
         return;
     }
 
@@ -1043,16 +1177,21 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         }
 
         if (isMaster) {
-            console.log(`[${videoId}] 🎯 Servindo master ORIGINAL (via cache)`);
-            res.writeHead(200, {
-                'Content-Type': 'application/vnd.apple.mpegurl',
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Pragma': 'no-cache',
-                'Expires': '0',
-                'X-Master': 'true'
+            if (activePlaybackSessionId && trackingOwner) {
+                contentToServe = buildPlaybackSessionMaster(monitor, {
+                    token: routeContext.token || null,
+                    videoId,
+                    owner: trackingOwner,
+                    sessionId: activePlaybackSessionId,
+                    requestedMaxHeight: null,
+                    fallbackMaxHeight: finalMaxHeight
+                });
+            }
+            console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (via cache)'}`);
+            sendHlsManifest(res, contentToServe, {
+                'X-Master': 'true',
+                ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
             });
-            res.end(contentToServe);
             return;
         }
 
@@ -1097,11 +1236,13 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
         res.writeHead(200, {
             'Content-Type': 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Cache-Control': 'private, no-store',
+            'Vary': 'User-Agent',
             'Pragma': 'no-cache',
             'Expires': '0',
             'X-Cache': result.fromCache ? 'HIT' : 'MISS',
-            'X-Master': 'false'
+            'X-Master': 'false',
+            ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
         });
         res.end(contentToServe);
 
@@ -1146,10 +1287,12 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                         res.writeHead(200, {
                             'Content-Type': 'application/vnd.apple.mpegurl',
                             'Access-Control-Allow-Origin': '*',
-                            'Cache-Control': 'no-cache, no-store, must-revalidate',
+                            'Cache-Control': 'private, no-store',
+                            'Vary': 'User-Agent',
                             'Pragma': 'no-cache',
                             'Expires': '0',
-                            'X-Master': 'true'
+                            'X-Master': 'true',
+                            ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
                         });
                         return res.end(renewedContent);
                     } else {
@@ -1165,10 +1308,12 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                     res.writeHead(200, {
                         'Content-Type': 'application/vnd.apple.mpegurl',
                         'Access-Control-Allow-Origin': '*',
-                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Cache-Control': 'private, no-store',
+                        'Vary': 'User-Agent',
                         'Pragma': 'no-cache',
                         'Expires': '0',
-                        'X-Master': isRenewedMaster ? 'true' : 'false'
+                        'X-Master': isRenewedMaster ? 'true' : 'false',
+                        ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
                     });
                     return res.end(renewedContent);
                 } catch (renewErr) {
@@ -1190,10 +1335,12 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight) {
                     res.writeHead(200, {
                         'Content-Type': 'application/vnd.apple.mpegurl',
                         'Access-Control-Allow-Origin': '*',
-                        'Cache-Control': 'no-cache, no-store, must-revalidate',
+                        'Cache-Control': 'private, no-store',
+                        'Vary': 'User-Agent',
                         'Pragma': 'no-cache',
                         'Expires': '0',
-                        'X-Stale': 'true'
+                        'X-Stale': 'true',
+                        ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
                     });
                     return res.end(stale.content);
                 }
@@ -1246,31 +1393,18 @@ app.get('/api/public/device-status/:owner', publicApiLimiter, (req, res) => {
         trackViewer(owner, 'panel', ip, userAgent, localIp);
     }
 
-    const uniqueDevices = new Map();
-    const now = Date.now();
-
-    for (const [key, viewers] of ownerViewers.entries()) {
-        if (key.startsWith(owner + ':')) {
-            const [ownerName, videoId] = key.split(':');
-            const monitorKey = `${videoId}:${ownerName}`;
-            if (!converter.activeMonitors.has(monitorKey)) {
-                ownerViewers.delete(key);
-                continue;
-            }
-
-            for (const [deviceId, timestamp] of viewers.entries()) {
-                if (now - timestamp <= VIEWER_WINDOW_MS) {
-                    const parts = deviceId.split('|');
-                    const ip = parts[0] || 'unknown';
-                    const userAgent = parts[1] || '';
-                    const localIp = parts[2] || null;
-                    uniqueDevices.set(deviceId, { deviceId, ip, userAgent, localIp });
-                }
-            }
-        }
-    }
-
-    const allDevices = Array.from(uniqueDevices.values());
+    const allDevices = playbackSessions.listActive({ owner })
+        .filter(session => converter.activeMonitors.has(`${session.videoId}:${owner}`))
+        .map(session => ({
+            sessionPreview: sessionPreview(session.sessionId),
+            deviceId: sessionPreview(session.sessionId),
+            ip: session.publicIp || 'unknown',
+            userAgent: session.userAgent || '',
+            localIp: null,
+            videoId: session.videoId,
+            createdAt: session.createdAt,
+            lastSeenAt: session.lastSeenAt
+        }));
     const limit = getDeviceLimitForOwner(owner);
     const remaining = Math.max(0, limit - allDevices.length);
 
@@ -1291,10 +1425,10 @@ app.post('/api/device/remove', (req, res) => {
     if (videoId) {
         const key = `${owner}:${videoId}`;
         const viewers = ownerViewers.get(key);
-        if (!viewers) return res.status(404).json({ error: 'Nenhum dispositivo ativo para esta live' });
-        if (viewers.has(ip)) {
-            viewers.delete(ip);
-            console.log(`[${key}] 📱 IP ${ip} removido manualmente`);
+        const removedSession = playbackSessions.removeSession(ip, { owner, videoId });
+        if (removedSession || (viewers && viewers.has(ip))) {
+            if (viewers && viewers.has(ip)) viewers.delete(ip);
+            console.log(`[${key}] 📱 Dispositivo removido manualmente`);
             saveOwnerViewers(ownerViewers);
             const accessKey = `${owner}:${videoId}`;
             const accessMap = viewerAccess.get(accessKey);
@@ -1311,6 +1445,9 @@ app.post('/api/device/remove', (req, res) => {
         }
     } else {
         let removed = false;
+        if (playbackSessions.removeSession(ip, { owner })) {
+            removed = true;
+        }
         for (const [key, viewers] of ownerViewers.entries()) {
             if (key.startsWith(owner + ':')) {
                 if (viewers.has(ip)) {
@@ -1345,6 +1482,8 @@ app.post('/api/device/release-all', (req, res) => {
         return res.status(400).json({ error: 'Owner não informado' });
     }
     let removed = false;
+    const removedSessions = playbackSessions.removeForOwner(owner);
+    if (removedSessions > 0) removed = true;
     for (const [key, viewers] of ownerViewers.entries()) {
         if (key.startsWith(owner + ':')) {
             const videoId = key.split(':')[1];
@@ -1372,21 +1511,13 @@ app.post('/api/device/release-all', (req, res) => {
 app.get('/api/public/device-status-all', publicApiLimiter, (req, res) => {
     const clientes = getClientes();
     const result = {};
-    const now = Date.now();
 
     for (const cliente of clientes) {
         const owner = cliente.login;
-        const uniqueDevices = new Set();
-
-        for (const [key, viewers] of ownerViewers.entries()) {
-            if (key.startsWith(owner + ':')) {
-                for (const [deviceId, timestamp] of viewers.entries()) {
-                    if (now - timestamp <= VIEWER_WINDOW_MS) uniqueDevices.add(deviceId);
-                }
-            }
-        }
-
-        result[owner] = { active: uniqueDevices.size, limit: cliente.dispositivos };
+        result[owner] = {
+            active: playbackSessions.countActive({ owner }),
+            limit: cliente.dispositivos
+        };
     }
     res.json(result);
 });
@@ -1425,6 +1556,16 @@ app.post('/api/client/sync', (req, res) => {
     const { clientes } = req.body;
     if (!Array.isArray(clientes)) {
         return res.status(400).json({ success: false, message: 'Formato inválido' });
+    }
+    const previousOwners = new Set(getClientes().map(cliente => cliente.login).filter(Boolean));
+    const nextOwners = new Set(clientes.map(cliente => cliente.login).filter(Boolean));
+    for (const owner of previousOwners) {
+        if (!nextOwners.has(owner)) {
+            const removedSessions = playbackSessions.removeForOwner(owner);
+            if (removedSessions > 0) {
+                console.log(`[${owner}] ${removedSessions} sessão(ões) HLS removida(s) após sincronização de clientes.`);
+            }
+        }
     }
     salvarClientes(clientes);
     console.log(`🔄 Clientes sincronizados: ${clientes.length}`);
@@ -1524,7 +1665,7 @@ app.get('/neonews/:videoId.m3u8', async (req, res) => {
     if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
         maxHeight = urlMaxHeight;
     }
-    await handleM3u8Proxy(videoId, queryOwner, req, res, maxHeight);
+    await handleM3u8Proxy(videoId, queryOwner, req, res, maxHeight, { token: null });
 });
 
 // ========== PROXY HLS (rota com token) ==========
@@ -1542,7 +1683,7 @@ app.get('/neonews/t/:token.m3u8', async (req, res) => {
     if (Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight)) {
         maxHeight = urlMaxHeight;
     }
-    await handleM3u8Proxy(videoId, owner, req, res, maxHeight);
+    await handleM3u8Proxy(videoId, owner, req, res, maxHeight, { token });
 });
 
 // ========== AUTENTICAÇÃO E DASHBOARD ==========
@@ -1984,6 +2125,7 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
                         ownerViewers.delete(devKey);
                         saveOwnerViewers(ownerViewers);
                     }
+                    playbackSessions.removeForLive(owner, videoId);
                     if (viewerAccess.has(devKey)) {
                         viewerAccess.delete(devKey);
                         saveViewerAccess(viewerAccess);
@@ -2237,6 +2379,7 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
             const key = `${actualOwner}:${videoId}`;
             ownerViewers.delete(key);
             saveOwnerViewers(ownerViewers);
+            playbackSessions.removeForLive(actualOwner, videoId);
             viewerAccess.delete(`${actualOwner}:${videoId}`);
             saveViewerAccess(viewerAccess);
         } else {
@@ -2376,6 +2519,7 @@ const revokeTokenFn = (videoId, owner) => {
             saveOwnerViewers(ownerViewers);
             console.log(`🧹 Dispositivos de ${key} limpos após encerramento automático da live.`);
         }
+        playbackSessions.removeForLive(owner, videoId);
         const accessKey = `${owner}:${videoId}`;
         if (viewerAccess.has(accessKey)) {
             viewerAccess.delete(accessKey);
