@@ -286,6 +286,36 @@ function testRotatorSeparatesAuthAndStreamValidity() {
     assert.equal(functional.cookie1.valid, true);
     assert.equal(functional.cookie1.extractionValid, true);
     assert.equal(functional.cookie1.streamValid, true);
+
+    rotator.markExtractionFailure('cookie1.txt', 'live_ended', 'Falha de validação de stream: live_ended', 'startup-validation');
+    functional = rotator.getFunctionalStatus();
+    assert.equal(functional.cookie1.valid, true);
+    assert.equal(functional.cookie1.extractionValid, true);
+    assert.equal(functional.cookie1.streamValid, true);
+
+    const statusPath = path.join(dir, 'poisoned-status.json');
+    fs.writeFileSync(statusPath, JSON.stringify({
+        'cookie1.txt': {
+            state: 'valid',
+            authValid: true,
+            extractionValid: false,
+            streamValid: false,
+            failCount: 0,
+            lastFailure: null,
+            lastSuccess: new Date().toISOString(),
+            lastExtractionCheck: new Date().toISOString(),
+            lastExtractionFailure: new Date().toISOString(),
+            lastStreamSuccess: null,
+            extractionClassification: 'live_ended',
+            reason: 'Falha de validação de stream: live_ended',
+            alertActive: false
+        }
+    }), 'utf8');
+    const repaired = new CookieRotator(dir, statusPath).getFunctionalStatus();
+    assert.equal(repaired.cookie1.valid, true);
+    assert.equal(repaired.cookie1.extractionValid, true);
+    assert.equal(repaired.cookie1.streamValid, true);
+    assert.equal(repaired.cookie1.extractionClassification, null);
 }
 
 function testAgentStatusClassification() {

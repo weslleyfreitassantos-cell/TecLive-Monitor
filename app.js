@@ -553,6 +553,18 @@ function sanitizeYtdlpArgsForLog(args) {
     }).join(' ');
 }
 
+function isValidationTargetUnavailableClassification(classification) {
+    return [
+        CLASSIFICATION.LIVE_ENDED,
+        CLASSIFICATION.VIDEO_PRIVATE,
+        CLASSIFICATION.VIDEO_UNAVAILABLE,
+        CLASSIFICATION.VIDEO_REMOVED,
+        CLASSIFICATION.AGE_RESTRICTED,
+        CLASSIFICATION.MEMBERS_ONLY,
+        CLASSIFICATION.GEO_RESTRICTED
+    ].includes(classification);
+}
+
 function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
     return new Promise(async (resolve, reject) => {
         const filteredArgs = args.filter((arg, index) => {
@@ -704,11 +716,20 @@ async function validateCookieSimple(cookiePath) {
             forceArtificial: true
         });
         if (!selection.ok) {
+            if (isValidationTargetUnavailableClassification(selection.classification)) {
+                console.warn(`⚠️ URL de validação indisponível (${selection.classification}); cookie aceito por estrutura, validação de stream inconclusiva.`);
+                return true;
+            }
             throw new Error(`sem stream valida (${selection.classification})`);
         }
         console.log(`✅ Cookie válido para streaming (${selection.type})`);
         return true;
     } catch (error) {
+        const classification = classifyYtdlpError(error.message);
+        if (isValidationTargetUnavailableClassification(classification)) {
+            console.warn(`⚠️ URL de validação indisponível (${classification}); cookie aceito por estrutura, validação de stream inconclusiva.`);
+            return true;
+        }
         throw new Error('Cookie sem extração válida: ' + sanitizeYtdlpMessage(error.message));
     }
 }

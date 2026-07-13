@@ -1,6 +1,16 @@
 ﻿const fs = require('fs');
 const path = require('path');
 
+const TERMINAL_AVAILABILITY_CLASSIFICATIONS = new Set([
+    'live_ended',
+    'video_private',
+    'video_unavailable',
+    'video_removed',
+    'age_restricted',
+    'members_only',
+    'geo_restricted'
+]);
+
 class CookieRotator {
     constructor(cookiesDir, statusFilePath = null) {
         this.cookiesDir = cookiesDir;
@@ -138,6 +148,20 @@ class CookieRotator {
         }
         if (cookie.extractionClassification === undefined) {
             cookie.extractionClassification = null;
+            changed = true;
+        }
+        if (
+            cookie.state === 'valid' &&
+            TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(cookie.extractionClassification) &&
+            (cookie.extractionValid === false || cookie.streamValid === false)
+        ) {
+            cookie.extractionValid = true;
+            cookie.streamValid = true;
+            cookie.lastExtractionFailure = null;
+            cookie.extractionClassification = null;
+            if (String(cookie.reason || '').includes('live_ended') || String(cookie.reason || '').includes('video_')) {
+                cookie.reason = null;
+            }
             changed = true;
         }
 
@@ -357,12 +381,19 @@ class CookieRotator {
         this._ensureStatusFields(cookieName);
         const cookie = this.status[cookieName];
         const nowIso = new Date().toISOString();
+        const normalizedClassification = classification || 'unknown';
         cookie.lastExtractionCheck = nowIso;
+        if (TERMINAL_AVAILABILITY_CLASSIFICATIONS.has(normalizedClassification)) {
+            const suffix = context ? ` (${context})` : '';
+            console.log(`ℹ️ Cookie ${cookieName} preservado${suffix}: ${normalizedClassification} pertence ao video de validacao, nao ao cookie.`);
+            this.saveStatus();
+            return false;
+        }
         cookie.lastExtractionFailure = nowIso;
-        cookie.extractionClassification = classification || 'unknown';
+        cookie.extractionClassification = normalizedClassification;
         cookie.extractionValid = false;
         cookie.streamValid = false;
-        if (classification === 'auth_cookie') {
+        if (normalizedClassification === 'auth_cookie') {
             cookie.authValid = false;
         }
         cookie.reason = errorMsg || cookie.reason;
