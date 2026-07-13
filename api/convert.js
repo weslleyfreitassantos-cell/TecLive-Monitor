@@ -423,6 +423,15 @@ class ConvertAPI {
                 if (isCookieError && this.cookieRotator) {
                     this.cookieRotator.markFailure(file, error.message, videoId);
                 } else {
+                    if (this.cookieRotator && typeof this.cookieRotator.markExtractionFailure === 'function') {
+                        const diagnostics = error.diagnostics || null;
+                        this.cookieRotator.markExtractionFailure(file, classification, safeErrorMessage, videoId, {
+                            probeVideoId: videoId,
+                            metadataValid: diagnostics ? true : undefined,
+                            formatsValid: diagnostics ? diagnostics.formatCount > 0 : undefined,
+                            hlsValid: false
+                        });
+                    }
                     console.log(`[COOKIE] ${file}: ${classification} nao altera estado do cookie.`);
                 }
                 continue;
@@ -515,7 +524,11 @@ class ConvertAPI {
 
         if (this.cookieRotator && workingCookie) {
             console.log(`✅ Cookie ${workingCookie} funcionou para obtenção da stream.`);
-            this.cookieRotator.markSuccess(workingCookie);
+            if (typeof this.cookieRotator.markExtractionSuccess === 'function') {
+                this.cookieRotator.markExtractionSuccess(workingCookie, { probeVideoId: videoId });
+            } else {
+                this.cookieRotator.markSuccess(workingCookie);
+            }
         }
         if (extractionSource === 'public') {
             console.log(`[${videoId}] extracao concluida via public; estado dos cookies preservado.`);

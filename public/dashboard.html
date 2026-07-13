@@ -551,6 +551,14 @@
             border-left-color: #e74c3c;
             background: rgba(231,76,60,0.08);
         }
+        .cookie-item.stream-warning {
+            border-left-color: #f1c40f;
+            background: rgba(241,196,15,0.08);
+        }
+        .cookie-item.inconclusive {
+            border-left-color: #7a8aa0;
+            background: rgba(122,138,160,0.08);
+        }
         .cookie-item .substituir-btn {
             background: #e74c3c;
             color: #fff;
@@ -2643,7 +2651,10 @@
             if (!container) return;
 
             let hasProblem = false;
+            let hasStreamWarning = false;
+            let hasInconclusive = false;
             let problemCookies = [];
+            let streamCookies = [];
 
             // Mapeia nomes curtos para números
             const getCookieShortName = (name) => {
@@ -2663,35 +2674,57 @@
                 // Fonte da verdade: alertActive (vem do backend). Só desliga
                 // quando o cookie é trocado de verdade, não com recuperação
                 // automática do scheduler.
-                const isProblematic = info.alertActive === true ||
-                    info.valid === false ||
+                const authProblem = info.alertActive === true ||
                     info.authValid === false ||
+                    info.authReady === false ||
+                    info.state === 'invalid' ||
+                    info.state === 'suspect';
+                const streamProblem = !authProblem && (
+                    info.capabilityStatus === 'degraded' ||
                     info.extractionValid === false ||
-                    info.streamValid === false;
+                    info.streamValid === false ||
+                    info.hlsValid === false
+                );
+                const inconclusive = !authProblem && !streamProblem && (
+                    info.capabilityStatus === 'inconclusive' ||
+                    info.streamProbeStatus === 'inconclusive'
+                );
 
-                if (isProblematic) {
+                if (authProblem) {
                     hasProblem = true;
                     problemCookies.push(shortName.toUpperCase());
+                }
+                if (streamProblem) {
+                    hasStreamWarning = true;
+                    streamCookies.push(shortName.toUpperCase());
+                }
+                if (inconclusive) {
+                    hasInconclusive = true;
                 }
 
                 let statusText = 'VÁLIDO';
                 let statusClass = '';
-                if (isProblematic) {
+                if (authProblem) {
                     if (info.authValid === false || info.state === 'invalid') statusText = 'INVÁLIDO';
-                    else if (info.extractionValid === false || info.streamValid === false) statusText = 'SEM STREAM';
                     else statusText = 'SUSPEITO (aguardando troca)';
                     statusClass = 'invalid';
+                } else if (streamProblem) {
+                    statusText = 'STREAM DEGRADADO';
+                    statusClass = 'stream-warning';
+                } else if (inconclusive) {
+                    statusText = 'INCONCLUSIVO';
+                    statusClass = 'inconclusive';
                 }
 
-                const reason = info.reason || info.extractionClassification || (info.failCount > 0 ? `${info.failCount} falhas` : '');
+                const reason = info.reason || info.extractionClassification || info.streamProbeStatus || (info.failCount > 0 ? `${info.failCount} falhas` : '');
                 const lastFail = info.lastFailure ? new Date(info.lastFailure).getTime() : 0;
                 const lastFailStr = lastFail ? ` (última falha ${new Date(lastFail).toLocaleTimeString('pt-BR')})` : '';
 
                 html += `<div class="cookie-item ${statusClass}">
                             <strong>${shortName.toUpperCase()}</strong>
                             ${statusText}
-                            ${isProblematic ? `<span style="color:#e74c3c; font-size:10px;">${escapeHtml(reason)}${escapeHtml(lastFailStr)}</span>` : ''}
-                            ${isProblematic ? `
+                            ${(authProblem || streamProblem || inconclusive) ? `<span style="color:${authProblem ? '#e74c3c' : streamProblem ? '#f1c40f' : '#9aa7b7'}; font-size:10px;">${escapeHtml(reason)}${escapeHtml(lastFailStr)}</span>` : ''}
+                            ${authProblem ? `
                                 <button type="button" class="substituir-btn" data-cookie-type="${type}">Substituir</button>
                                 <input type="file" class="cookie-file-input" data-cookie-type="${type}" accept=".txt" style="display:none">
                             ` : ''}
@@ -2740,13 +2773,17 @@
             });
 
             // Atualiza badge
-            document.getElementById('cookieStatusBadge').textContent = hasProblem ? '⚠️ ALERTA' : 'OK';
+            document.getElementById('cookieStatusBadge').textContent = hasProblem ? '⚠️ ALERTA' : hasStreamWarning ? 'DEGRADADO' : hasInconclusive ? 'INCONCLUSIVO' : 'OK';
 
             // Banner fixo: só some quando o backend confirmar que não há mais alertActive
             // (ou seja, depois que você efetivamente trocar o cookie)
             if (hasProblem) {
                 const names = problemCookies.join(', ');
                 bannerMessage.textContent = ` ${names} com problema! Substitua-o imediatamente.`;
+                emergencyBanner.style.display = 'flex';
+            } else if (hasStreamWarning) {
+                const names = streamCookies.join(', ');
+                bannerMessage.textContent = ` ${names} autenticado(s), mas com stream por cookie degradado. Fallback público será usado quando disponível.`;
                 emergencyBanner.style.display = 'flex';
             } else {
                 emergencyBanner.style.display = 'none';

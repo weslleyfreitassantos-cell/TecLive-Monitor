@@ -345,37 +345,71 @@ function classifyCookies(functional = {}) {
 
     const valid = entries.filter(([, info]) => info?.valid === true);
     const alerted = entries.filter(([, info]) => info?.alertActive === true || ['invalid', 'suspect'].includes(info?.state));
-    const authValid = entries.filter(([, info]) => info?.authValid !== false);
+    const authValid = entries.filter(([, info]) => info?.authReady === true ||
+        (info?.authReady !== false && info?.authValid !== false && info?.state !== 'invalid'));
     const extractionValid = entries.filter(([, info]) => info?.extractionValid !== false);
     const streamValid = entries.filter(([, info]) => info?.streamValid !== false);
+    const streamReady = entries.filter(([, info]) => info?.streamReady === true ||
+        (info?.streamReady !== false && info?.extractionValid !== false && info?.streamValid !== false && info?.hlsValid !== false));
+    const streamDegraded = entries.filter(([, info]) => info?.authValid !== false &&
+        (info?.capabilityStatus === 'degraded' || info?.extractionValid === false || info?.streamValid === false || info?.hlsValid === false));
+    const inconclusive = entries.filter(([, info]) => info?.capabilityStatus === 'inconclusive' || info?.streamProbeStatus === 'inconclusive');
 
-    if (valid.length === 0) {
-        return makeComponent('critical', 'Nenhum cookie valido para stream', {
+    if (authValid.length === 0) {
+        return makeComponent('critical', 'Nenhum cookie autenticado valido', {
             valid: 0,
             total: entries.length,
             authValid: authValid.length,
             extractionValid: extractionValid.length,
-            streamValid: streamValid.length
+            streamValid: streamValid.length,
+            streamReady: streamReady.length
         });
     }
 
     if (alerted.length > 0) {
-        return makeComponent('warning', `${valid.length}/${entries.length} cookie(s) validos; ${alerted.length} com alerta`, {
+        return makeComponent('warning', `${authValid.length}/${entries.length} cookie(s) autenticado(s); ${alerted.length} com alerta`, {
             valid: valid.length,
             total: entries.length,
             authValid: authValid.length,
             extractionValid: extractionValid.length,
             streamValid: streamValid.length,
+            streamReady: streamReady.length,
             alerted: alerted.map(([name]) => name)
         });
     }
 
-    return makeComponent('ok', `${valid.length}/${entries.length} cookie(s) validos`, {
+    if (streamDegraded.length > 0) {
+        return makeComponent('warning', `${authValid.length}/${entries.length} cookie(s) autenticado(s); ${streamReady.length}/${entries.length} apto(s) para stream autenticado`, {
+            valid: valid.length,
+            total: entries.length,
+            authValid: authValid.length,
+            extractionValid: extractionValid.length,
+            streamValid: streamValid.length,
+            streamReady: streamReady.length,
+            degraded: streamDegraded.map(([name]) => name),
+            recommendedAction: 'Fallback publico operacional quando disponivel; cookies autenticados com stream degradado.'
+        });
+    }
+
+    if (inconclusive.length > 0) {
+        return makeComponent('warning', `${authValid.length}/${entries.length} cookie(s) autenticado(s); validacao de stream inconclusiva`, {
+            valid: valid.length,
+            total: entries.length,
+            authValid: authValid.length,
+            extractionValid: extractionValid.length,
+            streamValid: streamValid.length,
+            streamReady: streamReady.length,
+            inconclusive: inconclusive.map(([name]) => name)
+        });
+    }
+
+    return makeComponent('ok', `${authValid.length}/${entries.length} cookie(s) autenticado(s); ${streamReady.length}/${entries.length} apto(s) para stream`, {
         valid: valid.length,
         total: entries.length,
         authValid: authValid.length,
         extractionValid: extractionValid.length,
-        streamValid: streamValid.length
+        streamValid: streamValid.length,
+        streamReady: streamReady.length
     });
 }
 
@@ -475,6 +509,9 @@ function buildSystemHealth(options = {}) {
                 authValid: functionalCookies.authValid,
                 extractionValid: functionalCookies.extractionValid,
                 streamValid: functionalCookies.streamValid,
+                streamReady: functionalCookies.streamReady,
+                degraded: functionalCookies.degraded || [],
+                inconclusive: functionalCookies.inconclusive || [],
                 alerted: functionalCookies.alerted || []
             },
             monitors: {

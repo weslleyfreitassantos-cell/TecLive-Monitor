@@ -579,6 +579,17 @@ function isTerminalRestoreClassification(classification) {
     return isValidationTargetUnavailableClassification(classification);
 }
 
+function getCookieStreamTestUrl() {
+    return process.env.COOKIE_STREAM_TEST_URL ||
+        process.env.COOKIE_STREAM_VALIDATION_URL ||
+        'https://www.youtube.com/watch?v=aSXLerQStXA';
+}
+
+function extractVideoIdFromUrl(url) {
+    const match = String(url || '').match(/(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&]|$)/);
+    return match ? match[1] : null;
+}
+
 function runYtdlp(args, timeout = 30000, allowCookieFallback = true) {
     return new Promise(async (resolve, reject) => {
         const filteredArgs = args.filter((arg, index) => {
@@ -722,7 +733,7 @@ async function validateCookieSimple(cookiePath) {
             '--dump-json',
             '--skip-download',
             '--no-playlist',
-            process.env.COOKIE_STREAM_VALIDATION_URL || 'https://www.youtube.com/watch?v=aSXLerQStXA'
+            getCookieStreamTestUrl()
         ], 45000, false);
         const metadata = JSON.parse(stdout);
         const selection = selectHlsStream(metadata, {
@@ -2625,7 +2636,8 @@ startCookieAgentAlertWatcher();
     if (!converter || !converter.cookieRotator) return;
     console.log('🔍 Validando cookies na inicialização (extração real de HLS)...');
     const cookieFiles = ['cookie1.txt', 'cookie2.txt', 'cookie3.txt'];
-    const TEST_URL = process.env.COOKIE_STREAM_VALIDATION_URL || 'https://www.youtube.com/watch?v=aSXLerQStXA';
+    const TEST_URL = getCookieStreamTestUrl();
+    const testVideoId = extractVideoIdFromUrl(TEST_URL);
     let validationInconclusive = false;
 
     for (const file of cookieFiles) {
@@ -2663,7 +2675,9 @@ startCookieAgentAlertWatcher();
                 throw extractionError;
             }
 
-            converter.cookieRotator.markExtractionSuccess(cookieKey);
+            converter.cookieRotator.markExtractionSuccess(cookieKey, {
+                probeVideoId: testVideoId
+            });
             if (currentState !== 'valid') {
                 console.log(`✅ ${file} voltou de '${currentState}' para 'valid' após extração real bem-sucedida.`);
             } else {
@@ -2682,7 +2696,13 @@ startCookieAgentAlertWatcher();
             if (classification === CLASSIFICATION.AUTH_COOKIE || converter.cookieRotator.isCookieAuthError(err.message)) {
                 converter.cookieRotator.markFailure(cookieKey, err.message, 'startup-validation');
             } else {
-                converter.cookieRotator.markExtractionFailure(cookieKey, classification, safeError, 'startup-validation');
+                const diagnostics = err.diagnostics || null;
+                converter.cookieRotator.markExtractionFailure(cookieKey, classification, safeError, 'startup-validation', {
+                    probeVideoId: testVideoId,
+                    metadataValid: diagnostics ? true : undefined,
+                    formatsValid: diagnostics ? diagnostics.formatCount > 0 : undefined,
+                    hlsValid: false
+                });
             }
         }
     }

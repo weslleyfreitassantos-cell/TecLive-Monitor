@@ -264,6 +264,28 @@ function testCriticalCookiesDoNotHideOtherComponents() {
     assert.equal(system.components.agent.status, 'warning');
 }
 
+function testAuthenticatedCookiesWithDegradedStreamAreWarning() {
+    const degraded = {
+        cookie1: { valid: true, authReady: true, authValid: true, streamReady: false, extractionValid: false, streamValid: false, capabilityStatus: 'degraded' },
+        cookie2: { valid: true, authReady: true, authValid: true, streamReady: false, extractionValid: false, streamValid: false, capabilityStatus: 'degraded' },
+        cookie3: { valid: true, authReady: true, authValid: true, streamReady: false, extractionValid: false, streamValid: false, capabilityStatus: 'degraded' }
+    };
+    const system = buildSystemHealth({
+        converter: { activeMonitors: new Map([['PUBLICOK:owner', fakeMonitor({ lastSuccessfulExtractionSource: 'public' })]]) },
+        cookieFunctionalStatus: degraded,
+        cookieRefreshStatus: agentStatus('online'),
+        auth: { sessionAdmin: true, adminPasswordConfigured: true },
+        nowMs: 1000
+    });
+
+    assert.equal(system.status, 'degraded');
+    assert.equal(system.components.cookies.status, 'warning');
+    assert.equal(system.components.cookies.functional.authValid, 3);
+    assert.equal(system.components.cookies.functional.streamReady, 0);
+    assert.ok(system.components.cookies.message.includes('stream autenticado'));
+    assert.equal(system.components.stream.status, 'ok');
+}
+
 function testTerminalAvailabilityDoesNotPolluteGlobalHealth() {
     const now = Date.now();
     const system = buildSystemHealth({
@@ -424,6 +446,8 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('getHealthCssStatus'));
     assert.ok(html.includes('health-component-action'));
     assert.ok(html.includes('recommendedAction'));
+    assert.ok(html.includes('stream-warning'));
+    assert.ok(html.includes('capabilityStatus'));
     assert.ok(html.includes('Log do servidor'));
     assert.ok(html.includes('/api/admin/logs/timeline'));
     assert.ok(html.includes('serverLogContent'));
@@ -448,6 +472,7 @@ function main() {
     testAuthCookieAffectsAuthenticationAndCookies();
     testAgentOfflineIsSeparateError();
     testCriticalCookiesDoNotHideOtherComponents();
+    testAuthenticatedCookiesWithDegradedStreamAreWarning();
     testTerminalAvailabilityDoesNotPolluteGlobalHealth();
     testConversionBackoffWithoutActiveMonitorAffectsSystemHealth();
     testGlobalExtractionCriticalAffectsSystemHealth();

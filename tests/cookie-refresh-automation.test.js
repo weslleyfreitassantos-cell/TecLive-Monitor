@@ -278,12 +278,18 @@ function testRotatorSeparatesAuthAndStreamValidity() {
     assert.equal(functional.cookie1.authValid, true);
     assert.equal(functional.cookie1.extractionValid, false);
     assert.equal(functional.cookie1.streamValid, false);
-    assert.equal(functional.cookie1.valid, false);
+    assert.equal(functional.cookie1.valid, true);
+    assert.equal(functional.cookie1.authReady, true);
+    assert.equal(functional.cookie1.streamReady, false);
+    assert.equal(functional.cookie1.capabilityStatus, 'degraded');
+    assert.equal(functional.cookie1.consecutiveStreamFailures, 1);
     assert.equal(functional.cookie1.extractionClassification, 'no_formats');
 
     rotator.markExtractionSuccess('cookie1.txt');
     functional = rotator.getFunctionalStatus();
     assert.equal(functional.cookie1.valid, true);
+    assert.equal(functional.cookie1.streamReady, true);
+    assert.equal(functional.cookie1.capabilityStatus, 'ok');
     assert.equal(functional.cookie1.extractionValid, true);
     assert.equal(functional.cookie1.streamValid, true);
 
@@ -292,6 +298,7 @@ function testRotatorSeparatesAuthAndStreamValidity() {
     assert.equal(functional.cookie1.valid, true);
     assert.equal(functional.cookie1.extractionValid, true);
     assert.equal(functional.cookie1.streamValid, true);
+    assert.equal(functional.cookie1.capabilityStatus, 'ok');
 
     const statusPath = path.join(dir, 'poisoned-status.json');
     fs.writeFileSync(statusPath, JSON.stringify({
@@ -575,6 +582,9 @@ function testSecurityAndDashboardStaticChecks() {
     assert.ok(dashboard.includes('Último erro'));
     assert.ok(dashboard.includes('Última consulta à fila'));
     assert.ok(dashboard.includes('DEGRADADO'));
+    assert.ok(dashboard.includes('STREAM DEGRADADO'));
+    assert.ok(dashboard.includes('INCONCLUSIVO'));
+    assert.ok(dashboard.includes('Fallback público'));
     assert.ok(dashboard.includes('atividade recente, heartbeat atrasado'));
     assert.ok(dashboard.includes('/api/admin/cookie-refresh/enqueue/'));
     assert.ok(dashboard.includes("credentials: 'same-origin'"));
