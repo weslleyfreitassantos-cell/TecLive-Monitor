@@ -451,6 +451,10 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('process.env.HLS_PUBLIC_BASE_URL'));
     assert.ok(app.includes("parsed.protocol = 'https:'"));
     assert.ok(app.includes('baseUrl: playbackManifestBaseUrl'));
+    assert.ok(app.includes('PLAYBACK_VARIANT_PIN_TTL_MS'));
+    assert.ok(app.includes('getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId)'));
+    assert.ok(app.includes('getPinnedVariantUrl(pinKey, playlistUrl)'));
+    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, cacheKey, result.content, monitor.lastMediaSequence)'));
     assert.ok(app.includes('function sendHlsError(res, statusCode, message'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store, no-cache'"));
     assert.ok(app.includes("app.head('/neonews/t/:token.m3u8'"));

@@ -387,6 +387,7 @@ setInterval(() => {
     if (removed > 0) {
         console.log(`🧹 ${removed} sessão(ões) HLS expirada(s) removida(s).`);
     }
+    prunePlaybackVariantUrlPins();
 }, Math.max(30000, Math.min(playbackSessions.ttlMs, 60000)));
 
 function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
@@ -787,11 +788,13 @@ const m3u8CachePromises = new Map();
 const m3u8CacheContent = new Map();
 // REDUZIDO para 5 segundos para forçar atualizações mais frequentes
 const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 5000;
+const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 10 * 60 * 1000;
 
 const REFRESH_WAIT_MS = 20000; // Aumentado para 20s
 const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000; // 1 minuto
 
 const lastGoodM3u8 = new Map();
+const playbackVariantUrlPins = new Map();
 
 function rememberGoodM3u8(videoId, content) {
     const seq = parseM3u8Info(content).sequence;
@@ -811,6 +814,52 @@ function getStaleM3u8IfFresh(videoId, monitorLastSeq) {
         }
     }
     return { content: entry.content, age, sequence: entry.sequence };
+}
+
+function prunePlaybackVariantUrlPins(now = Date.now()) {
+    let removed = 0;
+    for (const [key, pin] of playbackVariantUrlPins.entries()) {
+        if (!pin || now - (Number(pin.updatedAt) || 0) > PLAYBACK_VARIANT_PIN_TTL_MS) {
+            playbackVariantUrlPins.delete(key);
+            removed += 1;
+        }
+    }
+    return removed;
+}
+
+function getPlaybackVariantPinKey(videoId, height, sessionId) {
+    if (!videoId || !height || !sessionId) return null;
+    return `${videoId}:${height}:${sessionId}`;
+}
+
+function getPinnedVariantUrl(pinKey, currentUrl) {
+    if (!pinKey) return currentUrl;
+    const now = Date.now();
+    const pin = playbackVariantUrlPins.get(pinKey);
+    if (pin && pin.url && now - pin.updatedAt <= PLAYBACK_VARIANT_PIN_TTL_MS) {
+        return pin.url;
+    }
+    playbackVariantUrlPins.set(pinKey, {
+        url: currentUrl,
+        createdAt: now,
+        updatedAt: now
+    });
+    return currentUrl;
+}
+
+function rememberPinnedVariantUrl(pinKey, url) {
+    if (!pinKey || !url) return;
+    const now = Date.now();
+    const existing = playbackVariantUrlPins.get(pinKey);
+    playbackVariantUrlPins.set(pinKey, {
+        url,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now
+    });
+}
+
+function clearPinnedVariantUrl(pinKey) {
+    if (pinKey) playbackVariantUrlPins.delete(pinKey);
 }
 
 async function fetchM3u8WithCache(videoId, url) {
@@ -912,6 +961,39 @@ function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, st
     }
     const staleTag = stale ? ` 🕒 STALE(${stale}ms)` : '';
     console.log(`[${videoId}] 📡 Acesso m3u8: status=${statusCode} cache=${fromCache ? 'HIT' : 'MISS'} ${elapsedMs}ms${info}${staleTag}`);
+}
+
+function stabilizeMediaPlaylist(logVideoId, stabilityKey, content, monitorSeq) {
+    let contentToServe = content;
+    let staleServed = null;
+    const parsed = parseM3u8Info(contentToServe);
+    const prev = lastServedSequence.get(stabilityKey);
+
+    if (parsed.sequence !== null && prev && parsed.sequence < prev.sequence) {
+        console.warn(`[${logVideoId}] ⚠️ Detectada regressão de sequência ${stabilityKey} (${prev.sequence} → ${parsed.sequence}).`);
+        const stale = getStaleM3u8IfFresh(stabilityKey, monitorSeq);
+        if (stale) {
+            console.log(`[${logVideoId}] 🔄 Usando playlist ${stabilityKey} anterior estável.`);
+            contentToServe = stale.content;
+            staleServed = stale;
+        } else {
+            contentToServe = contentToServe.replace(
+                /#EXT-X-MEDIA-SEQUENCE:\d+/,
+                `#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`
+            );
+        }
+    }
+
+    const finalParsed = parseM3u8Info(contentToServe);
+    if (finalParsed.sequence !== null) {
+        if (!prev || finalParsed.sequence >= prev.sequence) {
+            rememberGoodM3u8(stabilityKey, contentToServe);
+        }
+    } else {
+        rememberGoodM3u8(stabilityKey, contentToServe);
+    }
+
+    return { content: contentToServe, stale: staleServed };
 }
 
 function makeBandwidthForHeight(height) {
@@ -1278,10 +1360,12 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     // ============================================================
     if (urlMaxHeight && monitor._playlistUrls && monitor._playlistUrls[urlMaxHeight]) {
         const playlistUrl = monitor._playlistUrls[urlMaxHeight];
-        console.log(`[${videoId}] 🎯 Servindo playlist de qualidade ${urlMaxHeight}p diretamente do YouTube`);
+        const cacheKey = videoId + '_' + urlMaxHeight;
+        const pinKey = getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId);
+        const pinnedPlaylistUrl = getPinnedVariantUrl(pinKey, playlistUrl);
+        const sourceLabel = pinnedPlaylistUrl === playlistUrl ? 'atual' : 'fixada';
+        console.log(`[${videoId}] 🎯 Servindo playlist de qualidade ${urlMaxHeight}p (${sourceLabel}) diretamente do YouTube`);
         try {
-            // Força a renovação do cache, evitando servir conteúdo antigo
-            const cacheKey = videoId + '_' + urlMaxHeight;
             // Remove o cache existente para forçar um fetch fresco
             if (m3u8CacheContent.has(cacheKey)) {
                 const cached = m3u8CacheContent.get(cacheKey);
@@ -1290,9 +1374,32 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     m3u8CachePromises.delete(cacheKey);
                 }
             }
-            const result = await fetchM3u8WithCache(cacheKey, playlistUrl);
-            let content = result.content;
+            let result;
+            let playlistSourceUrl = pinnedPlaylistUrl;
+            try {
+                result = await fetchM3u8WithCache(cacheKey, playlistSourceUrl);
+            } catch (pinErr) {
+                if (pinKey && playlistSourceUrl !== playlistUrl) {
+                    console.warn(`[${videoId}] Playlist ${urlMaxHeight}p fixada falhou (${pinErr.statusCode || pinErr.code || pinErr.message}); tentando URL atual.`);
+                    clearPinnedVariantUrl(pinKey);
+                    playlistSourceUrl = playlistUrl;
+                    result = await fetchM3u8WithCache(cacheKey, playlistSourceUrl);
+                } else {
+                    throw pinErr;
+                }
+            }
+            rememberPinnedVariantUrl(pinKey, playlistSourceUrl);
+            const stabilized = stabilizeMediaPlaylist(videoId, cacheKey, result.content, monitor.lastMediaSequence);
+            let content = stabilized.content;
             console.log(`[${videoId}] 🔍 Playlist ${urlMaxHeight}p recebida (${content.length} bytes)`);
+            logProxyAccess(cacheKey, {
+                statusCode: 200,
+                fromCache: result.fromCache,
+                elapsedMs: Date.now() - reqStart,
+                content,
+                stale: stabilized.stale?.age,
+                monitorSeq: monitor.lastMediaSequence
+            });
             res.writeHead(200, {
                 'Content-Type': 'application/vnd.apple.mpegurl',
                 'Access-Control-Allow-Origin': '*',
