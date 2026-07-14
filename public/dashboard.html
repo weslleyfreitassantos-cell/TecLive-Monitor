@@ -1888,6 +1888,8 @@
     let adminRedirectInProgress = false;
     let serverLogTimer = null;
     let serverLogLoading = false;
+    let serverLogForceScroll = false;
+    const SERVER_LOG_AUTO_SCROLL_THRESHOLD = 48;
     let manualUploadProgress = null;
 
     function redirectToAdminLoginOnce() {
@@ -1941,13 +1943,30 @@
         }
     }
 
+    function isServerLogNearBottom() {
+        if (!serverLogContent) return true;
+        const distanceFromBottom = serverLogContent.scrollHeight - serverLogContent.scrollTop - serverLogContent.clientHeight;
+        return distanceFromBottom <= SERVER_LOG_AUTO_SCROLL_THRESHOLD;
+    }
+
+    function restoreServerLogScroll(shouldAutoScroll, previousScrollTop) {
+        if (!serverLogContent) return;
+        const maxScrollTop = Math.max(0, serverLogContent.scrollHeight - serverLogContent.clientHeight);
+        serverLogContent.scrollTop = shouldAutoScroll ? maxScrollTop : Math.min(previousScrollTop, maxScrollTop);
+    }
+
     function renderServerLogs(logs) {
+        const shouldAutoScroll = serverLogForceScroll || isServerLogNearBottom();
+        const previousScrollTop = serverLogContent.scrollTop;
+        serverLogForceScroll = false;
+
         serverLogContent.textContent = '';
         if (!Array.isArray(logs) || logs.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'server-log-empty';
             empty.textContent = 'Nenhuma linha de log encontrada.';
             serverLogContent.appendChild(empty);
+            restoreServerLogScroll(shouldAutoScroll, previousScrollTop);
             return;
         }
 
@@ -1974,7 +1993,7 @@
             fragment.appendChild(row);
         });
         serverLogContent.appendChild(fragment);
-        serverLogContent.scrollTop = serverLogContent.scrollHeight;
+        restoreServerLogScroll(shouldAutoScroll, previousScrollTop);
     }
 
     async function loadServerLogs() {
@@ -1995,6 +2014,7 @@
 
     function openServerLogModal() {
         serverLogModal.classList.add('active');
+        serverLogForceScroll = true;
         loadServerLogs();
         startServerLogPolling();
     }
