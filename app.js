@@ -983,6 +983,10 @@ function getShortHash(value, length = 12) {
         .slice(0, length);
 }
 
+function getPlaybackSessionTokenScope(token) {
+    return token ? getShortHash(token, 32) : 'direct';
+}
+
 function getUpstreamIdentityHash(url) {
     return getShortHash(url || 'no-upstream');
 }
@@ -1917,6 +1921,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     const playbackManifestBaseUrl = getPlaybackManifestBaseUrl(req);
     const segmentProxyEnabled = shouldProxyHlsSegments(req);
     const singleVariantMaster = shouldUseSingleVariantMaster(req);
+    const playbackSessionTokenScope = getPlaybackSessionTokenScope(routeContext.token || null);
 
     if (trackingOwner) {
         const clientIp = getRequestIp(req);
@@ -1928,8 +1933,10 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     sessionId: sessionIdFromRequest,
                     owner: trackingOwner,
                     videoId,
+                    tokenScope: playbackSessionTokenScope,
                     publicIp: clientIp,
-                    userAgent
+                    userAgent,
+                    hlsActivity: urlMaxHeight ? 'variant' : 'master'
                 });
                 if (!touched.ok) {
                     const status = touched.code === 'expired' ? 410 : 403;
@@ -1955,6 +1962,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 const created = playbackSessions.createSession({
                     owner: trackingOwner,
                     videoId,
+                    tokenScope: playbackSessionTokenScope,
                     limit: deviceLimit,
                     publicIp: clientIp,
                     userAgent,
@@ -1968,7 +1976,10 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 }
 
                 activePlaybackSessionId = created.session.sessionId;
-                const sessionAction = created.code === 'reused_recent' || created.code === 'reused_stale' || created.code === 'reused_expired'
+                const sessionAction = created.code === 'reused_recent' ||
+                    created.code === 'reused_stale' ||
+                    created.code === 'reused_expired' ||
+                    created.code === 'reused_reopen'
                     ? 'reaproveitada'
                     : 'criada';
                 console.log(`[${trackingOwner}:${videoId}] 📱 Sessao HLS ${sessionAction}: ${sessionPreview(activePlaybackSessionId)} (${clientIp} | ${userAgent.substring(0, 30)}...)`);
@@ -2455,7 +2466,8 @@ function validateHlsSegmentSession(entry, req) {
         owner: entry.owner,
         videoId: entry.videoId,
         publicIp: getRequestIp(req),
-        userAgent: req.headers['user-agent'] || ''
+        userAgent: req.headers['user-agent'] || '',
+        hlsActivity: 'segment'
     });
     if (!touched.ok) {
         if (touched.code === 'expired') {

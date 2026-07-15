@@ -13,6 +13,7 @@ const {
 const APP_PATH = path.join(__dirname, '..', 'app.js');
 const OWNER = 'filipe';
 const VIDEO_ID = 'j6Df-EzdfbQ';
+const TOKEN_SCOPE = 'token-a';
 const IP = '187.40.208.118';
 const USER_AGENT = 'ExoMedia 4.3.0 / Android 14 / Stick HD';
 const NOW = Date.parse('2026-07-12T20:30:00.000Z');
@@ -28,7 +29,9 @@ function createStore(options = {}) {
         ttlMs: options.ttlMs || 90000,
         reuseRecentWindowMs: options.reuseRecentWindowMs === undefined ? 0 : options.reuseRecentWindowMs,
         reuseStaleAfterMs: options.reuseStaleAfterMs,
-        reuseExpiredGraceMs: options.reuseExpiredGraceMs
+        reuseExpiredGraceMs: options.reuseExpiredGraceMs,
+        reopenReuseMs: options.reopenReuseMs === undefined ? 0 : options.reopenReuseMs,
+        reopenReuseMinAgeMs: options.reopenReuseMinAgeMs
     });
 }
 
@@ -36,11 +39,24 @@ function create(store, overrides = {}, nowMs = NOW) {
     return store.createSession({
         owner: OWNER,
         videoId: VIDEO_ID,
+        tokenScope: TOKEN_SCOPE,
         limit: 3,
         publicIp: IP,
         userAgent: USER_AGENT,
         source: 'hls',
         ...overrides
+    }, nowMs);
+}
+
+function touchVariant(store, session, nowMs = NOW + 2000) {
+    return store.touchSession({
+        sessionId: session.sessionId,
+        owner: session.owner || OWNER,
+        videoId: session.videoId || VIDEO_ID,
+        tokenScope: session.tokenScope || TOKEN_SCOPE,
+        publicIp: session.publicIp || IP,
+        userAgent: session.userAgent || USER_AGENT,
+        hlsActivity: 'variant'
     }, nowMs);
 }
 
@@ -137,6 +153,148 @@ function testRecentIdenticalClientWithoutFingerprintDoesNotReuseSession() {
     assert.equal(second.code, 'created');
     assert.notEqual(second.session.sessionId, first.session.sessionId);
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 2);
+}
+
+function testLimitOneFastNeoNewsReopenReusesSession() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const reopened = create(store, { limit: 1 }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(first.code, 'created');
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_reopen');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 1);
+}
+
+function testLimitOneFastNeoNewsReopenWithoutVariantEvidenceIsBlocked() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const reopened = create(store, { limit: 1 }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, false);
+    assert.equal(reopened.code, 'limit_exceeded');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 1);
+}
+
+function testFastNeoNewsOpeningWithoutVariantEvidenceCreatesWhenLimitAllows() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 2 }, NOW);
+    const second = create(store, { limit: 2 }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(second.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 2);
+}
+
+function testLimitOneSimultaneousIdenticalNeoNewsOpeningIsBlocked() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const second = create(store, { limit: 1 }, NOW);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, false);
+    assert.equal(second.code, 'limit_exceeded');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW), 1);
+}
+
+function testGenericUserAgentDoesNotUseReopenReuse() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 2, userAgent: 'VLC/3.0.21 LibVLC/3.0.21' }, NOW);
+    const second = create(store, { limit: 2, userAgent: 'VLC/3.0.21 LibVLC/3.0.21' }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(second.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 2);
+}
+
+function testReopenAfterWindowIsSubjectToLimit() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const reopened = create(store, { limit: 1 }, NOW + 30000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(reopened.ok, false);
+    assert.equal(reopened.code, 'limit_exceeded');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 30000), 1);
+}
+
+function testReopenAfterWindowCreatesWhenLimitAllows() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 2 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const reopened = create(store, { limit: 2 }, NOW + 30000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'created');
+    assert.notEqual(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 30000), 2);
+}
+
+function testReopenReuseIsScopedByTokenOwnerAndVideo() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 4 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const differentToken = create(store, { limit: 4, tokenScope: 'token-b' }, NOW + 5000);
+    const differentVideo = create(store, { limit: 4, videoId: 'outroVideo01' }, NOW + 6000);
+    const differentOwner = create(store, { limit: 4, owner: 'outro-owner' }, NOW + 7000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(differentToken.ok, true);
+    assert.equal(differentToken.code, 'created');
+    assert.equal(differentVideo.ok, true);
+    assert.equal(differentVideo.code, 'created');
+    assert.equal(differentOwner.ok, true);
+    assert.equal(differentOwner.code, 'created');
+    assert.notEqual(differentToken.session.sessionId, first.session.sessionId);
+    assert.notEqual(differentVideo.session.sessionId, first.session.sessionId);
+    assert.notEqual(differentOwner.session.sessionId, first.session.sessionId);
+}
+
+function testExpiredSessionIsNotReusedByReopenWindow() {
+    const store = createStore({ ttlMs: 1000, reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 500);
+    const reopened = create(store, { limit: 1 }, NOW + 2000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'created');
+    assert.notEqual(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 2000), 1);
+}
+
+function testReopenEvidenceIsConsumedOnceUntilNextVariant() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    touchVariant(store, first.session, NOW + 2000);
+    const reopened = create(store, { limit: 1 }, NOW + 5000);
+    const secondReopen = create(store, { limit: 1 }, NOW + 7000);
+    touchVariant(store, first.session, NOW + 8000);
+    const thirdReopen = create(store, { limit: 1 }, NOW + 10000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_reopen');
+    assert.equal(secondReopen.ok, false);
+    assert.equal(secondReopen.code, 'limit_exceeded');
+    assert.equal(thirdReopen.ok, true);
+    assert.equal(thirdReopen.code, 'reused_reopen');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 1);
 }
 
 function testRecentWindowDoesNotCollapseIndependentOpeningsWithoutFingerprint() {
@@ -380,6 +538,15 @@ function testSessionScopeValidation() {
         publicIp: IP,
         userAgent: USER_AGENT
     }, NOW).code, 'video_mismatch');
+
+    assert.equal(store.touchSession({
+        sessionId: session.sessionId,
+        owner: OWNER,
+        videoId: VIDEO_ID,
+        tokenScope: 'token-b',
+        publicIp: IP,
+        userAgent: USER_AGENT
+    }, NOW).code, 'token_mismatch');
 
     assert.equal(store.touchSession({
         sessionId: 'inventada',
@@ -810,6 +977,10 @@ function testAppIntegrationStaticChecks() {
     assert.ok(app.includes('TOKEN_TOMBSTONE_TTL_MS'));
     assert.ok(app.includes('pruneTokenTombstones(tokenMap)'));
     assert.ok(storeSource.includes('_canReuseClientSession(fingerprint)'));
+    assert.ok(storeSource.includes('HLS_SESSION_REOPEN_REUSE_MS'));
+    assert.ok(storeSource.includes("code: code || (reusable.expired ? 'reused_expired' : 'reused_stale')"));
+    assert.ok(app.includes('function getPlaybackSessionTokenScope(token)'));
+    assert.ok(app.includes('tokenScope: playbackSessionTokenScope'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store'"));
     assert.ok(app.includes("'Vary': 'User-Agent'"));
     assert.ok(app.includes('playbackSessions.countActive({ owner, videoId })'));
@@ -902,6 +1073,16 @@ async function main() {
     testFreshIdenticalClientStillCountsAsSeparateDevice();
     testRecentIdenticalClientReusesSession();
     testRecentIdenticalClientWithoutFingerprintDoesNotReuseSession();
+    testLimitOneFastNeoNewsReopenReusesSession();
+    testLimitOneFastNeoNewsReopenWithoutVariantEvidenceIsBlocked();
+    testFastNeoNewsOpeningWithoutVariantEvidenceCreatesWhenLimitAllows();
+    testLimitOneSimultaneousIdenticalNeoNewsOpeningIsBlocked();
+    testGenericUserAgentDoesNotUseReopenReuse();
+    testReopenAfterWindowIsSubjectToLimit();
+    testReopenAfterWindowCreatesWhenLimitAllows();
+    testReopenReuseIsScopedByTokenOwnerAndVideo();
+    testExpiredSessionIsNotReusedByReopenWindow();
+    testReopenEvidenceIsConsumedOnceUntilNextVariant();
     testRecentWindowDoesNotCollapseIndependentOpeningsWithoutFingerprint();
     testRecentReuseCollapsesDuplicateClientSessions();
     testDuplicateCleanupRequiresFingerprint();

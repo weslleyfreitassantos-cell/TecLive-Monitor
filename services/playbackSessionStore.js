@@ -6,6 +6,8 @@ const DEFAULT_TTL_MS = 90000;
 const DEFAULT_REUSE_RECENT_WINDOW_MS = 90000;
 const DEFAULT_REUSE_STALE_AFTER_MS = 45000;
 const DEFAULT_REUSE_EXPIRED_GRACE_MS = 30 * 60 * 1000;
+const DEFAULT_REOPEN_REUSE_MS = 20000;
+const DEFAULT_REOPEN_REUSE_MIN_AGE_MS = 1000;
 
 function safeText(value, limit = 300) {
     return String(value || '')
@@ -55,6 +57,22 @@ class PlaybackSessionStore {
         this.reuseExpiredGraceMs = Number.isFinite(configuredReuseExpiredGrace) && configuredReuseExpiredGrace >= 0
             ? configuredReuseExpiredGrace
             : DEFAULT_REUSE_EXPIRED_GRACE_MS;
+        const configuredReopenReuse = Number(
+            options.reopenReuseMs !== undefined
+                ? options.reopenReuseMs
+                : process.env.HLS_SESSION_REOPEN_REUSE_MS
+        );
+        this.reopenReuseMs = Number.isFinite(configuredReopenReuse) && configuredReopenReuse >= 0
+            ? configuredReopenReuse
+            : DEFAULT_REOPEN_REUSE_MS;
+        const configuredReopenReuseMinAge = Number(
+            options.reopenReuseMinAgeMs !== undefined
+                ? options.reopenReuseMinAgeMs
+                : process.env.HLS_SESSION_REOPEN_REUSE_MIN_AGE_MS
+        );
+        this.reopenReuseMinAgeMs = Number.isFinite(configuredReopenReuseMinAge) && configuredReopenReuseMinAge >= 0
+            ? configuredReopenReuseMinAge
+            : DEFAULT_REOPEN_REUSE_MIN_AGE_MS;
         this.maxUserAgentLength = Number(options.maxUserAgentLength || 240);
         this._ensureStore();
     }
@@ -130,16 +148,67 @@ class PlaybackSessionStore {
         return removed;
     }
 
-    _matches(session, owner, videoId) {
+    _normalizeTokenScope(tokenScope) {
+        if (tokenScope === undefined) return undefined;
+        const value = safeText(tokenScope || 'direct', 240);
+        if (!value || value === 'direct') return 'direct';
+        if (/^[a-f0-9]{32}$/i.test(value)) return value.toLowerCase();
+        return crypto
+            .createHash('sha256')
+            .update(value)
+            .digest('hex')
+            .slice(0, 32);
+    }
+
+    _normalizeUserAgentForMatch(userAgent) {
+        return safeText(userAgent, this.maxUserAgentLength).toLowerCase();
+    }
+
+    _isReopenEligibleUserAgent(userAgent) {
+        return /\b(exomedia|neonews)\b/i.test(String(userAgent || ''));
+    }
+
+    _createdMs(session) {
+        const parsed = Date.parse(session?.createdAt || '');
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    _activityMs(session, field) {
+        const parsed = Date.parse(session?.[field] || '');
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    _latestReopenEvidence(session) {
+        const candidates = ['variantTouchedAt', 'segmentTouchedAt']
+            .map(field => ({
+                field,
+                value: session?.[field],
+                ms: this._activityMs(session, field)
+            }))
+            .filter(candidate => candidate.ms > 0)
+            .sort((a, b) => b.ms - a.ms);
+        return candidates[0] || null;
+    }
+
+    _markHlsActivity(session, activity, nowIso) {
+        const normalized = safeText(activity || '', 40).toLowerCase();
+        if (normalized === 'master') session.masterTouchedAt = nowIso;
+        if (normalized === 'variant') session.variantTouchedAt = nowIso;
+        if (normalized === 'segment') session.segmentTouchedAt = nowIso;
+    }
+
+    _matches(session, owner, videoId, tokenScope) {
         if (owner !== undefined && session.owner !== owner) return false;
         if (videoId !== undefined && session.videoId !== videoId) return false;
+        const normalizedTokenScope = this._normalizeTokenScope(tokenScope);
+        if (normalizedTokenScope !== undefined && (session.tokenScope || 'direct') !== normalizedTokenScope) return false;
         return true;
     }
 
     _activeSessionsInStore(store, filters = {}, nowMs = Date.now()) {
         return Object.values(store.sessions)
             .filter(session => !this._isExpired(session, nowMs))
-            .filter(session => this._matches(session, filters.owner, filters.videoId));
+            .filter(session => this._matches(session, filters.owner, filters.videoId, filters.tokenScope));
     }
 
     _lastSeenMs(session) {
@@ -149,9 +218,9 @@ class PlaybackSessionStore {
 
     _matchesClient(session, { publicIp, userAgent, fingerprint }) {
         const normalizedPublicIp = safeText(publicIp, 80);
-        const normalizedUserAgent = safeText(userAgent, this.maxUserAgentLength);
+        const normalizedUserAgent = this._normalizeUserAgentForMatch(userAgent);
         if (!normalizedPublicIp || !normalizedUserAgent) return false;
-        if (session.publicIp !== normalizedPublicIp || session.userAgent !== normalizedUserAgent) return false;
+        if (session.publicIp !== normalizedPublicIp || this._normalizeUserAgentForMatch(session.userAgent) !== normalizedUserAgent) return false;
 
         const normalizedFingerprint = fingerprint ? safeText(fingerprint, 240) : null;
         const sessionFingerprint = session.fingerprint || null;
@@ -161,15 +230,46 @@ class PlaybackSessionStore {
         return true;
     }
 
+    _findReopenSession(store, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+        if (!this.reopenReuseMs) return null;
+        if (!this._isReopenEligibleUserAgent(userAgent)) return null;
+        const normalizedTokenScope = this._normalizeTokenScope(tokenScope);
+        const candidates = Object.entries(store.sessions)
+            .filter(([, session]) => this._matches(session, owner, videoId, normalizedTokenScope))
+            .filter(([, session]) => !this._isExpired(session, nowMs))
+            .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint }))
+            .filter(([, session]) => {
+                const evidence = this._latestReopenEvidence(session);
+                if (!fingerprint && !evidence) return false;
+                if (!fingerprint && session.lastReopenEvidenceAt && session.lastReopenEvidenceAt === evidence.value) return false;
+                const reopenWindowMs = Math.min(this.reopenReuseMs, this.ttlMs);
+                const lastSeenAge = nowMs - this._lastSeenMs(session);
+                const createdAge = nowMs - this._createdMs(session);
+                const evidenceAge = evidence ? nowMs - evidence.ms : lastSeenAge;
+                return lastSeenAge >= 0 &&
+                    lastSeenAge <= reopenWindowMs &&
+                    evidenceAge >= this.reopenReuseMinAgeMs &&
+                    evidenceAge <= reopenWindowMs &&
+                    createdAge >= this.reopenReuseMinAgeMs;
+            })
+            .sort(([, a], [, b]) => this._lastSeenMs(b) - this._lastSeenMs(a));
+        if (candidates.length === 0) return null;
+        return {
+            sessionId: candidates[0][0],
+            session: candidates[0][1],
+            expired: false
+        };
+    }
+
     _canReuseClientSession(fingerprint) {
         return Boolean(fingerprint);
     }
 
-    _findReusableRecentSession(store, { owner, videoId, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+    _findReusableRecentSession(store, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
         if (!this.reuseRecentWindowMs) return null;
         if (!this._canReuseClientSession(fingerprint)) return null;
         const candidates = Object.entries(store.sessions)
-            .filter(([, session]) => this._matches(session, owner, videoId))
+            .filter(([, session]) => this._matches(session, owner, videoId, tokenScope))
             .filter(([, session]) => !this._isExpired(session, nowMs))
             .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint }))
             .filter(([, session]) => nowMs - this._lastSeenMs(session) <= this.reuseRecentWindowMs)
@@ -182,11 +282,11 @@ class PlaybackSessionStore {
         };
     }
 
-    _findReusableStaleSession(store, { owner, videoId, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+    _findReusableStaleSession(store, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
         if (!this.reuseStaleAfterMs) return null;
         if (!this._canReuseClientSession(fingerprint)) return null;
         const candidates = Object.entries(store.sessions)
-            .filter(([, session]) => this._matches(session, owner, videoId))
+            .filter(([, session]) => this._matches(session, owner, videoId, tokenScope))
             .filter(([, session]) => !this._isPastRetention(session, nowMs))
             .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint }))
             .filter(([, session]) => nowMs - this._lastSeenMs(session) >= this.reuseStaleAfterMs)
@@ -199,12 +299,12 @@ class PlaybackSessionStore {
         };
     }
 
-    _removeDuplicateClientSessions(store, keepSessionId, { owner, videoId, publicIp, userAgent, fingerprint } = {}) {
+    _removeDuplicateClientSessions(store, keepSessionId, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}) {
         if (!this._canReuseClientSession(fingerprint)) return 0;
         let removed = 0;
         for (const [sessionId, session] of Object.entries(store.sessions)) {
             if (sessionId === keepSessionId) continue;
-            if (!this._matches(session, owner, videoId)) continue;
+            if (!this._matches(session, owner, videoId, tokenScope)) continue;
             if (!this._matchesClient(session, { publicIp, userAgent, fingerprint })) continue;
             delete store.sessions[sessionId];
             removed += 1;
@@ -212,17 +312,24 @@ class PlaybackSessionStore {
         return removed;
     }
 
-    _reuseSession(store, reusable, { owner, videoId, publicIp, userAgent, source, fingerprint }, nowMs, activeCount, limit, code = null) {
+    _reuseSession(store, reusable, { owner, videoId, tokenScope, publicIp, userAgent, source, fingerprint }, nowMs, activeCount, limit, code = null) {
         const nowIso = this._nowIso(nowMs);
+        const reopenEvidence = code === 'reused_reopen' ? this._latestReopenEvidence(reusable.session) : null;
         reusable.session.lastSeenAt = nowIso;
         reusable.session.publicIp = safeText(publicIp, 80);
         reusable.session.userAgent = safeText(userAgent, this.maxUserAgentLength);
         reusable.session.status = 'active';
         reusable.session.source = safeText(source, 80);
         reusable.session.fingerprint = fingerprint ? safeText(fingerprint, 240) : null;
+        reusable.session.tokenScope = this._normalizeTokenScope(tokenScope) || 'direct';
+        if (code === 'reused_reopen') {
+            reusable.session.lastReopenAt = nowIso;
+            if (reopenEvidence?.value) reusable.session.lastReopenEvidenceAt = reopenEvidence.value;
+        }
         const duplicatesRemoved = this._removeDuplicateClientSessions(store, reusable.sessionId, {
             owner,
             videoId,
+            tokenScope,
             publicIp,
             userAgent,
             fingerprint
@@ -237,9 +344,10 @@ class PlaybackSessionStore {
         };
     }
 
-    createSession({ owner, videoId, limit = 0, publicIp = '', userAgent = '', source = 'hls', fingerprint = null } = {}, nowMs = Date.now()) {
+    createSession({ owner, videoId, tokenScope = 'direct', limit = 0, publicIp = '', userAgent = '', source = 'hls', fingerprint = null } = {}, nowMs = Date.now()) {
         const normalizedOwner = safeText(owner, 120);
         const normalizedVideoId = safeText(videoId, 40);
+        const normalizedTokenScope = this._normalizeTokenScope(tokenScope) || 'direct';
         if (!normalizedOwner || !normalizedVideoId) return { ok: false, code: 'invalid_scope' };
         const store = this._readStore();
         const changed = this._pruneExpiredInStore(store, nowMs);
@@ -263,6 +371,7 @@ class PlaybackSessionStore {
         const recentReusable = this._findReusableRecentSession(store, {
             owner: normalizedOwner,
             videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
             publicIp,
             userAgent,
             fingerprint
@@ -271,6 +380,7 @@ class PlaybackSessionStore {
             return this._reuseSession(store, recentReusable, {
                 owner: normalizedOwner,
                 videoId: normalizedVideoId,
+                tokenScope: normalizedTokenScope,
                 publicIp,
                 userAgent,
                 source,
@@ -281,6 +391,7 @@ class PlaybackSessionStore {
         const reusable = this._findReusableStaleSession(store, {
             owner: normalizedOwner,
             videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
             publicIp,
             userAgent,
             fingerprint
@@ -289,11 +400,32 @@ class PlaybackSessionStore {
             return this._reuseSession(store, reusable, {
                 owner: normalizedOwner,
                 videoId: normalizedVideoId,
+                tokenScope: normalizedTokenScope,
                 publicIp,
                 userAgent,
                 source,
                 fingerprint
             }, nowMs, active.length, numericLimit);
+        }
+
+        const reopenReusable = this._findReopenSession(store, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
+        if (reopenReusable) {
+            return this._reuseSession(store, reopenReusable, {
+                owner: normalizedOwner,
+                videoId: normalizedVideoId,
+                tokenScope: normalizedTokenScope,
+                publicIp,
+                userAgent,
+                source,
+                fingerprint
+            }, nowMs, active.length, numericLimit, 'reused_reopen');
         }
 
         if (active.length >= numericLimit) {
@@ -310,6 +442,7 @@ class PlaybackSessionStore {
             return this._reuseSession(store, reusable, {
                 owner: normalizedOwner,
                 videoId: normalizedVideoId,
+                tokenScope: normalizedTokenScope,
                 publicIp,
                 userAgent,
                 source,
@@ -325,8 +458,10 @@ class PlaybackSessionStore {
             sessionId,
             owner: normalizedOwner,
             videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
             createdAt: nowIso,
             lastSeenAt: nowIso,
+            masterServedAt: nowIso,
             publicIp: safeText(publicIp, 80),
             userAgent: safeText(userAgent, this.maxUserAgentLength),
             status: 'active',
@@ -345,7 +480,7 @@ class PlaybackSessionStore {
         };
     }
 
-    touchSession({ sessionId, owner, videoId, publicIp = '', userAgent = '' } = {}, nowMs = Date.now()) {
+    touchSession({ sessionId, owner, videoId, tokenScope, publicIp = '', userAgent = '', hlsActivity = null } = {}, nowMs = Date.now()) {
         const id = String(sessionId || '').trim();
         if (!id) return { ok: false, code: 'missing_session' };
         const store = this._readStore();
@@ -358,6 +493,10 @@ class PlaybackSessionStore {
         }
         if (session.owner !== owner) return { ok: false, code: 'owner_mismatch', session };
         if (session.videoId !== videoId) return { ok: false, code: 'video_mismatch', session };
+        const normalizedTokenScope = this._normalizeTokenScope(tokenScope);
+        if (normalizedTokenScope !== undefined && session.tokenScope && session.tokenScope !== normalizedTokenScope) {
+            return { ok: false, code: 'token_mismatch', session };
+        }
         if (this._isExpired(session, nowMs)) {
             session.status = 'expired';
             this._pruneExpiredInStore(store, nowMs);
@@ -370,9 +509,12 @@ class PlaybackSessionStore {
         session.publicIp = safeText(publicIp, 80);
         session.userAgent = safeText(userAgent, this.maxUserAgentLength);
         session.status = 'active';
+        if (normalizedTokenScope !== undefined) session.tokenScope = normalizedTokenScope || 'direct';
+        this._markHlsActivity(session, hlsActivity, session.lastSeenAt);
         this._removeDuplicateClientSessions(store, id, {
             owner,
             videoId,
+            tokenScope: normalizedTokenScope,
             publicIp,
             userAgent,
             fingerprint: session.fingerprint || null
