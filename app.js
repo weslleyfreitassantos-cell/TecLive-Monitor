@@ -3044,9 +3044,13 @@ function sanitizeServerLogLine(line) {
 }
 
 function readLogTail(filePath, maxBytes) {
-    if (!fs.existsSync(filePath)) return '';
+    return readLogTailInfo(filePath, maxBytes).text;
+}
+
+function readLogTailInfo(filePath, maxBytes) {
+    if (!fs.existsSync(filePath)) return { text: '', mtimeMs: 0 };
     const stats = fs.statSync(filePath);
-    if (!stats.isFile() || stats.size <= 0) return '';
+    if (!stats.isFile() || stats.size <= 0) return { text: '', mtimeMs: 0 };
     const start = Math.max(0, stats.size - maxBytes);
     const length = stats.size - start;
     const buffer = Buffer.alloc(length);
@@ -3057,15 +3061,71 @@ function readLogTail(filePath, maxBytes) {
         fs.closeSync(fd);
     }
     const text = buffer.toString('utf8');
-    return start > 0 ? text.replace(/^[^\n]*(\n|$)/, '') : text;
+    return {
+        text: start > 0 ? text.replace(/^[^\n]*(\n|$)/, '') : text,
+        mtimeMs: stats.mtimeMs
+    };
 }
 
-function parseServerLogLine(line, source, index) {
+function resolveExistingLogPath(candidates) {
+    for (const candidate of candidates) {
+        const filePath = String(candidate || '').trim();
+        if (!filePath) continue;
+        try {
+            const stats = fs.existsSync(filePath) ? fs.statSync(filePath) : null;
+            if (stats?.isFile() && stats.size > 0) return filePath;
+        } catch (_) {
+            // Ignore unreadable candidates and try the next source.
+        }
+    }
+    return '';
+}
+
+function getServerLogSources() {
+    const projectOut = path.join(__dirname, 'logs', 'pm2-out-0.log');
+    const projectErr = path.join(__dirname, 'logs', 'pm2-error-0.log');
+    return [
+        {
+            source: 'out',
+            filePath: resolveExistingLogPath([
+                process.env.SERVER_LOG_OUT_PATH,
+                process.env.PM2_OUT_LOG_PATH,
+                '/root/.pm2/logs/livemonitor-out.log',
+                '/root/.pm2/logs/youtube-monitor-v3-out.log',
+                projectOut
+            ])
+        },
+        {
+            source: 'err',
+            filePath: resolveExistingLogPath([
+                process.env.SERVER_LOG_ERROR_PATH,
+                process.env.PM2_ERROR_LOG_PATH,
+                '/root/.pm2/logs/livemonitor-error.log',
+                '/root/.pm2/logs/youtube-monitor-v3-error.log',
+                projectErr
+            ])
+        }
+    ].filter(file => file.filePath);
+}
+
+function formatServerLogTimestamp(ms, approximate = false) {
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    const date = new Date(ms);
+    const pad = (value, size = 2) => String(value).padStart(size, '0');
+    const formatted = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+        `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    return approximate ? `~ ${formatted}` : formatted;
+}
+
+function parseServerLogLine(line, source, index, fallbackTimestampMs = 0) {
     const sanitized = sanitizeServerLogLine(line);
     const match = sanitized.match(/^(\d{4}-\d{2}-\d{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3}Z|Z)?):?\s*(.*)$/);
-    const timestamp = match ? match[1].replace('T', ' ').replace('Z', '') : '';
+    const timestamp = match
+        ? match[1].replace('T', ' ').replace('Z', '')
+        : formatServerLogTimestamp(fallbackTimestampMs, true);
     const message = match ? match[2] : sanitized;
-    const sortTime = timestamp ? Date.parse(timestamp.replace(' ', 'T')) : 0;
+    const parsedSortTime = match ? Date.parse(timestamp.replace(' ', 'T')) : 0;
+    const sortTime = match ? parsedSortTime : ((Number(fallbackTimestampMs) || 0) + index);
     return {
         timestamp,
         source,
@@ -3078,18 +3138,15 @@ function parseServerLogLine(line, source, index) {
 function getServerLogTimeline(options = {}) {
     const lineLimit = Math.max(20, Math.min(Number(options.lineLimit) || 160, 300));
     const maxBytes = Math.max(32768, Math.min(Number(options.maxBytes) || 256 * 1024, 1024 * 1024));
-    const files = [
-        { source: 'out', filePath: path.join(__dirname, 'logs', 'pm2-out-0.log') },
-        { source: 'err', filePath: path.join(__dirname, 'logs', 'pm2-error-0.log') }
-    ];
+    const files = getServerLogSources();
 
     let index = 0;
     const entries = [];
     for (const file of files) {
-        const text = readLogTail(file.filePath, maxBytes);
+        const { text, mtimeMs } = readLogTailInfo(file.filePath, maxBytes);
         for (const line of text.split(/\r?\n/)) {
             if (!line.trim()) continue;
-            entries.push(parseServerLogLine(line, file.source, index));
+            entries.push(parseServerLogLine(line, file.source, index, mtimeMs));
             index += 1;
         }
     }

@@ -541,6 +541,9 @@ function testDashboardUsesOperationalHealth() {
     assert.ok(html.includes('grid-template-columns: minmax(0, 1fr) auto'));
     assert.ok(appSource.includes("app.get('/api/admin/logs/timeline', isAdminApiAuthenticated"));
     assert.ok(appSource.includes('sanitizeServerLogLine'));
+    assert.ok(appSource.includes('getServerLogSources'));
+    assert.ok(appSource.includes('/root/.pm2/logs/livemonitor-out.log'));
+    assert.ok(appSource.includes('formatServerLogTimestamp'));
     assert.ok(appSource.includes('sanitizeYtdlpArgsForLog'));
     assert.ok(!appSource.includes('runYtdlp args: ${finalArgs.join'));
     assert.ok(appSource.includes('getGlobalExtractionRetryAfterSeconds'));
