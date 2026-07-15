@@ -297,6 +297,67 @@ function testReopenEvidenceIsConsumedOnceUntilNextVariant() {
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 1);
 }
 
+function testLiveSwitchSameNeoNewsDeviceReleasesPreviousLiveSession() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const switched = create(store, { videoId: 'Uk69eKn0Wzc', tokenScope: 'token-b', limit: 1 }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(switched.ok, true);
+    assert.equal(switched.code, 'created');
+    assert.equal(switched.handoffRemoved, 1);
+    assert.equal(store.countActive({ owner: OWNER }, NOW + 5000), 1);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 0);
+    assert.equal(store.countActive({ owner: OWNER, videoId: 'Uk69eKn0Wzc' }, NOW + 5000), 1);
+}
+
+function testLiveSwitchWithoutHlsEvidenceDoesNotReleasePreviousSession() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 2 }, NOW);
+    const switched = create(store, { videoId: 'Uk69eKn0Wzc', tokenScope: 'token-b', limit: 2 }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(switched.ok, true);
+    assert.equal(switched.handoffRemoved, 0);
+    assert.equal(store.countActive({ owner: OWNER }, NOW + 5000), 2);
+}
+
+function testLiveSwitchGenericUserAgentDoesNotReleasePreviousSession() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 2, userAgent: 'VLC/3.0.21 LibVLC/3.0.21' }, NOW);
+    touchVariant(store, first.session, NOW + 2000);
+    const switched = create(store, {
+        videoId: 'Uk69eKn0Wzc',
+        tokenScope: 'token-b',
+        limit: 2,
+        userAgent: 'VLC/3.0.21 LibVLC/3.0.21'
+    }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(switched.ok, true);
+    assert.equal(switched.handoffRemoved, 0);
+    assert.equal(store.countActive({ owner: OWNER }, NOW + 5000), 2);
+}
+
+function testLiveSwitchDifferentClientDoesNotReleasePreviousSession() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 2, fingerprint: 'localIp:192.168.0.10' }, NOW);
+    touchVariant(store, first.session, NOW + 2000);
+    const switched = create(store, {
+        videoId: 'Uk69eKn0Wzc',
+        tokenScope: 'token-b',
+        limit: 2,
+        fingerprint: 'localIp:192.168.0.11'
+    }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(switched.ok, true);
+    assert.equal(switched.handoffRemoved, 0);
+    assert.equal(store.countActive({ owner: OWNER }, NOW + 5000), 2);
+}
+
 function testRecentWindowDoesNotCollapseIndependentOpeningsWithoutFingerprint() {
     const store = createStore({ reuseRecentWindowMs: 90000, reuseStaleAfterMs: 45000 });
     const results = [
@@ -1083,6 +1144,10 @@ async function main() {
     testReopenReuseIsScopedByTokenOwnerAndVideo();
     testExpiredSessionIsNotReusedByReopenWindow();
     testReopenEvidenceIsConsumedOnceUntilNextVariant();
+    testLiveSwitchSameNeoNewsDeviceReleasesPreviousLiveSession();
+    testLiveSwitchWithoutHlsEvidenceDoesNotReleasePreviousSession();
+    testLiveSwitchGenericUserAgentDoesNotReleasePreviousSession();
+    testLiveSwitchDifferentClientDoesNotReleasePreviousSession();
     testRecentWindowDoesNotCollapseIndependentOpeningsWithoutFingerprint();
     testRecentReuseCollapsesDuplicateClientSessions();
     testDuplicateCleanupRequiresFingerprint();

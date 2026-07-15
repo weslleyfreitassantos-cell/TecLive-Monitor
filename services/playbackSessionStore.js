@@ -312,6 +312,22 @@ class PlaybackSessionStore {
         return removed;
     }
 
+    _removeClientSessionsFromOtherLives(store, keepSessionId, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+        if (!this._isReopenEligibleUserAgent(userAgent)) return 0;
+        let removed = 0;
+        for (const [sessionId, session] of Object.entries(store.sessions)) {
+            if (sessionId === keepSessionId) continue;
+            if (session.owner !== owner) continue;
+            if (session.videoId === videoId && (session.tokenScope || 'direct') === (tokenScope || 'direct')) continue;
+            if (this._isExpired(session, nowMs)) continue;
+            if (!this._matchesClient(session, { publicIp, userAgent, fingerprint })) continue;
+            if (!fingerprint && !this._latestReopenEvidence(session)) continue;
+            delete store.sessions[sessionId];
+            removed += 1;
+        }
+        return removed;
+    }
+
     _reuseSession(store, reusable, { owner, videoId, tokenScope, publicIp, userAgent, source, fingerprint }, nowMs, activeCount, limit, code = null) {
         const nowIso = this._nowIso(nowMs);
         const reopenEvidence = code === 'reused_reopen' ? this._latestReopenEvidence(reusable.session) : null;
@@ -470,12 +486,21 @@ class PlaybackSessionStore {
         };
 
         store.sessions[sessionId] = session;
+        const handoffRemoved = this._removeClientSessionsFromOtherLives(store, sessionId, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
         this._writeStore(store);
         return {
             ok: true,
             code: 'created',
             session,
             active: active.length + 1,
+            handoffRemoved,
             limit: numericLimit
         };
     }
