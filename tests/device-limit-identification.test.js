@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
 
 const {
     PlaybackSessionStore,
@@ -510,6 +511,292 @@ function testSanitizationAndPreview() {
     assert.equal(preview, '12345678...');
 }
 
+function sliceBetween(source, startMarker, endMarker) {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    assert.ok(start >= 0, `missing start marker: ${startMarker}`);
+    assert.ok(end > start, `missing end marker: ${endMarker}`);
+    return source.slice(start, end);
+}
+
+function loadHlsContinuityHooks() {
+    const app = fs.readFileSync(APP_PATH, 'utf8');
+    const helperCore = sliceBetween(app, 'function normalizeHlsStateKeyPart', 'async function fetchM3u8WithCache');
+    const parserCore = sliceBetween(app, 'function parseM3u8Info', 'function rebuildMediaPlaylistWindow');
+    const masterCore = sliceBetween(app, 'function makeBandwidthForHeight', 'function isTruthyQueryValue');
+    const capturedLogs = [];
+    const context = {
+        require,
+        crypto: require('crypto'),
+        URL,
+        URLSearchParams,
+        encodeURIComponent,
+        process: { env: {} },
+        console: {
+            log: (...args) => capturedLogs.push(args.join(' ')),
+            warn: (...args) => capturedLogs.push(args.join(' ')),
+            error: (...args) => capturedLogs.push(args.join(' '))
+        },
+        capturedLogs,
+        activeSessions: []
+    };
+    vm.createContext(context);
+    vm.runInContext(`
+        const DEFAULT_PUBLIC_HLS_BASE_URL = 'https://livemonitor.vps-kinghost.net';
+        const HLS_SESSION_UPSTREAM_STUCK_MS = 45000;
+        const HLS_SESSION_DISCONTINUITY_RESET_MS = 12000;
+        const HLS_EXOMEDIA_SINGLE_VARIANT_MASTER = true;
+        const HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT = 720;
+        const STALE_SERVE_MAX_AGE_MS = 60000;
+        const playbackVariantUrlPins = new Map();
+        const hlsSessionVariantState = new Map();
+        const hlsSessionVariantPins = new Map();
+        const m3u8CacheContent = new Map();
+        const m3u8CachePromises = new Map();
+        const lastServedSequence = new Map();
+        const lastGoodM3u8 = new Map();
+        const hlsMediaPlaylistHistory = new Map();
+        const playbackSessions = {
+            listActive(filters) {
+                return activeSessions.filter(session => (
+                    (!filters.owner || session.owner === filters.owner) &&
+                    (!filters.videoId || session.videoId === filters.videoId)
+                ));
+            }
+        };
+        function sessionPreview(sessionId) {
+            const value = String(sessionId || '');
+            return value.length > 8 ? value.slice(0, 8) + '...' : value || 'n/a';
+        }
+        ${helperCore}
+        ${parserCore}
+        ${masterCore}
+        globalThis.__hooks = {
+            capturedLogs,
+            setActiveSessions(value) { activeSessions = value; },
+            getPlaybackVariantPinKey,
+            rememberSessionVariantPin,
+            getSessionVariantPinnedUrl,
+            markSessionVariantRefreshRejected,
+            clearSessionVariantState,
+            clearHlsSessionVariantStateFor,
+            pruneHlsSessionVariantState,
+            updateSessionVariantState,
+            getPlaylistSnapshot,
+            playlistsHaveOverlap,
+            shouldRefreshStuckSessionVariant,
+            buildPlaybackSessionMaster,
+            isExoCompatibleUserAgent,
+            shouldUseSingleVariantMaster,
+            logVariantSessionSnapshot,
+            hlsSessionVariantState,
+            hlsSessionVariantPins
+        };
+    `, context);
+    return context.__hooks;
+}
+
+function mediaPlaylist(sequence, segmentNames, options = {}) {
+    const lines = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:3',
+        `#EXT-X-TARGETDURATION:${options.targetDuration || 6}`,
+        `#EXT-X-MEDIA-SEQUENCE:${sequence}`
+    ];
+    segmentNames.forEach((name, index) => {
+        if (options.discontinuityAt === index) lines.push('#EXT-X-DISCONTINUITY');
+        lines.push('#EXTINF:6.000,', `https://media.example.test/${name}.ts?sig=secret-${name}`);
+    });
+    return `${lines.join('\n')}\n`;
+}
+
+function countVariants(master) {
+    return (String(master).match(/#EXT-X-STREAM-INF/g) || []).length;
+}
+
+function testHlsContinuityExecutableChecks() {
+    const hls = loadHlsContinuityHooks();
+    const first = mediaPlaylist(10, ['a', 'b', 'c']);
+    const overlap = mediaPlaylist(12, ['c', 'd', 'e']);
+    const continuous = mediaPlaylist(13, ['d', 'e', 'f']);
+    const regression = mediaPlaylist(9, ['x', 'y']);
+    const jump = mediaPlaylist(30, ['z', 'w']);
+    const discontinuity = mediaPlaylist(13, ['d', 'e'], { discontinuityAt: 0 });
+    const firstSnapshot = hls.getPlaylistSnapshot(first, 'https://upstream-a.example.test/live.m3u8?sig=secret');
+
+    const key720 = hls.getPlaybackVariantPinKey('VID123', 720, 'session-a', 'owner-a', 'token-a');
+    const key720Again = hls.getPlaybackVariantPinKey('VID123', 720, 'session-a', 'owner-a', 'token-a');
+    const key720OtherSession = hls.getPlaybackVariantPinKey('VID123', 720, 'session-b', 'owner-a', 'token-a');
+    const key480 = hls.getPlaybackVariantPinKey('VID123', 480, 'session-a', 'owner-a', 'token-a');
+    const keyOtherOwner = hls.getPlaybackVariantPinKey('VID123', 720, 'session-a', 'owner-b', 'token-a');
+    const keyOtherToken = hls.getPlaybackVariantPinKey('VID123', 720, 'session-a', 'owner-a', 'token-b');
+    assert.equal(key720, key720Again);
+    assert.notEqual(key720, key720OtherSession);
+    assert.notEqual(key720, key480);
+    assert.notEqual(key720, keyOtherOwner);
+    assert.notEqual(key720, keyOtherToken);
+
+    hls.rememberSessionVariantPin(key720, 'https://manifest.googlevideo.com/a.m3u8?sig=secret', {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 720,
+        sessionId: 'session-a'
+    });
+    assert.equal(hls.getSessionVariantPinnedUrl(key720), 'https://manifest.googlevideo.com/a.m3u8?sig=secret');
+
+    hls.updateSessionVariantState(key720, {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 720,
+        sessionId: 'session-a',
+        upstreamUrl: 'https://manifest.googlevideo.com/a.m3u8?sig=secret',
+        snapshot: firstSnapshot,
+        source: 'current'
+    });
+    const stored = hls.hlsSessionVariantState.get(key720);
+    assert.equal(stored.upstreamIdentityHash.length, 12);
+    assert.equal(stored.lastServedSequence, 10);
+    assert.equal(stored.targetDuration, 6);
+    assert.ok(!Object.prototype.hasOwnProperty.call(stored, 'upstreamUrl'));
+    assert.ok(!Object.prototype.hasOwnProperty.call(stored, 'sessionId'));
+
+    assert.equal(hls.playlistsHaveOverlap(firstSnapshot, hls.getPlaylistSnapshot(overlap, 'https://upstream-a.example.test/live.m3u8')), true);
+    assert.equal(hls.playlistsHaveOverlap(firstSnapshot, hls.getPlaylistSnapshot(continuous, 'https://upstream-a.example.test/live.m3u8')), true);
+    assert.equal(hls.playlistsHaveOverlap(firstSnapshot, hls.getPlaylistSnapshot(regression, 'https://upstream-a.example.test/live.m3u8')), false);
+    assert.equal(hls.playlistsHaveOverlap(firstSnapshot, hls.getPlaylistSnapshot(jump, 'https://upstream-b.example.test/live.m3u8')), false);
+    assert.equal(hls.getPlaylistSnapshot(discontinuity, 'https://upstream-a.example.test/live.m3u8').hasDiscontinuity, true);
+
+    const beforeRejectedPin = hls.getSessionVariantPinnedUrl(key720);
+    hls.markSessionVariantRefreshRejected(key720, Date.parse('2026-07-15T12:00:00.000Z'));
+    assert.equal(hls.getSessionVariantPinnedUrl(key720), beforeRejectedPin);
+    assert.ok(hls.hlsSessionVariantPins.get(key720).discontinuityUntil > Date.parse('2026-07-15T12:00:00.000Z'));
+
+    hls.clearSessionVariantState(key720);
+    assert.equal(hls.getSessionVariantPinnedUrl(key720), null);
+    hls.rememberSessionVariantPin(key720, 'https://manifest.googlevideo.com/b.m3u8?sig=secret', {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 720,
+        sessionId: 'session-a'
+    });
+    assert.equal(hls.getSessionVariantPinnedUrl(key720), 'https://manifest.googlevideo.com/b.m3u8?sig=secret');
+
+    hls.updateSessionVariantState(key720, {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 720,
+        sessionId: 'session-a',
+        upstreamUrl: 'https://manifest.googlevideo.com/b.m3u8?sig=secret',
+        snapshot: firstSnapshot,
+        source: 'current'
+    });
+    hls.setActiveSessions([{ sessionId: 'session-a', owner: 'owner-a', videoId: 'VID123' }]);
+    assert.equal(hls.pruneHlsSessionVariantState(Date.now()), 0);
+    hls.setActiveSessions([]);
+    assert.ok(hls.pruneHlsSessionVariantState(Date.now()) >= 1);
+    assert.equal(hls.hlsSessionVariantState.has(key720), false);
+
+    hls.rememberSessionVariantPin(key720, 'https://manifest.googlevideo.com/c.m3u8?sig=secret', {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 720,
+        sessionId: 'session-a'
+    });
+    hls.updateSessionVariantState(key720, {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 720,
+        sessionId: 'session-a',
+        upstreamUrl: 'https://manifest.googlevideo.com/c.m3u8?sig=secret',
+        snapshot: firstSnapshot,
+        source: 'current'
+    });
+    hls.clearHlsSessionVariantStateFor({ owner: 'owner-a', videoId: 'VID123', token: 'token-a' });
+    assert.equal(hls.hlsSessionVariantState.has(key720), false);
+    assert.equal(hls.getSessionVariantPinnedUrl(key720), null);
+
+    hls.updateSessionVariantState(key480, {
+        videoId: 'VID123',
+        owner: 'owner-a',
+        token: 'token-a',
+        quality: 480,
+        sessionId: 'session-a',
+        upstreamUrl: 'https://manifest.googlevideo.com/480.m3u8?sig=secret',
+        snapshot: firstSnapshot,
+        source: 'current'
+    });
+    hls.clearHlsSessionVariantStateFor({ owner: 'owner-a', videoId: 'VID123' });
+    assert.equal(hls.hlsSessionVariantState.has(key480), false);
+
+    const monitor = {
+        _playlistUrls: {
+            720: 'https://video.example.test/720.m3u8',
+            480: 'https://video.example.test/480.m3u8',
+            360: 'https://video.example.test/360.m3u8'
+        }
+    };
+    const neoNewsReq = { headers: { 'user-agent': 'NeoNews ExoMedia 4.3.0 / Android 14' } };
+    const lowercaseReq = { headers: { 'user-agent': 'exomedia stick hd' } };
+    const vlcReq = { headers: { 'user-agent': 'VLC/3.0.21 LibVLC/3.0.21' } };
+    assert.equal(hls.shouldUseSingleVariantMaster(neoNewsReq), true);
+    assert.equal(hls.shouldUseSingleVariantMaster(lowercaseReq), true);
+    assert.equal(hls.shouldUseSingleVariantMaster(vlcReq), false);
+    const single720 = hls.buildPlaybackSessionMaster(monitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: null,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.example.test',
+        singleVariant: true
+    });
+    assert.equal(countVariants(single720), 1);
+    assert.ok(single720.includes('max=720'));
+    const single480 = hls.buildPlaybackSessionMaster(monitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: 480,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.example.test',
+        singleVariant: true
+    });
+    assert.equal(countVariants(single480), 1);
+    assert.ok(single480.includes('max=480'));
+    const adaptive = hls.buildPlaybackSessionMaster(monitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: null,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.example.test',
+        singleVariant: false
+    });
+    assert.equal(countVariants(adaptive), 3);
+
+    hls.logVariantSessionSnapshot('VID123', {
+        owner: 'owner-a',
+        sessionId: 'session-a-secret',
+        quality: 720,
+        upstreamUrl: 'https://manifest.googlevideo.com/api/manifest/hls_playlist/secret?sig=signed-token',
+        snapshot: firstSnapshot,
+        source: 'current'
+    });
+    const logOutput = hls.capturedLogs.join('\n');
+    assert.ok(!logOutput.includes('signed-token'));
+    assert.ok(!logOutput.includes('manifest.googlevideo.com'));
+    assert.ok(!logOutput.includes('session-a-secret'));
+}
+
 function testAppIntegrationStaticChecks() {
     const app = fs.readFileSync(APP_PATH, 'utf8');
     const storeSource = fs.readFileSync(path.join(__dirname, '..', 'services', 'playbackSessionStore.js'), 'utf8');
@@ -549,15 +836,40 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('baseUrl: playbackManifestBaseUrl'));
     assert.ok(app.includes('PLAYBACK_VARIANT_PIN_TTL_MS'));
     assert.ok(app.includes('HLS_EXTENDED_WINDOW_SEGMENTS'));
+    assert.ok(app.includes('HLS_SESSION_UPSTREAM_STUCK_MS'));
+    assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_MASTER'));
+    assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT'));
     assert.ok(app.includes('hlsMediaPlaylistHistory'));
+    assert.ok(app.includes('hlsSessionVariantState'));
+    assert.ok(app.includes('function getPlaylistSnapshot(content, sourceUrl)'));
+    assert.ok(app.includes('function playlistsHaveOverlap(previousSnapshot, nextSnapshot)'));
+    assert.ok(app.includes('function updateSessionVariantState(stateKey'));
+    assert.ok(app.includes('function isExoCompatibleUserAgent(req)'));
+    assert.ok(app.includes('function shouldUseSingleVariantMaster(req)'));
+    assert.ok(app.includes('singleVariant: singleVariantMaster'));
     assert.ok(app.includes('extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe)'));
     assert.ok(app.includes('Sem stale seguro; servindo playlist real sem forçar MEDIA-SEQUENCE.'));
     assert.ok(app.includes('const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 2000;'));
     assert.ok(app.includes('const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 0;'));
     assert.ok(app.includes('if (!PLAYBACK_VARIANT_PIN_TTL_MS) return currentUrl;'));
-    assert.ok(app.includes('getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId)'));
+    assert.ok(app.includes('getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId, trackingOwner, routeContext.token || null)'));
+    assert.ok(app.includes('hlsSessionVariantPins'));
+    assert.ok(app.includes('markSessionVariantRefreshRejected(pinKey)'));
+    assert.ok(app.includes('clearHlsSessionVariantStateFor({ owner, videoId })'));
     assert.ok(app.includes('getPinnedVariantUrl(pinKey, playlistUrl)'));
-    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, cacheKey, result.content, monitor.lastMediaSequence)'));
+    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence)'));
+    assert.ok(app.includes('logProxyAccess(stabilityKey, {'));
+    assert.ok(app.includes("source: 'refresh-rejected'"));
+    assert.ok(app.includes("reason: 'no_overlap'"));
+    assert.ok(app.includes('getUpstreamIdentityHash(sourceUrl)'));
+    assert.ok(app.includes('sessionPreview(sessionId)'));
+    const variantBlock = app.slice(
+        app.indexOf('if (urlMaxHeight && monitor._playlistUrls && monitor._playlistUrls[urlMaxHeight])'),
+        app.indexOf('// Se não for requisição de qualidade, verifica se é o master')
+    );
+    assert.ok(!variantBlock.includes('runYtdlp'));
+    assert.ok(!variantBlock.includes('converter.convert'));
+    assert.ok(!variantBlock.includes('fs.writeFileSync'));
     assert.ok(app.includes("return sendHlsError(res, 503, 'stream_temporarily_unavailable'"));
     assert.ok(app.includes("return sendHlsError(res, 410, 'token_gone')"));
     assert.ok(app.includes('isRevokedTokenInfo(info)'));
@@ -616,6 +928,7 @@ async function main() {
     testAtomicWriteUsesTempThenRenameAndNoSensitivePayload();
     testDashboardCountsSessions();
     testSanitizationAndPreview();
+    testHlsContinuityExecutableChecks();
     testAppIntegrationStaticChecks();
     testHlsPlaybackCompatibilityStaticChecks();
     console.log('Device limit identification tests OK');

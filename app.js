@@ -210,6 +210,11 @@ function isRevokedTokenInfo(info) {
 function revokeToken(token, reason = 'gone') {
     const existing = tokenMap[token];
     if (!existing) return false;
+    clearHlsSessionVariantStateFor({
+        owner: existing.owner || null,
+        videoId: existing.videoId || null,
+        token
+    });
     tokenMap[token] = {
         ...existing,
         revokedAt: existing.revokedAt || new Date().toISOString(),
@@ -421,6 +426,7 @@ setInterval(() => {
     }
     prunePlaybackVariantUrlPins();
     pruneHlsMediaPlaylistHistory();
+    pruneHlsSessionVariantState();
 }, Math.max(30000, Math.min(playbackSessions.ttlMs, 60000)));
 
 function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
@@ -826,6 +832,10 @@ const HLS_SEGMENT_PROXY_MODE = String(process.env.HLS_SEGMENT_PROXY_MODE || 'aut
 const HLS_SEGMENT_PROXY_TTL_MS = parseInt(process.env.HLS_SEGMENT_PROXY_TTL_MS, 10) || 3 * 60 * 1000;
 const HLS_EXTENDED_WINDOW_SEGMENTS = parseInt(process.env.HLS_EXTENDED_WINDOW_SEGMENTS, 10) || 7;
 const HLS_COMPAT_TARGET_DURATION = parseInt(process.env.HLS_COMPAT_TARGET_DURATION, 10) || 8;
+const HLS_SESSION_UPSTREAM_STUCK_MS = parseInt(process.env.HLS_SESSION_UPSTREAM_STUCK_MS, 10) || 45000;
+const HLS_SESSION_DISCONTINUITY_RESET_MS = parseInt(process.env.HLS_SESSION_DISCONTINUITY_RESET_MS, 10) || 12000;
+const HLS_EXOMEDIA_SINGLE_VARIANT_MASTER = String(process.env.HLS_EXOMEDIA_SINGLE_VARIANT_MASTER || 'true').toLowerCase() !== 'false';
+const HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT = parseInt(process.env.HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT, 10) || 720;
 
 const REFRESH_WAIT_MS = 20000; // Aumentado para 20s
 const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000; // 1 minuto
@@ -834,6 +844,8 @@ const lastGoodM3u8 = new Map();
 const playbackVariantUrlPins = new Map();
 const hlsSegmentProxyEntries = new Map();
 const hlsMediaPlaylistHistory = new Map();
+const hlsSessionVariantState = new Map();
+const hlsSessionVariantPins = new Map();
 
 function rememberGoodM3u8(videoId, content) {
     const info = parseM3u8Info(content);
@@ -873,9 +885,18 @@ function prunePlaybackVariantUrlPins(now = Date.now()) {
     return removed;
 }
 
-function getPlaybackVariantPinKey(videoId, height, sessionId) {
+function normalizeHlsStateKeyPart(value, fallback = 'none') {
+    const normalized = String(value || '').trim().replace(/[^a-z0-9._-]/ig, '_').slice(0, 80);
+    return normalized || fallback;
+}
+
+function getPlaybackVariantPinKey(videoId, height, sessionId, owner = null, token = null) {
     if (!videoId || !height || !sessionId) return null;
-    return `${videoId}:${height}:${sessionId}`;
+    const safeVideoId = normalizeHlsStateKeyPart(videoId, 'video');
+    const safeHeight = Number.isFinite(Number(height)) ? String(Number(height)) : 'auto';
+    const ownerHash = owner ? getShortHash(owner, 12) : 'public';
+    const tokenHash = token ? getShortHash(token, 12) : 'direct';
+    return `${safeVideoId}:${ownerHash}:${tokenHash}:${safeHeight}:${getShortHash(sessionId, 16)}`;
 }
 
 function getPinnedVariantUrl(pinKey, currentUrl) {
@@ -908,6 +929,306 @@ function rememberPinnedVariantUrl(pinKey, url) {
 
 function clearPinnedVariantUrl(pinKey) {
     if (pinKey) playbackVariantUrlPins.delete(pinKey);
+}
+
+function getSessionVariantPin(pinKey) {
+    if (!pinKey) return null;
+    return hlsSessionVariantPins.get(pinKey) || null;
+}
+
+function getSessionVariantPinnedUrl(pinKey) {
+    return getSessionVariantPin(pinKey)?.url || null;
+}
+
+function rememberSessionVariantPin(pinKey, url, metadata = {}) {
+    if (!pinKey || !url) return null;
+    const now = Date.now();
+    const existing = hlsSessionVariantPins.get(pinKey);
+    const entry = {
+        url,
+        videoId: metadata.videoId || existing?.videoId || null,
+        owner: metadata.owner || existing?.owner || null,
+        tokenHash: metadata.token ? getShortHash(metadata.token, 12) : (existing?.tokenHash || 'direct'),
+        quality: metadata.quality || existing?.quality || null,
+        sessionHash: metadata.sessionId ? getShortHash(metadata.sessionId, 16) : (existing?.sessionHash || null),
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        discontinuityUntil: existing?.discontinuityUntil || 0,
+        refreshRejectedAt: existing?.refreshRejectedAt || 0,
+        refreshRejectedCount: existing?.refreshRejectedCount || 0
+    };
+    hlsSessionVariantPins.set(pinKey, entry);
+    return entry;
+}
+
+function markSessionVariantRefreshRejected(pinKey, now = Date.now()) {
+    if (!pinKey) return null;
+    const existing = hlsSessionVariantPins.get(pinKey) || {};
+    const entry = {
+        ...existing,
+        updatedAt: now,
+        refreshRejectedAt: now,
+        refreshRejectedCount: (Number(existing.refreshRejectedCount) || 0) + 1,
+        discontinuityUntil: now + HLS_SESSION_DISCONTINUITY_RESET_MS
+    };
+    hlsSessionVariantPins.set(pinKey, entry);
+    return entry;
+}
+
+function getShortHash(value, length = 12) {
+    return crypto
+        .createHash('sha256')
+        .update(String(value || ''))
+        .digest('hex')
+        .slice(0, length);
+}
+
+function getUpstreamIdentityHash(url) {
+    return getShortHash(url || 'no-upstream');
+}
+
+function getSegmentIdentity(segment, sourceUrl) {
+    const uriLine = Array.isArray(segment?.lines)
+        ? segment.lines.map(line => String(line || '').trim()).find(line => line && !line.startsWith('#'))
+        : '';
+    if (!uriLine) return `seq:${segment?.sequence}`;
+    try {
+        const parsed = new URL(uriLine, sourceUrl);
+        return getShortHash(`${parsed.origin}${parsed.pathname}`);
+    } catch (_) {
+        return getShortHash(uriLine.split('?')[0]);
+    }
+}
+
+function getPlaylistSnapshot(content, sourceUrl) {
+    const text = String(content || '');
+    const parsed = parseMediaPlaylistWindow(text);
+    const targetMatch = text.match(/^#EXT-X-TARGETDURATION:(\d+)/m);
+    const targetDuration = targetMatch ? parseInt(targetMatch[1], 10) : null;
+    const discontinuityCount = (text.match(/^#EXT-X-DISCONTINUITY\b/gm) || []).length;
+    if (!parsed) {
+        const info = parseM3u8Info(text);
+        return {
+            mediaSequence: info.sequence,
+            lastSequence: info.lastSequence,
+            segmentCount: info.segments,
+            targetDuration: Number.isFinite(targetDuration) ? targetDuration : null,
+            discontinuityCount,
+            hasDiscontinuity: discontinuityCount > 0,
+            segments: [],
+            firstSegment: null,
+            lastSegment: null
+        };
+    }
+    const segments = parsed.segments.map(segment => ({
+        sequence: segment.sequence,
+        identity: getSegmentIdentity(segment, sourceUrl)
+    }));
+    return {
+        mediaSequence: parsed.mediaSequence,
+        lastSequence: segments.length > 0 ? segments[segments.length - 1].sequence : parsed.mediaSequence,
+        segmentCount: segments.length,
+        targetDuration: Number.isFinite(targetDuration) ? targetDuration : null,
+        discontinuityCount,
+        hasDiscontinuity: discontinuityCount > 0,
+        segments,
+        firstSegment: segments[0]?.identity || null,
+        lastSegment: segments[segments.length - 1]?.identity || null
+    };
+}
+
+function playlistsHaveOverlap(previousSnapshot, nextSnapshot) {
+    if (!previousSnapshot || !nextSnapshot) return true;
+    const previousSegments = Array.isArray(previousSnapshot.segments) ? previousSnapshot.segments : [];
+    const nextSegments = Array.isArray(nextSnapshot.segments) ? nextSnapshot.segments : [];
+    if (previousSegments.length === 0 || nextSegments.length === 0) return true;
+
+    if (
+        Number.isFinite(Number(previousSnapshot.mediaSequence)) &&
+        Number.isFinite(Number(nextSnapshot.mediaSequence)) &&
+        Number(nextSnapshot.mediaSequence) < Number(previousSnapshot.mediaSequence)
+    ) {
+        return false;
+    }
+
+    const previousIdentities = new Set(previousSegments.map(segment => segment.identity).filter(Boolean));
+    if (nextSegments.some(segment => segment.identity && previousIdentities.has(segment.identity))) {
+        return true;
+    }
+
+    const previousLast = previousSegments[previousSegments.length - 1].sequence;
+    const nextFirst = nextSegments[0].sequence;
+    return Number.isFinite(previousLast) && Number.isFinite(nextFirst) && nextFirst === previousLast + 1;
+}
+
+function shouldRefreshStuckSessionVariant(state, snapshot, now = Date.now()) {
+    if (!state || !snapshot || snapshot.mediaSequence === null || snapshot.mediaSequence === undefined) return false;
+    const lastServedSequence = Number(state.lastServedSequence);
+    if (!Number.isFinite(lastServedSequence)) return false;
+    if (snapshot.mediaSequence > lastServedSequence) return false;
+    return now - (Number(state.lastAdvanceAt || state.updatedAt || 0)) > HLS_SESSION_UPSTREAM_STUCK_MS;
+}
+
+function updateSessionVariantState(stateKey, {
+    videoId,
+    owner,
+    quality,
+    sessionId,
+    token,
+    upstreamUrl,
+    snapshot,
+    source
+}) {
+    if (!stateKey || !snapshot) return null;
+    const now = Date.now();
+    const existing = hlsSessionVariantState.get(stateKey);
+    const previousSequence = Number(existing?.lastServedSequence);
+    const currentSequence = Number(snapshot.mediaSequence);
+    const advanced = Number.isFinite(currentSequence) && (!Number.isFinite(previousSequence) || currentSequence > previousSequence);
+    const state = {
+        videoId,
+        owner,
+        tokenHash: token ? getShortHash(token, 12) : 'direct',
+        quality,
+        sessionHash: sessionId ? getShortHash(sessionId, 16) : null,
+        upstreamIdentityHash: getUpstreamIdentityHash(upstreamUrl),
+        lastSnapshot: {
+            mediaSequence: snapshot.mediaSequence,
+            lastSequence: snapshot.lastSequence,
+            segmentCount: snapshot.segmentCount,
+            targetDuration: snapshot.targetDuration,
+            discontinuityCount: snapshot.discontinuityCount,
+            hasDiscontinuity: snapshot.hasDiscontinuity,
+            segments: snapshot.segments,
+            firstSegment: snapshot.firstSegment,
+            lastSegment: snapshot.lastSegment
+        },
+        lastServedSequence: snapshot.mediaSequence,
+        lastServedSegments: snapshot.segments,
+        targetDuration: snapshot.targetDuration,
+        lastAdvanceAt: advanced ? now : (existing?.lastAdvanceAt || now),
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        source
+    };
+    hlsSessionVariantState.set(stateKey, state);
+    return state;
+}
+
+function clearSessionVariantState(stateKey) {
+    if (!stateKey) return;
+    hlsSessionVariantState.delete(stateKey);
+    hlsSessionVariantPins.delete(stateKey);
+}
+
+function pruneHlsSessionVariantState(now = Date.now()) {
+    let removed = 0;
+    const maxAgeMs = Math.max(5 * 60 * 1000, STALE_SERVE_MAX_AGE_MS * 4);
+    const activeSessionHashesByScope = new Map();
+    const isSessionStillActive = (state) => {
+        if (!state?.owner || !state?.videoId || !state?.sessionHash) return true;
+        const scopeKey = `${state.owner}:${state.videoId}`;
+        if (!activeSessionHashesByScope.has(scopeKey)) {
+            const activeHashes = new Set(
+                playbackSessions.listActive({ owner: state.owner, videoId: state.videoId }, now)
+                    .map(session => getShortHash(session.sessionId, 16))
+            );
+            activeSessionHashesByScope.set(scopeKey, activeHashes);
+        }
+        return activeSessionHashesByScope.get(scopeKey).has(state.sessionHash);
+    };
+    for (const [key, state] of hlsSessionVariantState.entries()) {
+        if (!state || now - (Number(state.updatedAt) || 0) > maxAgeMs || !isSessionStillActive(state)) {
+            hlsSessionVariantState.delete(key);
+            hlsSessionVariantPins.delete(key);
+            removed += 1;
+        }
+    }
+    for (const [key, pin] of hlsSessionVariantPins.entries()) {
+        if (!pin || now - (Number(pin.updatedAt) || 0) > maxAgeMs || !hlsSessionVariantState.has(key)) {
+            hlsSessionVariantPins.delete(key);
+            removed += 1;
+        }
+    }
+    return removed;
+}
+
+function clearHlsSessionVariantStateFor({ owner = null, videoId = null, token = null, sessionId = null } = {}) {
+    const tokenHash = token ? getShortHash(token, 12) : null;
+    const sessionHash = sessionId ? getShortHash(sessionId, 16) : null;
+    let removed = 0;
+    const matches = (entry) => {
+        if (!entry) return false;
+        if (owner !== null && entry.owner !== owner) return false;
+        if (videoId !== null && entry.videoId !== videoId) return false;
+        if (tokenHash !== null && entry.tokenHash !== tokenHash) return false;
+        if (sessionHash !== null && entry.sessionHash !== sessionHash) return false;
+        return true;
+    };
+    for (const [key, state] of hlsSessionVariantState.entries()) {
+        if (matches(state)) {
+            hlsSessionVariantState.delete(key);
+            hlsSessionVariantPins.delete(key);
+            removed += 1;
+        }
+    }
+    for (const [key, pin] of hlsSessionVariantPins.entries()) {
+        if (matches(pin)) {
+            hlsSessionVariantPins.delete(key);
+            removed += 1;
+        }
+    }
+    if (videoId) {
+        const prefix = `${videoId}_`;
+        for (const key of Array.from(m3u8CacheContent.keys())) {
+            if (String(key).startsWith(prefix)) m3u8CacheContent.delete(key);
+        }
+        for (const key of Array.from(m3u8CachePromises.keys())) {
+            if (String(key).startsWith(prefix)) m3u8CachePromises.delete(key);
+        }
+        for (const key of Array.from(lastServedSequence.keys())) {
+            if (String(key).startsWith(videoId)) lastServedSequence.delete(key);
+        }
+        for (const key of Array.from(lastGoodM3u8.keys())) {
+            if (String(key).startsWith(videoId)) lastGoodM3u8.delete(key);
+        }
+        for (const key of Array.from(playbackVariantUrlPins.keys())) {
+            if (String(key).startsWith(videoId)) playbackVariantUrlPins.delete(key);
+        }
+        for (const key of Array.from(hlsMediaPlaylistHistory.keys())) {
+            if (String(key).startsWith(videoId)) hlsMediaPlaylistHistory.delete(key);
+        }
+    }
+    return removed;
+}
+
+function isExoCompatibleUserAgent(req) {
+    const userAgent = String(req?.headers?.['user-agent'] || '').toLowerCase();
+    return /\b(exomedia|neonews)\b/.test(userAgent);
+}
+
+function shouldUseSingleVariantMaster(req) {
+    return HLS_EXOMEDIA_SINGLE_VARIANT_MASTER && isExoCompatibleUserAgent(req);
+}
+
+function logVariantSessionSnapshot(videoId, {
+    owner,
+    sessionId,
+    quality,
+    upstreamUrl,
+    snapshot,
+    source,
+    reason = ''
+}) {
+    const sessionTag = sessionId ? sessionPreview(sessionId) : 'none';
+    const upstreamHash = getUpstreamIdentityHash(upstreamUrl);
+    const reasonText = reason ? ` reason=${reason}` : '';
+    console.log(
+        `[${videoId}] HLS session=${sessionTag} owner=${owner || 'n/a'} q=${quality || 'auto'} ` +
+        `upstream=${upstreamHash} source=${source || 'current'} seq=${snapshot?.mediaSequence ?? 'n/a'} ` +
+        `last=${snapshot?.lastSequence ?? 'n/a'} td=${snapshot?.targetDuration ?? 'n/a'} segs=${snapshot?.segmentCount ?? 'n/a'} ` +
+        `first=${snapshot?.firstSegment || 'n/a'} lastSeg=${snapshot?.lastSegment || 'n/a'}${reasonText}`
+    );
 }
 
 async function fetchM3u8WithCache(videoId, url) {
@@ -1127,7 +1448,7 @@ function relaxLiveMediaPlaylistTiming(content) {
     });
 }
 
-function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, stale, monitorSeq }) {
+function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, stale, monitorSeq, logLabel }) {
     let info = '';
     let lagInfo = '';
     if (content) {
@@ -1153,7 +1474,7 @@ function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, st
         info = ` seq=${sequence} segs=${segments}${anomaly}${lagInfo}`;
     }
     const staleTag = stale ? ` 🕒 STALE(${stale}ms)` : '';
-    console.log(`[${videoId}] 📡 Acesso m3u8: status=${statusCode} cache=${fromCache ? 'HIT' : 'MISS'} ${elapsedMs}ms${info}${staleTag}`);
+    console.log(`[${logLabel || videoId}] 📡 Acesso m3u8: status=${statusCode} cache=${fromCache ? 'HIT' : 'MISS'} ${elapsedMs}ms${info}${staleTag}`);
 }
 
 function stabilizeMediaPlaylist(logVideoId, stabilityKey, content, monitorSeq) {
@@ -1264,7 +1585,8 @@ function buildPlaybackSessionMaster(monitor, {
     requestedMaxHeight,
     fallbackMaxHeight,
     baseUrl,
-    segmentProxy = false
+    segmentProxy = false,
+    singleVariant = false
 }) {
     let heights = getAvailablePlaylistHeights(monitor);
     if (heights.length === 0) {
@@ -1273,8 +1595,17 @@ function buildPlaybackSessionMaster(monitor, {
     if (heights.length === 0 && fallbackMaxHeight) {
         heights = [fallbackMaxHeight];
     }
-    if (requestedMaxHeight && heights.includes(requestedMaxHeight)) {
-        heights = [requestedMaxHeight];
+    if (requestedMaxHeight) {
+        const eligible = heights.filter(height => height <= requestedMaxHeight);
+        heights = eligible.length > 0
+            ? eligible
+            : (heights.length > 0 ? [heights[heights.length - 1]] : heights);
+    }
+    if (singleVariant && heights.length > 1) {
+        const preferred = requestedMaxHeight
+            ? heights[0]
+            : (heights.find(height => height <= HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT) || heights[0]);
+        heights = [preferred];
     }
 
     const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
@@ -1585,6 +1916,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     let activePlaybackSessionId = null;
     const playbackManifestBaseUrl = getPlaybackManifestBaseUrl(req);
     const segmentProxyEnabled = shouldProxyHlsSegments(req);
+    const singleVariantMaster = shouldUseSingleVariantMaster(req);
 
     if (trackingOwner) {
         const clientIp = getRequestIp(req);
@@ -1601,6 +1933,13 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 });
                 if (!touched.ok) {
                     const status = touched.code === 'expired' ? 410 : 403;
+                    if (touched.code === 'expired') {
+                        clearHlsSessionVariantStateFor({
+                            owner: trackingOwner,
+                            videoId,
+                            sessionId: sessionIdFromRequest
+                        });
+                    }
                     console.warn(`[${trackingOwner}:${videoId}] sessao HLS rejeitada (${touched.code}) session=${sessionPreview(sessionIdFromRequest)}`);
                     return sendHlsError(res, status, touched.code === 'expired' ? 'session_expired' : 'session_invalid');
                 }
@@ -1641,7 +1980,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
                     fallbackMaxHeight: finalMaxHeight,
                     baseUrl: playbackManifestBaseUrl,
-                    segmentProxy: segmentProxyEnabled
+                    segmentProxy: segmentProxyEnabled,
+                    singleVariant: singleVariantMaster
                 });
                 return sendHlsManifest(res, sessionMaster, {
                     'X-Playback-Session': sessionPreview(activePlaybackSessionId),
@@ -1662,36 +2002,131 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     if (urlMaxHeight && monitor._playlistUrls && monitor._playlistUrls[urlMaxHeight]) {
         const playlistUrl = monitor._playlistUrls[urlMaxHeight];
         const cacheKey = videoId + '_' + urlMaxHeight;
-        const pinKey = getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId);
-        const pinnedPlaylistUrl = getPinnedVariantUrl(pinKey, playlistUrl);
-        const sourceLabel = pinnedPlaylistUrl === playlistUrl ? 'atual' : 'fixada';
+        const pinKey = getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId, trackingOwner, routeContext.token || null);
+        const sessionVariantState = pinKey ? hlsSessionVariantState.get(pinKey) : null;
+        const sessionVariantPin = getSessionVariantPin(pinKey);
+        // If a refreshed upstream has no continuity with the current session, give
+        // ExoPlayer a short 503 window, then reset the session pin on the next try.
+        if (sessionVariantPin?.discontinuityUntil && Date.now() < sessionVariantPin.discontinuityUntil) {
+            logProxyAccess(pinKey || cacheKey, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart, logLabel: cacheKey });
+            return sendHlsError(res, 503, 'stream_temporarily_unavailable', {
+                'Retry-After': '2'
+            });
+        }
+        if (sessionVariantPin?.discontinuityUntil && Date.now() >= sessionVariantPin.discontinuityUntil) {
+            clearSessionVariantState(pinKey);
+        }
+        const pinnedPlaylistUrl = getSessionVariantPinnedUrl(pinKey) || getPinnedVariantUrl(pinKey, playlistUrl);
+        const sourceLabel = getSessionVariantPinnedUrl(pinKey)
+            ? 'fixada'
+            : (pinnedPlaylistUrl === playlistUrl ? 'atual' : 'fixada');
         console.log(`[${videoId}] 🎯 Servindo playlist de qualidade ${urlMaxHeight}p (${sourceLabel}) diretamente do YouTube`);
+        const fetchVariantPlaylist = async (sourceUrl, source) => {
+            const upstreamHash = getUpstreamIdentityHash(sourceUrl);
+            const variantCacheKey = `${cacheKey}_${upstreamHash}`;
+            const result = await fetchM3u8WithCache(variantCacheKey, sourceUrl);
+            return {
+                result,
+                sourceUrl,
+                source,
+                snapshot: getPlaylistSnapshot(result.content, sourceUrl)
+            };
+        };
         try {
-            // Remove o cache existente para forçar um fetch fresco
-            if (m3u8CacheContent.has(cacheKey)) {
-                const cached = m3u8CacheContent.get(cacheKey);
-                if (Date.now() - cached.fetchedAt > M3U8_CACHE_TTL) {
-                    m3u8CacheContent.delete(cacheKey);
-                    m3u8CachePromises.delete(cacheKey);
-                }
-            }
-            let result;
             let playlistSourceUrl = pinnedPlaylistUrl;
+            let variant;
             try {
-                result = await fetchM3u8WithCache(cacheKey, playlistSourceUrl);
+                variant = await fetchVariantPlaylist(playlistSourceUrl, getSessionVariantPinnedUrl(pinKey) ? 'pinned' : 'current');
+
+                const state = pinKey ? hlsSessionVariantState.get(pinKey) : null;
+                if (
+                    state &&
+                    playlistSourceUrl !== playlistUrl &&
+                    shouldRefreshStuckSessionVariant(state, variant.snapshot)
+                ) {
+                    console.warn(`[${videoId}] Playlist ${urlMaxHeight}p fixada parada; testando URL atual sem trocar silenciosamente.`);
+                    const refreshed = await fetchVariantPlaylist(playlistUrl, 'refresh');
+                    if (!playlistsHaveOverlap(state.lastSnapshot, refreshed.snapshot)) {
+                        logVariantSessionSnapshot(videoId, {
+                            owner: trackingOwner,
+                            sessionId: activePlaybackSessionId,
+                            quality: urlMaxHeight,
+                            upstreamUrl: playlistUrl,
+                            snapshot: refreshed.snapshot,
+                            source: 'refresh-rejected',
+                            reason: 'no_overlap'
+                        });
+                        logProxyAccess(pinKey || cacheKey, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart, logLabel: cacheKey });
+                        markSessionVariantRefreshRejected(pinKey);
+                        return sendHlsError(res, 503, 'stream_temporarily_unavailable', {
+                            'Retry-After': '2'
+                        });
+                    }
+                    playlistSourceUrl = playlistUrl;
+                    variant = refreshed;
+                    clearPinnedVariantUrl(pinKey);
+                }
             } catch (pinErr) {
                 if (pinKey && playlistSourceUrl !== playlistUrl) {
                     console.warn(`[${videoId}] Playlist ${urlMaxHeight}p fixada falhou (${pinErr.statusCode || pinErr.code || pinErr.message}); tentando URL atual.`);
                     clearPinnedVariantUrl(pinKey);
+                    const previousState = hlsSessionVariantState.get(pinKey);
                     playlistSourceUrl = playlistUrl;
-                    result = await fetchM3u8WithCache(cacheKey, playlistSourceUrl);
+                    const refreshed = await fetchVariantPlaylist(playlistSourceUrl, 'refresh');
+                    if (!playlistsHaveOverlap(previousState?.lastSnapshot, refreshed.snapshot)) {
+                        logVariantSessionSnapshot(videoId, {
+                            owner: trackingOwner,
+                            sessionId: activePlaybackSessionId,
+                            quality: urlMaxHeight,
+                            upstreamUrl: playlistSourceUrl,
+                            snapshot: refreshed.snapshot,
+                            source: 'refresh-rejected',
+                            reason: 'no_overlap_after_error'
+                        });
+                        logProxyAccess(pinKey || cacheKey, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart, logLabel: cacheKey });
+                        markSessionVariantRefreshRejected(pinKey);
+                        return sendHlsError(res, 503, 'stream_temporarily_unavailable', {
+                            'Retry-After': '2'
+                        });
+                    }
+                    variant = refreshed;
                 } else {
                     throw pinErr;
                 }
             }
             rememberPinnedVariantUrl(pinKey, playlistSourceUrl);
-            const stabilized = stabilizeMediaPlaylist(videoId, cacheKey, result.content, monitor.lastMediaSequence);
+            rememberSessionVariantPin(pinKey, playlistSourceUrl, {
+                videoId,
+                owner: trackingOwner,
+                token: routeContext.token || null,
+                quality: urlMaxHeight,
+                sessionId: activePlaybackSessionId
+            });
+            const stabilityKey = pinKey || cacheKey;
+            const stabilized = stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence);
             let content = stabilized.content;
+            const servedSnapshot = getPlaylistSnapshot(content, playlistSourceUrl);
+            if (pinKey) {
+                updateSessionVariantState(pinKey, {
+                    videoId,
+                    owner: trackingOwner,
+                    quality: urlMaxHeight,
+                    sessionId: activePlaybackSessionId,
+                    token: routeContext.token || null,
+                    upstreamUrl: playlistSourceUrl,
+                    snapshot: servedSnapshot,
+                    source: variant.source
+                });
+            }
+            logVariantSessionSnapshot(videoId, {
+                owner: trackingOwner,
+                sessionId: activePlaybackSessionId,
+                quality: urlMaxHeight,
+                upstreamUrl: playlistSourceUrl,
+                snapshot: servedSnapshot,
+                source: `${variant.source}${variant.result.fromCache ? ':cache' : ''}`,
+                reason: stabilized.stale ? 'last_good' : (stabilized.extended?.extended ? 'extended_window' : '')
+            });
             if (segmentProxyEnabled && activePlaybackSessionId && trackingOwner) {
                 content = rewriteHlsSegmentUrls(content, {
                     sourceUrl: playlistSourceUrl,
@@ -1702,13 +2137,14 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 });
             }
             console.log(`[${videoId}] 🔍 Playlist ${urlMaxHeight}p recebida (${content.length} bytes)`);
-            logProxyAccess(cacheKey, {
+            logProxyAccess(stabilityKey, {
                 statusCode: 200,
-                fromCache: result.fromCache,
+                fromCache: variant.result.fromCache,
                 elapsedMs: Date.now() - reqStart,
                 content,
                 stale: stabilized.stale?.age,
-                monitorSeq: monitor.lastMediaSequence
+                monitorSeq: monitor.lastMediaSequence,
+                logLabel: cacheKey
             });
             res.writeHead(200, {
                 'Content-Type': 'application/vnd.apple.mpegurl',
@@ -1724,7 +2160,19 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             return;
         } catch (err) {
             console.error(`[${videoId}] ❌ Erro ao buscar playlist ${urlMaxHeight}:`, err.message);
-            // Fallback: tenta servir o master original
+            if ([403, 404, 410].includes(err.statusCode)) {
+                clearSessionVariantState(pinKey);
+                clearPinnedVariantUrl(pinKey);
+                if (typeof monitor.requestRefresh === 'function') {
+                    monitor.requestRefresh().catch(refreshErr => {
+                        console.error(`[${videoId}] Falha ao renovar playlist ${urlMaxHeight}p:`, refreshErr.message);
+                    });
+                }
+            }
+            logProxyAccess(pinKey || cacheKey, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart, logLabel: cacheKey });
+            return sendHlsError(res, 503, 'stream_temporarily_unavailable', {
+                'Retry-After': '2'
+            });
         }
     }
 
@@ -1736,10 +2184,11 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 videoId,
                 owner: trackingOwner,
                 sessionId: activePlaybackSessionId,
-                requestedMaxHeight: null,
+                requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
                 fallbackMaxHeight: finalMaxHeight,
                 baseUrl: playbackManifestBaseUrl,
-                segmentProxy: segmentProxyEnabled
+                segmentProxy: segmentProxyEnabled,
+                singleVariant: singleVariantMaster
             })
             : monitor._masterContent.content;
         console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (sem filtro)'}`);
@@ -1778,10 +2227,11 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     videoId,
                     owner: trackingOwner,
                     sessionId: activePlaybackSessionId,
-                    requestedMaxHeight: null,
+                    requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
                     fallbackMaxHeight: finalMaxHeight,
                     baseUrl: playbackManifestBaseUrl,
-                    segmentProxy: segmentProxyEnabled
+                    segmentProxy: segmentProxyEnabled,
+                    singleVariant: singleVariantMaster
                 });
             }
             console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (via cache)'}`);
@@ -1882,10 +2332,11 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                                 videoId,
                                 owner: trackingOwner,
                                 sessionId: activePlaybackSessionId,
-                                requestedMaxHeight: null,
+                                requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
                                 fallbackMaxHeight: finalMaxHeight,
                                 baseUrl: playbackManifestBaseUrl,
-                                segmentProxy: segmentProxyEnabled
+                                segmentProxy: segmentProxyEnabled,
+                                singleVariant: singleVariantMaster
                             });
                         }
                         console.log(`[${videoId}] 🎯 Servindo master renovado ${activePlaybackSessionId ? 'interno com sessao HLS' : '(sem filtro)'}`);
@@ -2007,6 +2458,13 @@ function validateHlsSegmentSession(entry, req) {
         userAgent: req.headers['user-agent'] || ''
     });
     if (!touched.ok) {
+        if (touched.code === 'expired') {
+            clearHlsSessionVariantStateFor({
+                owner: entry.owner,
+                videoId: entry.videoId,
+                sessionId: entry.sessionId
+            });
+        }
         return {
             ok: false,
             status: touched.code === 'expired' ? 410 : 403,
@@ -2183,6 +2641,7 @@ app.post('/api/device/remove', (req, res) => {
             m3u8CacheContent.delete(videoId);
             m3u8CachePromises.delete(videoId);
             lastGoodM3u8.delete(videoId);
+            clearHlsSessionVariantStateFor({ owner, videoId });
             return res.json({ success: true, message: 'IP removido e cache invalidado' });
         } else {
             return res.status(404).json({ error: 'IP não encontrado na lista de ativos' });
@@ -2207,6 +2666,7 @@ app.post('/api/device/remove', (req, res) => {
                     m3u8CacheContent.delete(vid);
                     m3u8CachePromises.delete(vid);
                     lastGoodM3u8.delete(vid);
+                    clearHlsSessionVariantStateFor({ owner, videoId: vid });
                 }
             }
         }
@@ -2241,6 +2701,7 @@ app.post('/api/device/release-all', (req, res) => {
             m3u8CacheContent.delete(videoId);
             m3u8CachePromises.delete(videoId);
             lastGoodM3u8.delete(videoId);
+            clearHlsSessionVariantStateFor({ owner, videoId });
         }
     }
     if (removed) {
@@ -2268,6 +2729,7 @@ app.get('/api/public/device-status-all', publicApiLimiter, (req, res) => {
 
 app.get('/api/public/monitors', publicApiLimiter, (req, res) => {
     const monitors = [];
+    const nowMs = Date.now();
     if (converter && converter.activeMonitors) {
         for (const [key, monitor] of converter.activeMonitors.entries()) {
             const [videoId, owner] = key.split(':');
@@ -2277,11 +2739,24 @@ app.get('/api/public/monitors', publicApiLimiter, (req, res) => {
             }
 
             const token = getOrCreateToken(videoId, owner || null);
+            const healthSummary = buildMonitorHealth(monitor, { nowMs });
+            const rawStatus = monitor.liveState || (monitor.isLive ? 'online' : 'offline');
+            const displayStatus = getMonitorDisplayStatus(monitor, healthSummary);
+            const ending = isMonitorEnding(monitor);
+            const terminalAvailability = isMonitorTerminalAvailability(monitor);
+            const liveEndedFirstDetection = Number(monitor._liveEndedFirstDetection) || 0;
+            const removalDelaySeconds = ending && liveEndedFirstDetection
+                ? Math.max(0, 120 - Math.floor((nowMs - liveEndedFirstDetection) / 1000))
+                : 0;
             monitors.push({
                 videoId,
                 owner: owner || null,
                 token,
-                status: monitor.liveState || (monitor.isLive ? 'online' : 'offline'),
+                status: displayStatus,
+                rawStatus,
+                ending,
+                terminalAvailability,
+                removalDelaySeconds,
                 lastUpdate: monitor.lastUpdate || monitor.lastAccess,
                 title: monitor.metadata?.title || null,
                 channel: monitor.metadata?.channel || null
@@ -2309,6 +2784,7 @@ app.post('/api/client/sync', (req, res) => {
             if (removedSessions > 0) {
                 console.log(`[${owner}] ${removedSessions} sessão(ões) HLS removida(s) após sincronização de clientes.`);
             }
+            clearHlsSessionVariantStateFor({ owner });
         }
     }
     salvarClientes(clientes);
@@ -2922,6 +3398,7 @@ app.get('/api/monitors', isAuthenticated, (req, res) => {
                         saveOwnerViewers(ownerViewers);
                     }
                     playbackSessions.removeForLive(owner, videoId);
+                    clearHlsSessionVariantStateFor({ owner, videoId });
                     if (viewerAccess.has(devKey)) {
                         viewerAccess.delete(devKey);
                         saveViewerAccess(viewerAccess);
@@ -3185,11 +3662,13 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
             ownerViewers.delete(key);
             saveOwnerViewers(ownerViewers);
             playbackSessions.removeForLive(actualOwner, videoId);
+            clearHlsSessionVariantStateFor({ owner: actualOwner, videoId });
             viewerAccess.delete(`${actualOwner}:${videoId}`);
             saveViewerAccess(viewerAccess);
         } else {
             viewerAccess.delete(videoId);
             saveViewerAccess(viewerAccess);
+            clearHlsSessionVariantStateFor({ videoId });
         }
 
         m3u8CacheContent.delete(videoId);
@@ -3325,6 +3804,7 @@ const revokeTokenFn = (videoId, owner) => {
             console.log(`🧹 Dispositivos de ${key} limpos após encerramento automático da live.`);
         }
         playbackSessions.removeForLive(owner, videoId);
+        clearHlsSessionVariantStateFor({ owner, videoId });
         const accessKey = `${owner}:${videoId}`;
         if (viewerAccess.has(accessKey)) {
             viewerAccess.delete(accessKey);
