@@ -750,7 +750,7 @@ function sliceBetween(source, startMarker, endMarker) {
 function loadHlsContinuityHooks() {
     const app = fs.readFileSync(APP_PATH, 'utf8');
     const helperCore = sliceBetween(app, 'function normalizeHlsStateKeyPart', 'async function fetchM3u8WithCache');
-    const parserCore = sliceBetween(app, 'function parseM3u8Info', 'function rebuildMediaPlaylistWindow');
+    const parserCore = sliceBetween(app, 'function parseM3u8Info', 'function makeBandwidthForHeight');
     const masterCore = sliceBetween(app, 'function makeBandwidthForHeight', 'function isTruthyQueryValue');
     const capturedLogs = [];
     const context = {
@@ -775,6 +775,10 @@ function loadHlsContinuityHooks() {
         const HLS_SESSION_DISCONTINUITY_RESET_MS = 12000;
         const HLS_EXOMEDIA_SINGLE_VARIANT_MASTER = true;
         const HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT = 720;
+        const HLS_EXTENDED_WINDOW_SEGMENTS = 7;
+        const HLS_COMPAT_TARGET_DURATION = 8;
+        const HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS = 2;
+        const HLS_VLC_STARTUP_WINDOW_MS = 180000;
         const STALE_SERVE_MAX_AGE_MS = 60000;
         const playbackVariantUrlPins = new Map();
         const hlsSessionVariantState = new Map();
@@ -796,6 +800,19 @@ function loadHlsContinuityHooks() {
             const value = String(sessionId || '');
             return value.length > 8 ? value.slice(0, 8) + '...' : value || 'n/a';
         }
+        function rememberGoodM3u8(videoId, content) {
+            const info = parseM3u8Info(content);
+            lastGoodM3u8.set(videoId, {
+                content,
+                fetchedAt: Date.now(),
+                sequence: info.sequence,
+                lastSequence: info.lastSequence,
+                segments: info.segments
+            });
+        }
+        function getStaleM3u8IfFresh() {
+            return null;
+        }
         ${helperCore}
         ${parserCore}
         ${masterCore}
@@ -815,7 +832,11 @@ function loadHlsContinuityHooks() {
             shouldRefreshStuckSessionVariant,
             buildPlaybackSessionMaster,
             isExoCompatibleUserAgent,
+            isVlcCompatibleUserAgent,
             shouldUseSingleVariantMaster,
+            getHlsStartupLiveEdgeOffsetSegments,
+            extendLiveMediaPlaylistWindow,
+            stabilizeMediaPlaylist,
             logVariantSessionSnapshot,
             hlsSessionVariantState,
             hlsSessionVariantPins
@@ -972,9 +993,113 @@ function testHlsContinuityExecutableChecks() {
     const neoNewsReq = { headers: { 'user-agent': 'NeoNews ExoMedia 4.3.0 / Android 14' } };
     const lowercaseReq = { headers: { 'user-agent': 'exomedia stick hd' } };
     const vlcReq = { headers: { 'user-agent': 'VLC/3.0.21 LibVLC/3.0.21' } };
+    const browserReq = { headers: { 'user-agent': 'Mozilla/5.0 Chrome/126.0 Safari/537.36' } };
+    const ffmpegReq = { headers: { 'user-agent': 'Lavf/60.16.100' } };
     assert.equal(hls.shouldUseSingleVariantMaster(neoNewsReq), true);
     assert.equal(hls.shouldUseSingleVariantMaster(lowercaseReq), true);
     assert.equal(hls.shouldUseSingleVariantMaster(vlcReq), false);
+    assert.equal(hls.isVlcCompatibleUserAgent(vlcReq), true);
+    assert.equal(hls.isVlcCompatibleUserAgent({ headers: { 'user-agent': 'LibVLC/3.0.11' } }), true);
+    assert.equal(hls.isVlcCompatibleUserAgent(neoNewsReq), false);
+    assert.equal(hls.isVlcCompatibleUserAgent(browserReq), false);
+    assert.equal(hls.isVlcCompatibleUserAgent(ffmpegReq), false);
+    const startupNow = Date.parse('2026-07-15T12:00:00.000Z');
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(vlcReq, {
+        createdAt: new Date(startupNow - 30000).toISOString()
+    }, startupNow), 2);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(vlcReq, {
+        createdAt: new Date(startupNow - 240000).toISOString()
+    }, startupNow), 0);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(neoNewsReq, {
+        createdAt: new Date(startupNow - 30000).toISOString()
+    }, startupNow), 0);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(browserReq, {
+        createdAt: new Date(startupNow - 30000).toISOString()
+    }, startupNow), 0);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(ffmpegReq, {
+        createdAt: new Date(startupNow - 30000).toISOString()
+    }, startupNow), 0);
+
+    const startupKey = 'VID123_owner_session_720_startup';
+    const startupFirst = mediaPlaylist(100, ['s100', 's101', 's102', 's103', 's104', 's105']);
+    const startupSecond = mediaPlaylist(103, ['s103', 's104', 's105', 's106', 's107', 's108']);
+    const sevenSegments = mediaPlaylist(200, ['s200', 's201', 's202', 's203', 's204', 's205', 's206']);
+    const shortSegments = mediaPlaylist(300, ['s300', 's301', 's302']);
+    const taggedSegments = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:3',
+        '#EXT-X-TARGETDURATION:6',
+        '#EXT-X-MEDIA-SEQUENCE:400',
+        '#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.test/key"',
+        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s400.ts?sig=secret-s400',
+        '#EXT-X-DISCONTINUITY',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s401.ts?sig=secret-s401',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s402.ts?sig=secret-s402',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s403.ts?sig=secret-s403',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s404.ts?sig=secret-s404',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s405.ts?sig=secret-s405',
+        '#EXTINF:6.000,',
+        'https://media.example.test/s406.ts?sig=secret-s406'
+    ].join('\n') + '\n';
+    const sevenShifted = hls.stabilizeMediaPlaylist('VID123', `${startupKey}_seven`, sevenSegments, null, {
+        liveEdgeOffsetSegments: 2
+    });
+    const sevenSnapshot = hls.getPlaylistSnapshot(sevenShifted.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(sevenSnapshot.segmentCount, 5);
+    assert.equal(sevenSnapshot.mediaSequence, 200);
+    assert.equal(sevenSnapshot.lastSequence, 204);
+    assert.ok(!sevenShifted.content.includes('s205.ts'));
+    assert.ok(!sevenShifted.content.includes('s206.ts'));
+    const shortShifted = hls.stabilizeMediaPlaylist('VID123', `${startupKey}_short`, shortSegments, null, {
+        liveEdgeOffsetSegments: 2
+    });
+    const shortSnapshot = hls.getPlaylistSnapshot(shortShifted.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(shortSnapshot.segmentCount, 3);
+    assert.equal(shortSnapshot.lastSequence, 302);
+    const taggedShifted = hls.extendLiveMediaPlaylistWindow('VID123', `${startupKey}_tags`, taggedSegments, {
+        liveEdgeOffsetSegments: 2
+    });
+    assert.ok(taggedShifted.content.includes('#EXT-X-KEY:METHOD=AES-128'));
+    assert.ok(taggedShifted.content.includes('#EXT-X-MAP:URI="init.mp4"'));
+    assert.ok(taggedShifted.content.includes('#EXT-X-DISCONTINUITY'));
+    assert.ok(taggedShifted.content.includes('#EXT-X-TARGETDURATION:6'));
+    const shiftedFirst = hls.stabilizeMediaPlaylist('VID123', startupKey, startupFirst, null, {
+        liveEdgeOffsetSegments: 2
+    });
+    const shiftedFirstSnapshot = hls.getPlaylistSnapshot(shiftedFirst.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(shiftedFirstSnapshot.lastSequence, 103);
+    assert.ok(!shiftedFirst.content.includes('s104.ts'));
+    const shiftedSecond = hls.stabilizeMediaPlaylist('VID123', startupKey, startupSecond, null, {
+        liveEdgeOffsetSegments: 2
+    });
+    const shiftedSecondSnapshot = hls.getPlaylistSnapshot(shiftedSecond.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(shiftedSecondSnapshot.mediaSequence, 100);
+    assert.equal(shiftedSecondSnapshot.lastSequence, 106);
+    assert.equal(shiftedSecondSnapshot.segmentCount, 7);
+    assert.ok(!shiftedSecond.content.includes('s107.ts'));
+    assert.ok(!shiftedSecond.content.includes('s108.ts'));
+    const afterStartupWindow = hls.stabilizeMediaPlaylist('VID123', startupKey, startupSecond, null, {
+        liveEdgeOffsetSegments: 0
+    });
+    const afterStartupSnapshot = hls.getPlaylistSnapshot(afterStartupWindow.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(afterStartupSnapshot.lastSequence, 108);
+    assert.equal(hls.playlistsHaveOverlap(shiftedSecondSnapshot, afterStartupSnapshot), true);
+    const normalKey = 'VID123_owner_session_720_normal';
+    hls.stabilizeMediaPlaylist('VID123', normalKey, startupFirst, null, {
+        liveEdgeOffsetSegments: 0
+    });
+    const normalSecond = hls.stabilizeMediaPlaylist('VID123', normalKey, startupSecond, null, {
+        liveEdgeOffsetSegments: 0
+    });
+    assert.equal(hls.getPlaylistSnapshot(normalSecond.content, 'https://upstream.example.test/720.m3u8').lastSequence, 108);
+
     const single720 = hls.buildPlaybackSessionMaster(monitor, {
         token: 'token-a',
         videoId: 'VID123',
@@ -1068,6 +1193,9 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('baseUrl: playbackManifestBaseUrl'));
     assert.ok(app.includes('PLAYBACK_VARIANT_PIN_TTL_MS'));
     assert.ok(app.includes('HLS_EXTENDED_WINDOW_SEGMENTS'));
+    assert.ok(app.includes("Math.min(2, parseNonNegativeIntegerEnv('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS', 2))"));
+    assert.ok(app.includes('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS'));
+    assert.ok(app.includes('HLS_VLC_STARTUP_WINDOW_MS'));
     assert.ok(app.includes('HLS_SESSION_UPSTREAM_STUCK_MS'));
     assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_MASTER'));
     assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT'));
@@ -1077,9 +1205,11 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('function playlistsHaveOverlap(previousSnapshot, nextSnapshot)'));
     assert.ok(app.includes('function updateSessionVariantState(stateKey'));
     assert.ok(app.includes('function isExoCompatibleUserAgent(req)'));
+    assert.ok(app.includes('function isVlcCompatibleUserAgent(req)'));
+    assert.ok(app.includes('function getHlsStartupLiveEdgeOffsetSegments(req, session'));
     assert.ok(app.includes('function shouldUseSingleVariantMaster(req)'));
     assert.ok(app.includes('singleVariant: singleVariantMaster'));
-    assert.ok(app.includes('extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe)'));
+    assert.ok(app.includes('extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe, options)'));
     assert.ok(app.includes('Sem stale seguro; servindo playlist real sem forçar MEDIA-SEQUENCE.'));
     assert.ok(app.includes('const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 2000;'));
     assert.ok(app.includes('const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 0;'));
@@ -1089,7 +1219,10 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('markSessionVariantRefreshRejected(pinKey)'));
     assert.ok(app.includes('clearHlsSessionVariantStateFor({ owner, videoId })'));
     assert.ok(app.includes('getPinnedVariantUrl(pinKey, playlistUrl)'));
-    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence)'));
+    assert.ok(app.includes('const liveEdgeOffsetSegments = getHlsStartupLiveEdgeOffsetSegments(req, activePlaybackSession);'));
+    assert.ok(app.includes('const startupOffsetKeySuffix = liveEdgeOffsetSegments ? `_startupOffset${liveEdgeOffsetSegments}` : \'\';'));
+    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence, {'));
+    assert.ok(app.includes('startup_offset_'));
     assert.ok(app.includes('logProxyAccess(stabilityKey, {'));
     assert.ok(app.includes("source: 'refresh-rejected'"));
     assert.ok(app.includes("reason: 'no_overlap'"));
