@@ -25,6 +25,7 @@ function createStore(options = {}) {
     return new PlaybackSessionStore({
         filePath: tempFile(),
         ttlMs: options.ttlMs || 90000,
+        reuseRecentWindowMs: options.reuseRecentWindowMs === undefined ? 0 : options.reuseRecentWindowMs,
         reuseStaleAfterMs: options.reuseStaleAfterMs,
         reuseExpiredGraceMs: options.reuseExpiredGraceMs
     });
@@ -113,10 +114,80 @@ function testFreshIdenticalClientStillCountsAsSeparateDevice() {
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 2);
 }
 
+function testRecentIdenticalClientReusesSession() {
+    const store = createStore({ reuseRecentWindowMs: 90000, reuseStaleAfterMs: 45000 });
+    const first = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW);
+    const reopened = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW + 10000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_recent');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 1);
+}
+
+function testRecentIdenticalClientWithoutFingerprintDoesNotReuseSession() {
+    const store = createStore({ reuseRecentWindowMs: 90000, reuseStaleAfterMs: 45000 });
+    const first = create(store, {}, NOW);
+    const second = create(store, {}, NOW + 10000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(second.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 10000), 2);
+}
+
+function testRecentWindowDoesNotCollapseIndependentOpeningsWithoutFingerprint() {
+    const store = createStore({ reuseRecentWindowMs: 90000, reuseStaleAfterMs: 45000 });
+    const results = [
+        create(store, {}, NOW),
+        create(store, {}, NOW + 1000),
+        create(store, {}, NOW + 2000),
+        create(store, {}, NOW + 3000)
+    ];
+
+    assert.deepEqual(results.map(result => result.ok), [true, true, true, false]);
+    assert.equal(results[3].code, 'limit_exceeded');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 3000), 3);
+}
+
+function testRecentReuseCollapsesDuplicateClientSessions() {
+    const store = createStore({ reuseRecentWindowMs: 0, reuseStaleAfterMs: 0 });
+    const first = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW);
+    const second = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW + 10000);
+
+    store.reuseRecentWindowMs = 90000;
+    const reopened = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW + 20000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.notEqual(first.session.sessionId, second.session.sessionId);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_recent');
+    assert.equal(reopened.session.sessionId, second.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 20000), 1);
+}
+
+function testDuplicateCleanupRequiresFingerprint() {
+    const store = createStore({ reuseRecentWindowMs: 0, reuseStaleAfterMs: 0 });
+    const first = create(store, {}, NOW);
+    const second = create(store, {}, NOW + 10000);
+
+    store.reuseRecentWindowMs = 90000;
+    const third = create(store, {}, NOW + 20000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(third.ok, true);
+    assert.equal(third.code, 'created');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 20000), 3);
+}
+
 function testStaleIdenticalClientReusesSession() {
     const store = createStore({ reuseStaleAfterMs: 45000 });
-    const first = create(store, {}, NOW);
-    const reopened = create(store, {}, NOW + 46000);
+    const first = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW);
+    const reopened = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW + 46000);
 
     assert.equal(first.ok, true);
     assert.equal(reopened.ok, true);
@@ -125,13 +196,25 @@ function testStaleIdenticalClientReusesSession() {
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 46000), 1);
 }
 
-function testStaleReuseCanAvoidFalseLimitExceeded() {
+function testStaleIdenticalClientWithoutFingerprintDoesNotReuseSession() {
     const store = createStore({ reuseStaleAfterMs: 45000 });
     const first = create(store, {}, NOW);
+    const reopened = create(store, {}, NOW + 46000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'created');
+    assert.notEqual(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 46000), 2);
+}
+
+function testStaleReuseCanAvoidFalseLimitExceeded() {
+    const store = createStore({ reuseStaleAfterMs: 45000 });
+    const first = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW);
     create(store, { publicIp: '187.40.208.119' }, NOW);
     create(store, { publicIp: '187.40.208.120' }, NOW);
 
-    const reopened = create(store, {}, NOW + 46000);
+    const reopened = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW + 46000);
 
     assert.equal(first.ok, true);
     assert.equal(reopened.ok, true);
@@ -202,12 +285,12 @@ function testExpiredSameClientReusesWithinGrace() {
         reuseStaleAfterMs: 500,
         reuseExpiredGraceMs: 10000
     });
-    const first = create(store, {}, NOW);
+    const first = create(store, { fingerprint: 'localIp:192.168.0.10' }, NOW);
     const afterTtl = NOW + 2000;
 
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, afterTtl), 0);
 
-    const reopened = create(store, {}, afterTtl);
+    const reopened = create(store, { fingerprint: 'localIp:192.168.0.10' }, afterTtl);
     assert.equal(reopened.ok, true);
     assert.equal(reopened.code, 'reused_expired');
     assert.equal(reopened.session.sessionId, first.session.sessionId);
@@ -263,6 +346,14 @@ function testExpiredSessionIsRejectedOnRefresh() {
 
 async function testConcurrentCreationDoesNotExceedLimit() {
     const store = createStore();
+    const results = await Promise.all([0, 1, 2, 3].map(() => Promise.resolve().then(() => create(store))));
+    assert.equal(results.filter(result => result.ok).length, 3);
+    assert.equal(results.filter(result => result.code === 'limit_exceeded').length, 1);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW), 3);
+}
+
+async function testConcurrentCreationWithoutFingerprintDoesNotReuseRecentSession() {
+    const store = createStore({ reuseRecentWindowMs: 90000, reuseStaleAfterMs: 45000 });
     const results = await Promise.all([0, 1, 2, 3].map(() => Promise.resolve().then(() => create(store))));
     assert.equal(results.filter(result => result.ok).length, 3);
     assert.equal(results.filter(result => result.code === 'limit_exceeded').length, 1);
@@ -421,12 +512,17 @@ function testSanitizationAndPreview() {
 
 function testAppIntegrationStaticChecks() {
     const app = fs.readFileSync(APP_PATH, 'utf8');
+    const storeSource = fs.readFileSync(path.join(__dirname, '..', 'services', 'playbackSessionStore.js'), 'utf8');
     assert.ok(app.includes("require('./services/playbackSessionStore')"));
     assert.ok(app.includes('playbackSessions.createSession'));
     assert.ok(app.includes('playbackSessions.touchSession'));
+    assert.ok(app.includes("created.code === 'reused_recent'"));
     assert.ok(app.includes("created.code === 'reused_stale'"));
     assert.ok(app.includes("created.code === 'reused_expired'"));
     assert.ok(app.includes('buildPlaybackSessionMaster'));
+    assert.ok(app.includes('TOKEN_TOMBSTONE_TTL_MS'));
+    assert.ok(app.includes('pruneTokenTombstones(tokenMap)'));
+    assert.ok(storeSource.includes('_canReuseClientSession(fingerprint)'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store'"));
     assert.ok(app.includes("'Vary': 'User-Agent'"));
     assert.ok(app.includes('playbackSessions.countActive({ owner, videoId })'));
@@ -452,9 +548,26 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes("parsed.protocol = 'https:'"));
     assert.ok(app.includes('baseUrl: playbackManifestBaseUrl'));
     assert.ok(app.includes('PLAYBACK_VARIANT_PIN_TTL_MS'));
+    assert.ok(app.includes('HLS_EXTENDED_WINDOW_SEGMENTS'));
+    assert.ok(app.includes('hlsMediaPlaylistHistory'));
+    assert.ok(app.includes('extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe)'));
+    assert.ok(app.includes('Sem stale seguro; servindo playlist real sem forçar MEDIA-SEQUENCE.'));
+    assert.ok(app.includes('const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 2000;'));
+    assert.ok(app.includes('const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 0;'));
+    assert.ok(app.includes('if (!PLAYBACK_VARIANT_PIN_TTL_MS) return currentUrl;'));
     assert.ok(app.includes('getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId)'));
     assert.ok(app.includes('getPinnedVariantUrl(pinKey, playlistUrl)'));
     assert.ok(app.includes('stabilizeMediaPlaylist(videoId, cacheKey, result.content, monitor.lastMediaSequence)'));
+    assert.ok(app.includes("return sendHlsError(res, 503, 'stream_temporarily_unavailable'"));
+    assert.ok(app.includes("return sendHlsError(res, 410, 'token_gone')"));
+    assert.ok(app.includes('isRevokedTokenInfo(info)'));
+    assert.ok(app.includes('function shouldProxyHlsSegments(req)'));
+    assert.ok(app.includes('HLS_SEGMENT_PROXY_MODE'));
+    assert.ok(app.includes("params.set('segmentProxy', '1')"));
+    assert.ok(app.includes('rewriteHlsSegmentUrls(content'));
+    assert.ok(app.includes("app.get('/neonews/seg/:segmentId.ts', handleHlsSegmentProxy)"));
+    assert.ok(app.includes('createHmac'));
+    assert.ok(app.includes('segment_unavailable'));
     assert.ok(app.includes('function sendHlsError(res, statusCode, message'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store, no-cache'"));
     assert.ok(app.includes("app.head('/neonews/t/:token.m3u8'"));
@@ -464,6 +577,7 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes("return sendHlsError(res, 404, 'token_not_found')"));
     assert.ok(!app.includes("req.headers['x-forwarded-host']"));
     assert.ok(!app.includes("req.get('host')"));
+    assert.ok(!app.includes('`#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`'));
     assert.ok(!app.includes("res.status(429).json({\n                        error: 'Limite de dispositivos excedido'"));
     assert.ok(!app.includes("res.status(429).json({\n                        error: 'Muitas tentativas de sessão'"));
 }
@@ -474,7 +588,13 @@ async function main() {
     testLimitsOneTwoAndInvalid();
     testIdenticalDevicesReceiveDifferentSessionIds();
     testFreshIdenticalClientStillCountsAsSeparateDevice();
+    testRecentIdenticalClientReusesSession();
+    testRecentIdenticalClientWithoutFingerprintDoesNotReuseSession();
+    testRecentWindowDoesNotCollapseIndependentOpeningsWithoutFingerprint();
+    testRecentReuseCollapsesDuplicateClientSessions();
+    testDuplicateCleanupRequiresFingerprint();
     testStaleIdenticalClientReusesSession();
+    testStaleIdenticalClientWithoutFingerprintDoesNotReuseSession();
     testStaleReuseCanAvoidFalseLimitExceeded();
     testStaleDifferentClientDoesNotReuseSession();
     testFingerprintPreventsStaleReuseAcrossDifferentLocalIdentity();
@@ -485,6 +605,7 @@ async function main() {
     testExpiredSessionRemovedAfterReuseGrace();
     testExpiredSessionIsRejectedOnRefresh();
     await testConcurrentCreationDoesNotExceedLimit();
+    await testConcurrentCreationWithoutFingerprintDoesNotReuseRecentSession();
     testSessionScopeValidation();
     testLiveEndedCleanupRemovesSessions();
     testOwnerCleanupRemovesOnlyThatOwner();

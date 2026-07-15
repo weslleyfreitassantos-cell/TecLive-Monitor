@@ -149,6 +149,7 @@ function salvarClientes(clientes) {
 
 // ========== PERSISTÊNCIA DE TOKENS ==========
 const tokensFile = path.join(cookiesDir, 'tokens.json');
+const TOKEN_TOMBSTONE_TTL_MS = parseInt(process.env.TOKEN_TOMBSTONE_TTL_MS, 10) || 7 * 24 * 60 * 60 * 1000;
 
 function loadTokens() {
     try {
@@ -160,15 +161,34 @@ function loadTokens() {
 }
 
 function saveTokens(tokens) {
+    pruneTokenTombstones(tokens);
     fs.writeFileSync(tokensFile, JSON.stringify(tokens, null, 2));
 }
 
 let tokenMap = loadTokens(); // token -> { videoId, owner }
 
+function pruneTokenTombstones(tokens, now = Date.now()) {
+    if (!tokens || typeof tokens !== 'object') return 0;
+    let removed = 0;
+    for (const [token, info] of Object.entries(tokens)) {
+        if (!info?.revokedAt) continue;
+        const revokedAt = Date.parse(info.revokedAt);
+        if (!Number.isFinite(revokedAt) || now - revokedAt > TOKEN_TOMBSTONE_TTL_MS) {
+            delete tokens[token];
+            removed += 1;
+        }
+    }
+    return removed;
+}
+
+if (pruneTokenTombstones(tokenMap) > 0) {
+    saveTokens(tokenMap);
+}
+
 function getOrCreateToken(videoId, owner) {
     const key = owner ? `${videoId}:${owner}` : videoId;
     for (const [token, value] of Object.entries(tokenMap)) {
-        if (value.videoId === videoId && value.owner === owner) {
+        if (value.videoId === videoId && value.owner === owner && !value.revokedAt) {
             return token;
         }
     }
@@ -178,13 +198,25 @@ function getOrCreateToken(videoId, owner) {
     return token;
 }
 
-function revokeToken(token) {
-    if (tokenMap[token]) {
-        delete tokenMap[token];
-        saveTokens(tokenMap);
-        return true;
-    }
-    return false;
+function tokenPreview(token) {
+    const value = String(token || '');
+    return value.length > 8 ? `${value.slice(0, 8)}...` : value || 'n/a';
+}
+
+function isRevokedTokenInfo(info) {
+    return Boolean(info && info.revokedAt);
+}
+
+function revokeToken(token, reason = 'gone') {
+    const existing = tokenMap[token];
+    if (!existing) return false;
+    tokenMap[token] = {
+        ...existing,
+        revokedAt: existing.revokedAt || new Date().toISOString(),
+        revokedReason: existing.revokedReason || String(reason || 'gone').slice(0, 80)
+    };
+    saveTokens(tokenMap);
+    return true;
 }
 
 function getTokenInfo(token) {
@@ -388,6 +420,7 @@ setInterval(() => {
         console.log(`🧹 ${removed} sessão(ões) HLS expirada(s) removida(s).`);
     }
     prunePlaybackVariantUrlPins();
+    pruneHlsMediaPlaylistHistory();
 }, Math.max(30000, Math.min(playbackSessions.ttlMs, 60000)));
 
 function trackViewer(owner, videoId, ip, userAgent = '', localIp = null) {
@@ -786,19 +819,31 @@ function removePersistedMapping(videoId, owner) {
 // ========== CACHE ==========
 const m3u8CachePromises = new Map();
 const m3u8CacheContent = new Map();
-// REDUZIDO para 5 segundos para forçar atualizações mais frequentes
-const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 5000;
-const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 10 * 60 * 1000;
+// Playlists live precisam ficar frescas para evitar segmentos/URLs expirados no player.
+const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 2000;
+const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 0;
+const HLS_SEGMENT_PROXY_MODE = String(process.env.HLS_SEGMENT_PROXY_MODE || 'auto').toLowerCase();
+const HLS_SEGMENT_PROXY_TTL_MS = parseInt(process.env.HLS_SEGMENT_PROXY_TTL_MS, 10) || 3 * 60 * 1000;
+const HLS_EXTENDED_WINDOW_SEGMENTS = parseInt(process.env.HLS_EXTENDED_WINDOW_SEGMENTS, 10) || 7;
+const HLS_COMPAT_TARGET_DURATION = parseInt(process.env.HLS_COMPAT_TARGET_DURATION, 10) || 8;
 
 const REFRESH_WAIT_MS = 20000; // Aumentado para 20s
 const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000; // 1 minuto
 
 const lastGoodM3u8 = new Map();
 const playbackVariantUrlPins = new Map();
+const hlsSegmentProxyEntries = new Map();
+const hlsMediaPlaylistHistory = new Map();
 
 function rememberGoodM3u8(videoId, content) {
-    const seq = parseM3u8Info(content).sequence;
-    lastGoodM3u8.set(videoId, { content, fetchedAt: Date.now(), sequence: seq });
+    const info = parseM3u8Info(content);
+    lastGoodM3u8.set(videoId, {
+        content,
+        fetchedAt: Date.now(),
+        sequence: info.sequence,
+        lastSequence: info.lastSequence,
+        segments: info.segments
+    });
 }
 
 function getStaleM3u8IfFresh(videoId, monitorLastSeq) {
@@ -806,10 +851,11 @@ function getStaleM3u8IfFresh(videoId, monitorLastSeq) {
     if (!entry) return null;
     const age = Date.now() - entry.fetchedAt;
     if (age > STALE_SERVE_MAX_AGE_MS) return null;
-    if (monitorLastSeq !== null && entry.sequence !== null) {
-        const lag = monitorLastSeq - entry.sequence;
+    const comparableSequence = entry.lastSequence ?? entry.sequence;
+    if (monitorLastSeq !== null && comparableSequence !== null) {
+        const lag = monitorLastSeq - comparableSequence;
         if (lag > 5) {
-            console.log(`[${videoId}] ⚠️ Stale muito atrasado (seq ${entry.sequence}, monitor em ${monitorLastSeq}, lag=${lag}), não servindo.`);
+            console.log(`[${videoId}] ⚠️ Stale muito atrasado (seq ${entry.sequence}-${comparableSequence}, monitor em ${monitorLastSeq}, lag=${lag}), não servindo.`);
             return null;
         }
     }
@@ -833,6 +879,7 @@ function getPlaybackVariantPinKey(videoId, height, sessionId) {
 }
 
 function getPinnedVariantUrl(pinKey, currentUrl) {
+    if (!PLAYBACK_VARIANT_PIN_TTL_MS) return currentUrl;
     if (!pinKey) return currentUrl;
     const now = Date.now();
     const pin = playbackVariantUrlPins.get(pinKey);
@@ -848,6 +895,7 @@ function getPinnedVariantUrl(pinKey, currentUrl) {
 }
 
 function rememberPinnedVariantUrl(pinKey, url) {
+    if (!PLAYBACK_VARIANT_PIN_TTL_MS) return;
     if (!pinKey || !url) return;
     const now = Date.now();
     const existing = playbackVariantUrlPins.get(pinKey);
@@ -929,10 +977,154 @@ const lastServedSequence = new Map();
 function parseM3u8Info(content) {
     const seqMatch = content.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/);
     const segments = (content.match(/#EXTINF:/g) || []).length;
+    const sequence = seqMatch ? parseInt(seqMatch[1], 10) : null;
     return {
-        sequence: seqMatch ? parseInt(seqMatch[1], 10) : null,
-        segments
+        sequence,
+        segments,
+        lastSequence: sequence !== null && segments > 0 ? sequence + segments - 1 : sequence
     };
+}
+
+function parseMediaPlaylistWindow(content) {
+    const source = String(content || '');
+    if (!source || source.includes('#EXT-X-STREAM-INF') || source.includes('#EXT-X-ENDLIST')) return null;
+
+    const mediaSequenceMatch = source.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/);
+    if (!mediaSequenceMatch) return null;
+
+    const mediaSequence = Number(mediaSequenceMatch[1]);
+    if (!Number.isFinite(mediaSequence)) return null;
+
+    const lines = source.split(/\r?\n/);
+    const header = [];
+    const segments = [];
+    const footer = [];
+    let currentBlock = [];
+    let inSegments = false;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+
+        if (!inSegments && !trimmed.startsWith('#EXTINF:')) {
+            header.push(line);
+            continue;
+        }
+
+        inSegments = true;
+        currentBlock.push(line);
+
+        if (trimmed && !trimmed.startsWith('#')) {
+            segments.push({
+                sequence: mediaSequence + segments.length,
+                lines: currentBlock.slice()
+            });
+            currentBlock = [];
+        }
+    }
+
+    if (currentBlock.length > 0) footer.push(...currentBlock);
+    if (segments.length === 0) return null;
+
+    return { mediaSequence, header, segments, footer };
+}
+
+function rebuildMediaPlaylistWindow(parsed, selectedSegments) {
+    if (!parsed || !Array.isArray(selectedSegments) || selectedSegments.length === 0) {
+        return null;
+    }
+
+    const firstSequence = selectedSegments[0].sequence;
+    const header = parsed.header.map((line) => {
+        if (/^#EXT-X-MEDIA-SEQUENCE:/i.test(line.trim())) {
+            return `#EXT-X-MEDIA-SEQUENCE:${firstSequence}`;
+        }
+        return line;
+    });
+
+    const body = [];
+    for (const segment of selectedSegments) {
+        body.push(...segment.lines);
+    }
+
+    const footer = parsed.footer.filter(line => line.trim() !== '#EXT-X-ENDLIST');
+    return `${header.concat(body, footer).join('\n').replace(/\n+$/g, '')}\n`;
+}
+
+function extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, content) {
+    if (!HLS_EXTENDED_WINDOW_SEGMENTS || HLS_EXTENDED_WINDOW_SEGMENTS < 1) {
+        return { content, extended: false };
+    }
+
+    const parsed = parseMediaPlaylistWindow(content);
+    if (!parsed) return { content, extended: false };
+
+    const now = Date.now();
+    const state = hlsMediaPlaylistHistory.get(stabilityKey) || {
+        segments: new Map(),
+        updatedAt: now
+    };
+
+    for (const segment of parsed.segments) {
+        state.segments.set(segment.sequence, segment);
+    }
+
+    const lastCurrentSequence = parsed.segments[parsed.segments.length - 1].sequence;
+    const selected = [];
+    for (
+        let seq = lastCurrentSequence;
+        selected.length < HLS_EXTENDED_WINDOW_SEGMENTS && state.segments.has(seq);
+        seq -= 1
+    ) {
+        selected.unshift(state.segments.get(seq));
+    }
+
+    const minimumToKeep = lastCurrentSequence - (HLS_EXTENDED_WINDOW_SEGMENTS * 2);
+    for (const seq of state.segments.keys()) {
+        if (seq < minimumToKeep || seq > lastCurrentSequence) {
+            state.segments.delete(seq);
+        }
+    }
+    state.updatedAt = now;
+    hlsMediaPlaylistHistory.set(stabilityKey, state);
+
+    if (selected.length === parsed.segments.length) {
+        return { content, extended: false };
+    }
+
+    const rebuilt = rebuildMediaPlaylistWindow(parsed, selected);
+    if (!rebuilt) return { content, extended: false };
+
+    console.log(`[${logVideoId}] 🧩 Janela HLS ajustada ${stabilityKey}: ${parsed.segments.length} -> ${selected.length} segmentos`);
+    return {
+        content: rebuilt,
+        extended: true,
+        segments: selected.length,
+        firstSequence: selected[0].sequence
+    };
+}
+
+function pruneHlsMediaPlaylistHistory(now = Date.now()) {
+    let removed = 0;
+    const maxAgeMs = Math.max(60000, STALE_SERVE_MAX_AGE_MS * 2);
+    for (const [key, state] of hlsMediaPlaylistHistory.entries()) {
+        if (!state || now - (Number(state.updatedAt) || 0) > maxAgeMs) {
+            hlsMediaPlaylistHistory.delete(key);
+            removed += 1;
+        }
+    }
+    return removed;
+}
+
+function relaxLiveMediaPlaylistTiming(content) {
+    if (!HLS_COMPAT_TARGET_DURATION || HLS_COMPAT_TARGET_DURATION < 1) return content;
+    const source = String(content || '');
+    if (!source || source.includes('#EXT-X-STREAM-INF') || source.includes('#EXT-X-ENDLIST')) return content;
+
+    return source.replace(/^#EXT-X-TARGETDURATION:(\d+)/m, (line, value) => {
+        const current = parseInt(value, 10);
+        if (!Number.isFinite(current) || current >= HLS_COMPAT_TARGET_DURATION) return line;
+        return `#EXT-X-TARGETDURATION:${HLS_COMPAT_TARGET_DURATION}`;
+    });
 }
 
 function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, stale, monitorSeq }) {
@@ -950,7 +1142,8 @@ function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, st
             lastServedSequence.set(videoId, { sequence, segments, servedAt: Date.now() });
             if (monitorSeq !== undefined && monitorSeq !== null) {
                 const lag = monitorSeq - sequence;
-                if (lag > 3) {
+                const allowedLag = Math.max(3, HLS_EXTENDED_WINDOW_SEGMENTS);
+                if (lag > allowedLag) {
                     lagInfo = ` ⚠️ LAG=${lag} (monitor=${monitorSeq}, served=${sequence})`;
                 } else {
                     lagInfo = ` lag=${lag}`;
@@ -966,6 +1159,10 @@ function logProxyAccess(videoId, { statusCode, fromCache, elapsedMs, content, st
 function stabilizeMediaPlaylist(logVideoId, stabilityKey, content, monitorSeq) {
     let contentToServe = content;
     let staleServed = null;
+    const extended = extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe);
+    contentToServe = extended.content;
+    contentToServe = relaxLiveMediaPlaylistTiming(contentToServe);
+
     const parsed = parseM3u8Info(contentToServe);
     const prev = lastServedSequence.get(stabilityKey);
 
@@ -977,10 +1174,7 @@ function stabilizeMediaPlaylist(logVideoId, stabilityKey, content, monitorSeq) {
             contentToServe = stale.content;
             staleServed = stale;
         } else {
-            contentToServe = contentToServe.replace(
-                /#EXT-X-MEDIA-SEQUENCE:\d+/,
-                `#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`
-            );
+            console.warn(`[${logVideoId}] ⚠️ Sem stale seguro; servindo playlist real sem forçar MEDIA-SEQUENCE.`);
         }
     }
 
@@ -993,7 +1187,7 @@ function stabilizeMediaPlaylist(logVideoId, stabilityKey, content, monitorSeq) {
         rememberGoodM3u8(stabilityKey, contentToServe);
     }
 
-    return { content: contentToServe, stale: staleServed };
+    return { content: contentToServe, stale: staleServed, extended };
 }
 
 function makeBandwidthForHeight(height) {
@@ -1030,7 +1224,7 @@ function getPlaybackManifestBaseUrl(req) {
     );
 }
 
-function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight, baseUrl = '' }) {
+function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight, baseUrl = '', segmentProxy = false }) {
     const basePath = token
         ? `/neonews/t/${encodeURIComponent(token)}.m3u8`
         : `/neonews/${encodeURIComponent(videoId)}.m3u8`;
@@ -1038,6 +1232,7 @@ function buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight, base
     if (!token && owner) params.set('owner', owner);
     params.set('session', sessionId);
     if (maxHeight) params.set('max', String(maxHeight));
+    if (segmentProxy) params.set('segmentProxy', '1');
     const pathAndQuery = `${basePath}?${params.toString()}`;
     const normalizedBaseUrl = normalizeManifestBaseUrl(baseUrl);
     return normalizedBaseUrl ? `${normalizedBaseUrl}${pathAndQuery}` : pathAndQuery;
@@ -1068,7 +1263,8 @@ function buildPlaybackSessionMaster(monitor, {
     sessionId,
     requestedMaxHeight,
     fallbackMaxHeight,
-    baseUrl
+    baseUrl,
+    segmentProxy = false
 }) {
     let heights = getAvailablePlaylistHeights(monitor);
     if (heights.length === 0) {
@@ -1084,13 +1280,103 @@ function buildPlaybackSessionMaster(monitor, {
     const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
     for (const height of heights) {
         const width = Math.round(height * 16 / 9);
-        const url = buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight: height, baseUrl });
+        const url = buildInternalHlsUrl({ token, videoId, owner, sessionId, maxHeight: height, baseUrl, segmentProxy });
         lines.push(
             `#EXT-X-STREAM-INF:BANDWIDTH=${makeBandwidthForHeight(height)},RESOLUTION=${width}x${height},FRAME-RATE=30`,
             url
         );
     }
     return `${lines.join('\n')}\n`;
+}
+
+function isTruthyQueryValue(value) {
+    return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+function isFalseyQueryValue(value) {
+    return ['0', 'false', 'no', 'off'].includes(String(value || '').trim().toLowerCase());
+}
+
+function shouldProxyHlsSegments(req) {
+    const requested = req.query.segmentProxy ?? req.query.proxySegments;
+    if (isTruthyQueryValue(requested)) return true;
+    if (isFalseyQueryValue(requested)) return false;
+    if (HLS_SEGMENT_PROXY_MODE === 'on' || HLS_SEGMENT_PROXY_MODE === 'true' || HLS_SEGMENT_PROXY_MODE === '1') return true;
+    if (HLS_SEGMENT_PROXY_MODE === 'off' || HLS_SEGMENT_PROXY_MODE === 'false' || HLS_SEGMENT_PROXY_MODE === '0') return false;
+    const userAgent = String(req.headers['user-agent'] || '').toLowerCase();
+    return /\b(vlc|libvlc|ffmpeg|ffprobe|kodi)\b/.test(userAgent);
+}
+
+function pruneHlsSegmentProxyEntries(now = Date.now()) {
+    let removed = 0;
+    for (const [id, entry] of hlsSegmentProxyEntries.entries()) {
+        if (!entry || now - (Number(entry.lastAccessAt || entry.createdAt) || 0) > HLS_SEGMENT_PROXY_TTL_MS) {
+            hlsSegmentProxyEntries.delete(id);
+            removed += 1;
+        }
+    }
+    return removed;
+}
+
+function buildHlsSegmentProxyId({ url, sessionId }) {
+    return crypto
+        .createHmac('sha256', process.env.SESSION_SECRET || 'neonews-segment-proxy')
+        .update(String(sessionId || ''))
+        .update('\0')
+        .update(String(url || ''))
+        .digest('hex')
+        .slice(0, 32);
+}
+
+function registerHlsSegmentProxyUrl({ url, videoId, owner, sessionId }) {
+    const id = buildHlsSegmentProxyId({ url, sessionId });
+    const now = Date.now();
+    const existing = hlsSegmentProxyEntries.get(id);
+    hlsSegmentProxyEntries.set(id, {
+        id,
+        url,
+        videoId,
+        owner,
+        sessionId,
+        createdAt: existing?.createdAt || now,
+        lastAccessAt: now
+    });
+    if (hlsSegmentProxyEntries.size > 5000) pruneHlsSegmentProxyEntries(now);
+    return id;
+}
+
+function buildHlsSegmentProxyUrl({ url, videoId, owner, sessionId, baseUrl }) {
+    const id = registerHlsSegmentProxyUrl({ url, videoId, owner, sessionId });
+    const normalizedBaseUrl = normalizeManifestBaseUrl(baseUrl);
+    const pathAndQuery = `/neonews/seg/${encodeURIComponent(id)}.ts`;
+    return normalizedBaseUrl ? `${normalizedBaseUrl}${pathAndQuery}` : pathAndQuery;
+}
+
+function rewriteHlsUriAttributes(line, context) {
+    return line.replace(/URI="([^"]+)"/g, (full, uri) => {
+        try {
+            const absoluteUrl = new URL(uri, context.sourceUrl).href;
+            const proxiedUrl = buildHlsSegmentProxyUrl({ ...context, url: absoluteUrl });
+            return `URI="${proxiedUrl}"`;
+        } catch (_) {
+            return full;
+        }
+    });
+}
+
+function rewriteHlsSegmentUrls(content, context) {
+    if (!context?.sessionId || !context?.owner || !context?.sourceUrl) return content;
+    return String(content || '').split(/\r?\n/).map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return line;
+        if (trimmed.startsWith('#')) return rewriteHlsUriAttributes(line, context);
+        try {
+            const absoluteUrl = new URL(trimmed, context.sourceUrl).href;
+            return buildHlsSegmentProxyUrl({ ...context, url: absoluteUrl });
+        } catch (_) {
+            return line;
+        }
+    }).join('\n');
 }
 
 function sendHlsManifest(res, content, extraHeaders = {}) {
@@ -1148,6 +1434,12 @@ function findActiveHlsMonitor(videoId, owner = null) {
 function handleHlsHead(videoId, owner, res) {
     const found = findActiveHlsMonitor(videoId, owner);
     if (!found.monitor || !found.monitor.m3u8Url) {
+        if (getPersistedEntry(videoId, owner)) {
+            res.setHeader('Retry-After', '2');
+            return sendHlsError(res, 503, 'stream_temporarily_unavailable', {
+                'Retry-After': '2'
+            });
+        }
         return sendHlsError(res, 404, 'stream_not_found');
     }
     res.writeHead(200, {
@@ -1277,6 +1569,12 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     }
 
     if (!monitor || !monitor.m3u8Url) {
+        if (routeContext.token || getPersistedEntry(videoId, queryOwner || actualOwner)) {
+            logProxyAccess(videoId, { statusCode: 503, fromCache: false, elapsedMs: Date.now() - reqStart });
+            return sendHlsError(res, 503, 'stream_temporarily_unavailable', {
+                'Retry-After': '2'
+            });
+        }
         logProxyAccess(videoId, { statusCode: 404, fromCache: false, elapsedMs: Date.now() - reqStart });
         return sendHlsError(res, 404, 'stream_not_found');
     }
@@ -1286,6 +1584,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
     const sessionIdFromRequest = String(req.query.session || '').trim();
     let activePlaybackSessionId = null;
     const playbackManifestBaseUrl = getPlaybackManifestBaseUrl(req);
+    const segmentProxyEnabled = shouldProxyHlsSegments(req);
 
     if (trackingOwner) {
         const clientIp = getRequestIp(req);
@@ -1330,7 +1629,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 }
 
                 activePlaybackSessionId = created.session.sessionId;
-                const sessionAction = created.code === 'reused_stale' || created.code === 'reused_expired'
+                const sessionAction = created.code === 'reused_recent' || created.code === 'reused_stale' || created.code === 'reused_expired'
                     ? 'reaproveitada'
                     : 'criada';
                 console.log(`[${trackingOwner}:${videoId}] 📱 Sessao HLS ${sessionAction}: ${sessionPreview(activePlaybackSessionId)} (${clientIp} | ${userAgent.substring(0, 30)}...)`);
@@ -1341,11 +1640,13 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     sessionId: activePlaybackSessionId,
                     requestedMaxHeight: Number.isFinite(urlMaxHeight) && allowedHeights.includes(urlMaxHeight) ? finalMaxHeight : null,
                     fallbackMaxHeight: finalMaxHeight,
-                    baseUrl: playbackManifestBaseUrl
+                    baseUrl: playbackManifestBaseUrl,
+                    segmentProxy: segmentProxyEnabled
                 });
                 return sendHlsManifest(res, sessionMaster, {
                     'X-Playback-Session': sessionPreview(activePlaybackSessionId),
-                    'X-Master': 'true'
+                    'X-Master': 'true',
+                    ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {})
                 });
             }
         }
@@ -1391,6 +1692,15 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             rememberPinnedVariantUrl(pinKey, playlistSourceUrl);
             const stabilized = stabilizeMediaPlaylist(videoId, cacheKey, result.content, monitor.lastMediaSequence);
             let content = stabilized.content;
+            if (segmentProxyEnabled && activePlaybackSessionId && trackingOwner) {
+                content = rewriteHlsSegmentUrls(content, {
+                    sourceUrl: playlistSourceUrl,
+                    baseUrl: playbackManifestBaseUrl,
+                    videoId,
+                    owner: trackingOwner,
+                    sessionId: activePlaybackSessionId
+                });
+            }
             console.log(`[${videoId}] 🔍 Playlist ${urlMaxHeight}p recebida (${content.length} bytes)`);
             logProxyAccess(cacheKey, {
                 statusCode: 200,
@@ -1407,6 +1717,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 'Vary': 'User-Agent',
                 'Pragma': 'no-cache',
                 'Expires': '0',
+                ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
                 ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
             });
             res.end(content);
@@ -1427,12 +1738,14 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                 sessionId: activePlaybackSessionId,
                 requestedMaxHeight: null,
                 fallbackMaxHeight: finalMaxHeight,
-                baseUrl: playbackManifestBaseUrl
+                baseUrl: playbackManifestBaseUrl,
+                segmentProxy: segmentProxyEnabled
             })
             : monitor._masterContent.content;
         console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (sem filtro)'}`);
         sendHlsManifest(res, content, {
             'X-Master': 'true',
+            ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
             ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
         });
         return;
@@ -1467,36 +1780,22 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                     sessionId: activePlaybackSessionId,
                     requestedMaxHeight: null,
                     fallbackMaxHeight: finalMaxHeight,
-                    baseUrl: playbackManifestBaseUrl
+                    baseUrl: playbackManifestBaseUrl,
+                    segmentProxy: segmentProxyEnabled
                 });
             }
             console.log(`[${videoId}] 🎯 Servindo master ${activePlaybackSessionId ? 'interno com sessao HLS' : 'ORIGINAL (via cache)'}`);
             sendHlsManifest(res, contentToServe, {
                 'X-Master': 'true',
+                ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
                 ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
             });
             return;
         }
 
-        // Para playlists de qualidade (não master), aplicamos a correção de regressão
-        const parsed = parseM3u8Info(contentToServe);
-        const prev = lastServedSequence.get(videoId);
-
-        if (parsed.sequence !== null && prev && parsed.sequence < prev.sequence) {
-            console.warn(`[${videoId}] ⚠️ Detectada regressão de sequência (${prev.sequence} → ${parsed.sequence}). Forçando correção.`);
-            
-            const stale = getStaleM3u8IfFresh(videoId, monitor.lastMediaSequence);
-            if (stale) {
-                console.log(`[${videoId}] 🔄 Usando playlist anterior estável para evitar BehindLiveWindowException.`);
-                contentToServe = stale.content;
-            } else {
-                console.warn(`[${videoId}] ⚠️ Sem stale disponível, forçando sequência ${prev.sequence + 1}`);
-                contentToServe = contentToServe.replace(
-                    /#EXT-X-MEDIA-SEQUENCE:\d+/,
-                    `#EXT-X-MEDIA-SEQUENCE:${prev.sequence + 1}`
-                );
-            }
-        }
+        // Para playlists de qualidade (não master), aplicamos a estabilização segura.
+        const stabilized = stabilizeMediaPlaylist(videoId, videoId, contentToServe, monitor.lastMediaSequence);
+        contentToServe = stabilized.content;
 
         const finalParsed = parseM3u8Info(contentToServe);
         if (finalParsed.sequence !== null) {
@@ -1505,6 +1804,16 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             }
         } else {
             rememberGoodM3u8(videoId, contentToServe);
+        }
+
+        if (segmentProxyEnabled && activePlaybackSessionId && trackingOwner) {
+            contentToServe = rewriteHlsSegmentUrls(contentToServe, {
+                sourceUrl: monitor.m3u8Url,
+                baseUrl: playbackManifestBaseUrl,
+                videoId,
+                owner: trackingOwner,
+                sessionId: activePlaybackSessionId
+            });
         }
 
         const monitorSeq = monitor.lastMediaSequence;
@@ -1525,6 +1834,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             'Expires': '0',
             'X-Cache': result.fromCache ? 'HIT' : 'MISS',
             'X-Master': 'false',
+            ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
             ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
         });
         res.end(contentToServe);
@@ -1566,7 +1876,19 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                         });
                     }
                     if (isRenewedMaster) {
-                        console.log(`[${videoId}] 🎯 Servindo master renovado (sem filtro)`);
+                        if (activePlaybackSessionId && trackingOwner) {
+                            renewedContent = buildPlaybackSessionMaster(monitor, {
+                                token: routeContext.token || null,
+                                videoId,
+                                owner: trackingOwner,
+                                sessionId: activePlaybackSessionId,
+                                requestedMaxHeight: null,
+                                fallbackMaxHeight: finalMaxHeight,
+                                baseUrl: playbackManifestBaseUrl,
+                                segmentProxy: segmentProxyEnabled
+                            });
+                        }
+                        console.log(`[${videoId}] 🎯 Servindo master renovado ${activePlaybackSessionId ? 'interno com sessao HLS' : '(sem filtro)'}`);
                         res.writeHead(200, {
                             'Content-Type': 'application/vnd.apple.mpegurl',
                             'Access-Control-Allow-Origin': '*',
@@ -1575,11 +1897,21 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                             'Pragma': 'no-cache',
                             'Expires': '0',
                             'X-Master': 'true',
+                            ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
                             ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
                         });
                         return res.end(renewedContent);
                     } else {
                         rememberGoodM3u8(videoId, renewedContent);
+                    }
+                    if (segmentProxyEnabled && activePlaybackSessionId && trackingOwner) {
+                        renewedContent = rewriteHlsSegmentUrls(renewedContent, {
+                            sourceUrl: monitor.m3u8Url,
+                            baseUrl: playbackManifestBaseUrl,
+                            videoId,
+                            owner: trackingOwner,
+                            sessionId: activePlaybackSessionId
+                        });
                     }
                     logProxyAccess(videoId, {
                         statusCode: 200,
@@ -1596,6 +1928,7 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                         'Pragma': 'no-cache',
                         'Expires': '0',
                         'X-Master': isRenewedMaster ? 'true' : 'false',
+                        ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
                         ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
                     });
                     return res.end(renewedContent);
@@ -1607,11 +1940,21 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             if (!res.headersSent) {
                 const stale = getStaleM3u8IfFresh(videoId, monitor.lastMediaSequence);
                 if (stale) {
+                    let staleContent = stale.content;
+                    if (segmentProxyEnabled && activePlaybackSessionId && trackingOwner) {
+                        staleContent = rewriteHlsSegmentUrls(staleContent, {
+                            sourceUrl: monitor.m3u8Url,
+                            baseUrl: playbackManifestBaseUrl,
+                            videoId,
+                            owner: trackingOwner,
+                            sessionId: activePlaybackSessionId
+                        });
+                    }
                     logProxyAccess(videoId, {
                         statusCode: 200,
                         fromCache: false,
                         elapsedMs: Date.now() - reqStart,
-                        content: stale.content,
+                        content: staleContent,
                         stale: stale.age,
                         monitorSeq: monitor.lastMediaSequence
                     });
@@ -1623,9 +1966,10 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
                         'Pragma': 'no-cache',
                         'Expires': '0',
                         'X-Stale': 'true',
+                        ...(segmentProxyEnabled ? { 'X-Segment-Proxy': 'true' } : {}),
                         ...(activePlaybackSessionId ? { 'X-Playback-Session': sessionPreview(activePlaybackSessionId) } : {})
                     });
-                    return res.end(stale.content);
+                    return res.end(staleContent);
                 }
 
                 console.log(`[${videoId}] Renovação não concluiu em ${REFRESH_WAIT_MS}ms, respondendo 503.`);
@@ -1642,6 +1986,122 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             sendHlsError(res, 500, 'proxy_error');
         }
     }
+}
+
+function getHlsSegmentProxyEntry(segmentId) {
+    pruneHlsSegmentProxyEntries();
+    const id = String(segmentId || '').trim();
+    if (!/^[a-f0-9]{24,64}$/i.test(id)) return null;
+    return hlsSegmentProxyEntries.get(id) || null;
+}
+
+function validateHlsSegmentSession(entry, req) {
+    if (!entry?.sessionId || !entry?.owner || !entry?.videoId) {
+        return { ok: false, status: 410, message: 'segment_expired' };
+    }
+    const touched = playbackSessions.touchSession({
+        sessionId: entry.sessionId,
+        owner: entry.owner,
+        videoId: entry.videoId,
+        publicIp: getRequestIp(req),
+        userAgent: req.headers['user-agent'] || ''
+    });
+    if (!touched.ok) {
+        return {
+            ok: false,
+            status: touched.code === 'expired' ? 410 : 403,
+            message: touched.code === 'expired' ? 'session_expired' : 'session_invalid'
+        };
+    }
+    entry.lastAccessAt = Date.now();
+    return { ok: true };
+}
+
+function handleHlsSegmentHead(req, res) {
+    const entry = getHlsSegmentProxyEntry(req.params.segmentId);
+    if (!entry) return sendHlsError(res, 410, 'segment_expired');
+    const validation = validateHlsSegmentSession(entry, req);
+    if (!validation.ok) return sendHlsError(res, validation.status, validation.message);
+    res.writeHead(200, {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'private, no-store',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'X-Segment-Proxy': 'true'
+    });
+    res.end();
+}
+
+function handleHlsSegmentProxy(req, res) {
+    const startedAt = Date.now();
+    const entry = getHlsSegmentProxyEntry(req.params.segmentId);
+    if (!entry) return sendHlsError(res, 410, 'segment_expired');
+    const validation = validateHlsSegmentSession(entry, req);
+    if (!validation.ok) return sendHlsError(res, validation.status, validation.message);
+
+    let upstreamUrl;
+    try {
+        upstreamUrl = new URL(entry.url);
+    } catch (_) {
+        hlsSegmentProxyEntries.delete(entry.id);
+        return sendHlsError(res, 410, 'segment_expired');
+    }
+
+    const headers = {
+        'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
+        'Accept': '*/*'
+    };
+    if (req.headers.range) headers.Range = req.headers.range;
+
+    const protocol = upstreamUrl.protocol === 'https:' ? https : http;
+    const upstreamReq = protocol.get(upstreamUrl, {
+        agent: upstreamUrl.protocol === 'https:' ? httpsAgent : httpAgent,
+        headers
+    }, (upstreamRes) => {
+        const statusCode = upstreamRes.statusCode || 502;
+        if (statusCode < 200 || statusCode >= 300) {
+            upstreamRes.resume();
+            if ([403, 404, 410].includes(statusCode)) hlsSegmentProxyEntries.delete(entry.id);
+            console.warn(`[${entry.videoId}] Segmento HLS proxy falhou: status=${statusCode} id=${entry.id.slice(0, 8)} session=${sessionPreview(entry.sessionId)}`);
+            return sendHlsError(res, [403, 404, 410].includes(statusCode) ? 410 : 502, 'segment_unavailable');
+        }
+
+        const responseHeaders = {
+            'Content-Type': upstreamRes.headers['content-type'] || 'application/octet-stream',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'private, no-store',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'X-Segment-Proxy': 'true'
+        };
+        if (upstreamRes.headers['content-length']) responseHeaders['Content-Length'] = upstreamRes.headers['content-length'];
+        if (upstreamRes.headers['content-range']) responseHeaders['Content-Range'] = upstreamRes.headers['content-range'];
+        if (upstreamRes.headers['accept-ranges']) responseHeaders['Accept-Ranges'] = upstreamRes.headers['accept-ranges'];
+
+        res.writeHead(statusCode, responseHeaders);
+        upstreamRes.pipe(res);
+        upstreamRes.on('end', () => {
+            const elapsed = Date.now() - startedAt;
+            if (elapsed > 2000) {
+                console.log(`[${entry.videoId}] Segmento HLS proxy lento: status=${statusCode} ${elapsed}ms id=${entry.id.slice(0, 8)} session=${sessionPreview(entry.sessionId)}`);
+            }
+        });
+    });
+
+    upstreamReq.setTimeout(30000, () => {
+        upstreamReq.destroy(new Error('segment_timeout'));
+    });
+    upstreamReq.on('error', (err) => {
+        if (!res.headersSent) {
+            console.warn(`[${entry.videoId}] Segmento HLS proxy erro: ${err.code || err.message} id=${entry.id.slice(0, 8)} session=${sessionPreview(entry.sessionId)}`);
+            sendHlsError(res, 502, 'segment_unavailable');
+        } else {
+            res.destroy(err);
+        }
+    });
+    req.on('close', () => {
+        if (!res.writableEnded) upstreamReq.destroy();
+    });
 }
 
 // ============================================================
@@ -1939,6 +2399,10 @@ app.get('/api/keepalive', publicApiLimiter, (req, res) => {
 });
 
 // ========== PROXY HLS (rota com videoId) - compatibilidade ==========
+app.head('/neonews/seg/:segmentId.ts', handleHlsSegmentHead);
+
+app.get('/neonews/seg/:segmentId.ts', handleHlsSegmentProxy);
+
 app.head('/neonews/:videoId.m3u8', (req, res) => {
     handleHlsHead(req.params.videoId, req.query.owner || null, res);
 });
@@ -1962,6 +2426,9 @@ app.head('/neonews/t/:token.m3u8', (req, res) => {
     if (!info) {
         return sendHlsError(res, 404, 'token_not_found');
     }
+    if (isRevokedTokenInfo(info)) {
+        return sendHlsError(res, 410, 'token_gone');
+    }
     handleHlsHead(info.videoId, info.owner, res);
 });
 
@@ -1970,6 +2437,9 @@ app.get('/neonews/t/:token.m3u8', async (req, res) => {
     const info = getTokenInfo(token);
     if (!info) {
         return sendHlsError(res, 404, 'token_not_found');
+    }
+    if (isRevokedTokenInfo(info)) {
+        return sendHlsError(res, 410, 'token_gone');
     }
     const { videoId, owner } = info;
     const allowedHeights = [144, 240, 360, 480, 720, 1080];
@@ -2728,9 +3198,9 @@ app.post('/api/monitor/stop/:videoId', async (req, res) => {
         lastServedSequence.delete(videoId);
 
         for (const [token, info] of Object.entries(tokenMap)) {
-            if (info.videoId === videoId && info.owner === actualOwner) {
-                revokeToken(token);
-                console.log(`🗑️ Token ${token} revogado para ${videoId}:${actualOwner}`);
+            if (info.videoId === videoId && info.owner === actualOwner && !info.revokedAt) {
+                revokeToken(token, 'manual_stop');
+                console.log(`🗑️ Token ${tokenPreview(token)} revogado para ${videoId}:${actualOwner}`);
                 break;
             }
         }
@@ -2841,9 +3311,9 @@ const emailAlerts = new EmailAlerts();
 
 const revokeTokenFn = (videoId, owner) => {
     for (const [token, info] of Object.entries(tokenMap)) {
-        if (info.videoId === videoId && info.owner === owner) {
-            revokeToken(token);
-            console.log(`🗑️ Token revogado para ${videoId}:${owner}`);
+        if (info.videoId === videoId && info.owner === owner && !info.revokedAt) {
+            revokeToken(token, 'live_ended');
+            console.log(`🗑️ Token ${tokenPreview(token)} revogado para ${videoId}:${owner}`);
             break;
         }
     }

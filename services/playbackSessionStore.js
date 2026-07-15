@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_TTL_MS = 90000;
+const DEFAULT_REUSE_RECENT_WINDOW_MS = 90000;
 const DEFAULT_REUSE_STALE_AFTER_MS = 45000;
 const DEFAULT_REUSE_EXPIRED_GRACE_MS = 30 * 60 * 1000;
 
@@ -30,6 +31,14 @@ class PlaybackSessionStore {
         this.filePath = options.filePath || path.join(__dirname, '..', 'data', 'playback-sessions.json');
         const configuredTtl = Number(options.ttlMs || process.env.PLAYBACK_SESSION_TTL_MS);
         this.ttlMs = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : DEFAULT_TTL_MS;
+        const configuredReuseRecentWindow = Number(
+            options.reuseRecentWindowMs !== undefined
+                ? options.reuseRecentWindowMs
+                : process.env.PLAYBACK_SESSION_REUSE_RECENT_WINDOW_MS
+        );
+        this.reuseRecentWindowMs = Number.isFinite(configuredReuseRecentWindow) && configuredReuseRecentWindow >= 0
+            ? configuredReuseRecentWindow
+            : DEFAULT_REUSE_RECENT_WINDOW_MS;
         const configuredReuseStaleAfter = Number(
             options.reuseStaleAfterMs !== undefined
                 ? options.reuseStaleAfterMs
@@ -152,8 +161,30 @@ class PlaybackSessionStore {
         return true;
     }
 
+    _canReuseClientSession(fingerprint) {
+        return Boolean(fingerprint);
+    }
+
+    _findReusableRecentSession(store, { owner, videoId, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+        if (!this.reuseRecentWindowMs) return null;
+        if (!this._canReuseClientSession(fingerprint)) return null;
+        const candidates = Object.entries(store.sessions)
+            .filter(([, session]) => this._matches(session, owner, videoId))
+            .filter(([, session]) => !this._isExpired(session, nowMs))
+            .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint }))
+            .filter(([, session]) => nowMs - this._lastSeenMs(session) <= this.reuseRecentWindowMs)
+            .sort(([, a], [, b]) => this._lastSeenMs(b) - this._lastSeenMs(a));
+        if (candidates.length === 0) return null;
+        return {
+            sessionId: candidates[0][0],
+            session: candidates[0][1],
+            expired: false
+        };
+    }
+
     _findReusableStaleSession(store, { owner, videoId, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
         if (!this.reuseStaleAfterMs) return null;
+        if (!this._canReuseClientSession(fingerprint)) return null;
         const candidates = Object.entries(store.sessions)
             .filter(([, session]) => this._matches(session, owner, videoId))
             .filter(([, session]) => !this._isPastRetention(session, nowMs))
@@ -168,7 +199,20 @@ class PlaybackSessionStore {
         };
     }
 
-    _reuseSession(store, reusable, { publicIp, userAgent, source, fingerprint }, nowMs, activeCount, limit) {
+    _removeDuplicateClientSessions(store, keepSessionId, { owner, videoId, publicIp, userAgent, fingerprint } = {}) {
+        if (!this._canReuseClientSession(fingerprint)) return 0;
+        let removed = 0;
+        for (const [sessionId, session] of Object.entries(store.sessions)) {
+            if (sessionId === keepSessionId) continue;
+            if (!this._matches(session, owner, videoId)) continue;
+            if (!this._matchesClient(session, { publicIp, userAgent, fingerprint })) continue;
+            delete store.sessions[sessionId];
+            removed += 1;
+        }
+        return removed;
+    }
+
+    _reuseSession(store, reusable, { owner, videoId, publicIp, userAgent, source, fingerprint }, nowMs, activeCount, limit, code = null) {
         const nowIso = this._nowIso(nowMs);
         reusable.session.lastSeenAt = nowIso;
         reusable.session.publicIp = safeText(publicIp, 80);
@@ -176,12 +220,19 @@ class PlaybackSessionStore {
         reusable.session.status = 'active';
         reusable.session.source = safeText(source, 80);
         reusable.session.fingerprint = fingerprint ? safeText(fingerprint, 240) : null;
+        const duplicatesRemoved = this._removeDuplicateClientSessions(store, reusable.sessionId, {
+            owner,
+            videoId,
+            publicIp,
+            userAgent,
+            fingerprint
+        });
         this._writeStore(store);
         return {
             ok: true,
-            code: reusable.expired ? 'reused_expired' : 'reused_stale',
+            code: code || (reusable.expired ? 'reused_expired' : 'reused_stale'),
             session: reusable.session,
-            active: activeCount + (reusable.expired ? 1 : 0),
+            active: Math.max(1, activeCount + (reusable.expired ? 1 : 0) - duplicatesRemoved),
             limit
         };
     }
@@ -209,6 +260,24 @@ class PlaybackSessionStore {
             };
         }
 
+        const recentReusable = this._findReusableRecentSession(store, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
+        if (recentReusable) {
+            return this._reuseSession(store, recentReusable, {
+                owner: normalizedOwner,
+                videoId: normalizedVideoId,
+                publicIp,
+                userAgent,
+                source,
+                fingerprint
+            }, nowMs, active.length, numericLimit, 'reused_recent');
+        }
+
         const reusable = this._findReusableStaleSession(store, {
             owner: normalizedOwner,
             videoId: normalizedVideoId,
@@ -218,6 +287,8 @@ class PlaybackSessionStore {
         }, nowMs);
         if (reusable && !reusable.expired) {
             return this._reuseSession(store, reusable, {
+                owner: normalizedOwner,
+                videoId: normalizedVideoId,
                 publicIp,
                 userAgent,
                 source,
@@ -237,6 +308,8 @@ class PlaybackSessionStore {
 
         if (reusable && reusable.expired) {
             return this._reuseSession(store, reusable, {
+                owner: normalizedOwner,
+                videoId: normalizedVideoId,
                 publicIp,
                 userAgent,
                 source,
@@ -297,6 +370,13 @@ class PlaybackSessionStore {
         session.publicIp = safeText(publicIp, 80);
         session.userAgent = safeText(userAgent, this.maxUserAgentLength);
         session.status = 'active';
+        this._removeDuplicateClientSessions(store, id, {
+            owner,
+            videoId,
+            publicIp,
+            userAgent,
+            fingerprint: session.fingerprint || null
+        });
         this._writeStore(store);
         return { ok: true, code: 'touched', session };
     }
