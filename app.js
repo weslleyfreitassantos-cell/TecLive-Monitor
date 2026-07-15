@@ -1680,13 +1680,14 @@ function isFalseyQueryValue(value) {
 }
 
 function shouldProxyHlsSegments(req) {
-    const requested = req.query.segmentProxy ?? req.query.proxySegments;
+    const requested = req.query?.segmentProxy ?? req.query?.proxySegments;
     if (isTruthyQueryValue(requested)) return true;
     if (isFalseyQueryValue(requested)) return false;
     if (HLS_SEGMENT_PROXY_MODE === 'on' || HLS_SEGMENT_PROXY_MODE === 'true' || HLS_SEGMENT_PROXY_MODE === '1') return true;
     if (HLS_SEGMENT_PROXY_MODE === 'off' || HLS_SEGMENT_PROXY_MODE === 'false' || HLS_SEGMENT_PROXY_MODE === '0') return false;
     const userAgent = String(req.headers['user-agent'] || '').toLowerCase();
-    return /\b(vlc|libvlc|ffmpeg|ffprobe|kodi)\b/.test(userAgent);
+    if (/\b(vlc|libvlc)\b/.test(userAgent)) return false;
+    return /\b(ffmpeg|ffprobe|kodi)\b/.test(userAgent);
 }
 
 function pruneHlsSegmentProxyEntries(now = Date.now()) {

@@ -752,6 +752,7 @@ function loadHlsContinuityHooks() {
     const helperCore = sliceBetween(app, 'function normalizeHlsStateKeyPart', 'async function fetchM3u8WithCache');
     const parserCore = sliceBetween(app, 'function parseM3u8Info', 'function makeBandwidthForHeight');
     const masterCore = sliceBetween(app, 'function makeBandwidthForHeight', 'function isTruthyQueryValue');
+    const segmentProxyCore = sliceBetween(app, 'function isTruthyQueryValue', 'function pruneHlsSegmentProxyEntries');
     const capturedLogs = [];
     const context = {
         require,
@@ -780,6 +781,7 @@ function loadHlsContinuityHooks() {
         const HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS = 2;
         const HLS_VLC_STARTUP_WINDOW_MS = 180000;
         const HLS_VLC_STARTUP_MIN_SEGMENTS = 5;
+        const HLS_SEGMENT_PROXY_MODE = 'auto';
         const STALE_SERVE_MAX_AGE_MS = 60000;
         const playbackVariantUrlPins = new Map();
         const hlsSessionVariantState = new Map();
@@ -817,6 +819,7 @@ function loadHlsContinuityHooks() {
         ${helperCore}
         ${parserCore}
         ${masterCore}
+        ${segmentProxyCore}
         globalThis.__hooks = {
             capturedLogs,
             setActiveSessions(value) { activeSessions = value; },
@@ -835,6 +838,7 @@ function loadHlsContinuityHooks() {
             isExoCompatibleUserAgent,
             isVlcCompatibleUserAgent,
             shouldUseSingleVariantMaster,
+            shouldProxyHlsSegments,
             getHlsStartupLiveEdgeOffsetSegments,
             extendLiveMediaPlaylistWindow,
             stabilizeMediaPlaylist,
@@ -996,6 +1000,8 @@ function testHlsContinuityExecutableChecks() {
     const vlcReq = { headers: { 'user-agent': 'VLC/3.0.21 LibVLC/3.0.21' } };
     const browserReq = { headers: { 'user-agent': 'Mozilla/5.0 Chrome/126.0 Safari/537.36' } };
     const ffmpegReq = { headers: { 'user-agent': 'Lavf/60.16.100' } };
+    const ffprobeReq = { headers: { 'user-agent': 'ffprobe/6.1' } };
+    const kodiReq = { headers: { 'user-agent': 'Kodi/21.0' } };
     assert.equal(hls.shouldUseSingleVariantMaster(neoNewsReq), true);
     assert.equal(hls.shouldUseSingleVariantMaster(lowercaseReq), true);
     assert.equal(hls.shouldUseSingleVariantMaster(vlcReq), false);
@@ -1004,6 +1010,12 @@ function testHlsContinuityExecutableChecks() {
     assert.equal(hls.isVlcCompatibleUserAgent(neoNewsReq), false);
     assert.equal(hls.isVlcCompatibleUserAgent(browserReq), false);
     assert.equal(hls.isVlcCompatibleUserAgent(ffmpegReq), false);
+    assert.equal(hls.shouldProxyHlsSegments(vlcReq), false);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: { 'user-agent': 'LibVLC/3.0.11' }, query: {} }), false);
+    assert.equal(hls.shouldProxyHlsSegments(ffprobeReq), true);
+    assert.equal(hls.shouldProxyHlsSegments(kodiReq), true);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: vlcReq.headers, query: { segmentProxy: '1' } }), true);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: ffprobeReq.headers, query: { segmentProxy: '0' } }), false);
     const startupNow = Date.parse('2026-07-15T12:00:00.000Z');
     assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(vlcReq, {
         createdAt: new Date(startupNow - 30000).toISOString()
