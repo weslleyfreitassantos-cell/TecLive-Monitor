@@ -779,6 +779,7 @@ function loadHlsContinuityHooks() {
         const HLS_COMPAT_TARGET_DURATION = 8;
         const HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS = 2;
         const HLS_VLC_STARTUP_WINDOW_MS = 180000;
+        const HLS_VLC_STARTUP_MIN_SEGMENTS = 5;
         const STALE_SERVE_MAX_AGE_MS = 60000;
         const playbackVariantUrlPins = new Map();
         const hlsSessionVariantState = new Map();
@@ -1049,7 +1050,8 @@ function testHlsContinuityExecutableChecks() {
         'https://media.example.test/s406.ts?sig=secret-s406'
     ].join('\n') + '\n';
     const sevenShifted = hls.stabilizeMediaPlaylist('VID123', `${startupKey}_seven`, sevenSegments, null, {
-        liveEdgeOffsetSegments: 2
+        liveEdgeOffsetSegments: 2,
+        minSegmentsWithLiveEdgeOffset: 5
     });
     const sevenSnapshot = hls.getPlaylistSnapshot(sevenShifted.content, 'https://upstream.example.test/720.m3u8');
     assert.equal(sevenSnapshot.segmentCount, 5);
@@ -1058,26 +1060,32 @@ function testHlsContinuityExecutableChecks() {
     assert.ok(!sevenShifted.content.includes('s205.ts'));
     assert.ok(!sevenShifted.content.includes('s206.ts'));
     const shortShifted = hls.stabilizeMediaPlaylist('VID123', `${startupKey}_short`, shortSegments, null, {
-        liveEdgeOffsetSegments: 2
+        liveEdgeOffsetSegments: 2,
+        minSegmentsWithLiveEdgeOffset: 5
     });
     const shortSnapshot = hls.getPlaylistSnapshot(shortShifted.content, 'https://upstream.example.test/720.m3u8');
     assert.equal(shortSnapshot.segmentCount, 3);
     assert.equal(shortSnapshot.lastSequence, 302);
     const taggedShifted = hls.extendLiveMediaPlaylistWindow('VID123', `${startupKey}_tags`, taggedSegments, {
-        liveEdgeOffsetSegments: 2
+        liveEdgeOffsetSegments: 2,
+        minSegmentsWithLiveEdgeOffset: 5
     });
     assert.ok(taggedShifted.content.includes('#EXT-X-KEY:METHOD=AES-128'));
     assert.ok(taggedShifted.content.includes('#EXT-X-MAP:URI="init.mp4"'));
     assert.ok(taggedShifted.content.includes('#EXT-X-DISCONTINUITY'));
     assert.ok(taggedShifted.content.includes('#EXT-X-TARGETDURATION:6'));
     const shiftedFirst = hls.stabilizeMediaPlaylist('VID123', startupKey, startupFirst, null, {
-        liveEdgeOffsetSegments: 2
+        liveEdgeOffsetSegments: 2,
+        minSegmentsWithLiveEdgeOffset: 5
     });
     const shiftedFirstSnapshot = hls.getPlaylistSnapshot(shiftedFirst.content, 'https://upstream.example.test/720.m3u8');
-    assert.equal(shiftedFirstSnapshot.lastSequence, 103);
-    assert.ok(!shiftedFirst.content.includes('s104.ts'));
+    assert.equal(shiftedFirstSnapshot.segmentCount, 6);
+    assert.equal(shiftedFirstSnapshot.lastSequence, 105);
+    assert.ok(shiftedFirst.content.includes('s104.ts'));
+    assert.ok(shiftedFirst.content.includes('s105.ts'));
     const shiftedSecond = hls.stabilizeMediaPlaylist('VID123', startupKey, startupSecond, null, {
-        liveEdgeOffsetSegments: 2
+        liveEdgeOffsetSegments: 2,
+        minSegmentsWithLiveEdgeOffset: 5
     });
     const shiftedSecondSnapshot = hls.getPlaylistSnapshot(shiftedSecond.content, 'https://upstream.example.test/720.m3u8');
     assert.equal(shiftedSecondSnapshot.mediaSequence, 100);
@@ -1196,6 +1204,8 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes("Math.min(2, parseNonNegativeIntegerEnv('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS', 2))"));
     assert.ok(app.includes('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS'));
     assert.ok(app.includes('HLS_VLC_STARTUP_WINDOW_MS'));
+    assert.ok(app.includes('HLS_VLC_STARTUP_MIN_SEGMENTS'));
+    assert.ok(app.includes('minSegmentsWithLiveEdgeOffset: liveEdgeOffsetSegments ? HLS_VLC_STARTUP_MIN_SEGMENTS : 3'));
     assert.ok(app.includes('HLS_SESSION_UPSTREAM_STUCK_MS'));
     assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_MASTER'));
     assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT'));

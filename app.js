@@ -843,6 +843,7 @@ const HLS_EXOMEDIA_SINGLE_VARIANT_MASTER = String(process.env.HLS_EXOMEDIA_SINGL
 const HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT = parseInt(process.env.HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT, 10) || 720;
 const HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS = Math.min(2, parseNonNegativeIntegerEnv('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS', 2));
 const HLS_VLC_STARTUP_WINDOW_MS = parseNonNegativeIntegerEnv('HLS_VLC_STARTUP_WINDOW_MS', 3 * 60 * 1000);
+const HLS_VLC_STARTUP_MIN_SEGMENTS = Math.max(3, parseNonNegativeIntegerEnv('HLS_VLC_STARTUP_MIN_SEGMENTS', 5));
 
 const REFRESH_WAIT_MS = 20000; // Aumentado para 20s
 const STALE_SERVE_MAX_AGE_MS = parseInt(process.env.STALE_MAX_AGE_MS) || 60000; // 1 minuto
@@ -1436,7 +1437,11 @@ function extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, content, option
     );
     let selected = buildSelection(effectiveLastSequence);
 
-    if (liveEdgeOffsetSegments && selected.length < Math.min(3, parsed.segments.length)) {
+    const minSegmentsWithLiveEdgeOffset = Math.max(
+        3,
+        parseInt(options.minSegmentsWithLiveEdgeOffset, 10) || 3
+    );
+    if (liveEdgeOffsetSegments && selected.length < Math.min(minSegmentsWithLiveEdgeOffset, parsed.segments.length)) {
         liveEdgeOffsetSegments = 0;
         effectiveLastSequence = lastCurrentSequence;
         selected = buildSelection(effectiveLastSequence);
@@ -2162,7 +2167,8 @@ async function handleM3u8Proxy(videoId, owner, req, res, maxHeight, routeContext
             const startupOffsetKeySuffix = liveEdgeOffsetSegments ? `_startupOffset${liveEdgeOffsetSegments}` : '';
             const stabilityKey = `${pinKey || cacheKey}${startupOffsetKeySuffix}`;
             const stabilized = stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence, {
-                liveEdgeOffsetSegments
+                liveEdgeOffsetSegments,
+                minSegmentsWithLiveEdgeOffset: liveEdgeOffsetSegments ? HLS_VLC_STARTUP_MIN_SEGMENTS : 3
             });
             let content = stabilized.content;
             const servedSnapshot = getPlaylistSnapshot(content, playlistSourceUrl);
