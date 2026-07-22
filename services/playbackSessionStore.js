@@ -8,6 +8,8 @@ const DEFAULT_REUSE_STALE_AFTER_MS = 45000;
 const DEFAULT_REUSE_EXPIRED_GRACE_MS = 30 * 60 * 1000;
 const DEFAULT_REOPEN_REUSE_MS = 20000;
 const DEFAULT_REOPEN_REUSE_MIN_AGE_MS = 1000;
+const DEFAULT_MASTER_REOPEN_REUSE_MS = 45000;
+const DEFAULT_MASTER_REOPEN_REUSE_MIN_AGE_MS = 25000;
 
 function safeText(value, limit = 300) {
     return String(value || '')
@@ -73,6 +75,22 @@ class PlaybackSessionStore {
         this.reopenReuseMinAgeMs = Number.isFinite(configuredReopenReuseMinAge) && configuredReopenReuseMinAge >= 0
             ? configuredReopenReuseMinAge
             : DEFAULT_REOPEN_REUSE_MIN_AGE_MS;
+        const configuredMasterReopenReuse = Number(
+            options.masterReopenReuseMs !== undefined
+                ? options.masterReopenReuseMs
+                : process.env.HLS_SESSION_MASTER_REOPEN_REUSE_MS
+        );
+        this.masterReopenReuseMs = Number.isFinite(configuredMasterReopenReuse) && configuredMasterReopenReuse >= 0
+            ? configuredMasterReopenReuse
+            : DEFAULT_MASTER_REOPEN_REUSE_MS;
+        const configuredMasterReopenReuseMinAge = Number(
+            options.masterReopenReuseMinAgeMs !== undefined
+                ? options.masterReopenReuseMinAgeMs
+                : process.env.HLS_SESSION_MASTER_REOPEN_REUSE_MIN_AGE_MS
+        );
+        this.masterReopenReuseMinAgeMs = Number.isFinite(configuredMasterReopenReuseMinAge) && configuredMasterReopenReuseMinAge >= 0
+            ? configuredMasterReopenReuseMinAge
+            : DEFAULT_MASTER_REOPEN_REUSE_MIN_AGE_MS;
         this.maxUserAgentLength = Number(options.maxUserAgentLength || 240);
         this._ensureStore();
     }
@@ -164,8 +182,20 @@ class PlaybackSessionStore {
         return safeText(userAgent, this.maxUserAgentLength).toLowerCase();
     }
 
+    _isLegacyVlcUserAgent(userAgent) {
+        const match = String(userAgent || '').toLowerCase().match(/\b(?:libvlc|vlc)\/(\d+)\.(\d+)\.(\d+)/);
+        if (!match) return false;
+        const major = Number(match[1]);
+        const minor = Number(match[2]);
+        const patch = Number(match[3]);
+        if (![major, minor, patch].every(Number.isFinite)) return false;
+        if (major < 3) return true;
+        return major === 3 && minor === 0 && patch <= 11;
+    }
+
     _isReopenEligibleUserAgent(userAgent) {
-        return /\b(exomedia|neonews)\b/i.test(String(userAgent || ''));
+        return /\b(exomedia|neonews)\b/i.test(String(userAgent || '')) ||
+            this._isLegacyVlcUserAgent(userAgent);
     }
 
     _createdMs(session) {
@@ -180,6 +210,19 @@ class PlaybackSessionStore {
 
     _latestReopenEvidence(session) {
         const candidates = ['variantTouchedAt', 'segmentTouchedAt']
+            .map(field => ({
+                field,
+                value: session?.[field],
+                ms: this._activityMs(session, field)
+            }))
+            .filter(candidate => candidate.ms > 0)
+            .sort((a, b) => b.ms - a.ms);
+        return candidates[0] || null;
+    }
+
+    _latestMasterOnlyEvidence(session) {
+        if (this._latestReopenEvidence(session)) return null;
+        const candidates = ['masterTouchedAt', 'masterServedAt']
             .map(field => ({
                 field,
                 value: session?.[field],
@@ -248,9 +291,40 @@ class PlaybackSessionStore {
                 const evidenceAge = evidence ? nowMs - evidence.ms : lastSeenAge;
                 return lastSeenAge >= 0 &&
                     lastSeenAge <= reopenWindowMs &&
-                    evidenceAge >= this.reopenReuseMinAgeMs &&
+                    evidenceAge >= 0 &&
                     evidenceAge <= reopenWindowMs &&
                     createdAge >= this.reopenReuseMinAgeMs;
+            })
+            .sort(([, a], [, b]) => this._lastSeenMs(b) - this._lastSeenMs(a));
+        if (candidates.length === 0) return null;
+        return {
+            sessionId: candidates[0][0],
+            session: candidates[0][1],
+            expired: false
+        };
+    }
+
+    _findMasterOnlyReopenSession(store, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+        if (!this.masterReopenReuseMs) return null;
+        if (fingerprint) return null;
+        if (!this._isReopenEligibleUserAgent(userAgent)) return null;
+        const normalizedTokenScope = this._normalizeTokenScope(tokenScope);
+        const masterWindowMs = Math.min(this.masterReopenReuseMs, this.ttlMs);
+        const candidates = Object.entries(store.sessions)
+            .filter(([, session]) => this._matches(session, owner, videoId, normalizedTokenScope))
+            .filter(([, session]) => !this._isExpired(session, nowMs))
+            .filter(([, session]) => this._matchesClient(session, { publicIp, userAgent, fingerprint: null }))
+            .filter(([, session]) => {
+                const evidence = this._latestMasterOnlyEvidence(session);
+                if (!evidence) return false;
+                const lastSeenAge = nowMs - this._lastSeenMs(session);
+                const evidenceAge = nowMs - evidence.ms;
+                const createdAge = nowMs - this._createdMs(session);
+                return lastSeenAge >= 0 &&
+                    lastSeenAge <= masterWindowMs &&
+                    evidenceAge >= this.masterReopenReuseMinAgeMs &&
+                    evidenceAge <= masterWindowMs &&
+                    createdAge >= this.masterReopenReuseMinAgeMs;
             })
             .sort(([, a], [, b]) => this._lastSeenMs(b) - this._lastSeenMs(a));
         if (candidates.length === 0) return null;
@@ -312,6 +386,25 @@ class PlaybackSessionStore {
         return removed;
     }
 
+    _removeAbandonedReopenClientSessions(store, keepSessionId, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
+        if (fingerprint) return 0;
+        if (!this._isReopenEligibleUserAgent(userAgent)) return 0;
+        const staleAfterMs = Math.max(this.reopenReuseMs || 0, this.reopenReuseMinAgeMs || 0, 1000);
+        let removed = 0;
+        for (const [sessionId, session] of Object.entries(store.sessions)) {
+            if (keepSessionId && sessionId === keepSessionId) continue;
+            if (!this._matches(session, owner, videoId, tokenScope)) continue;
+            if (this._isExpired(session, nowMs)) continue;
+            if (!this._matchesClient(session, { publicIp, userAgent, fingerprint: null })) continue;
+            if (!this._latestReopenEvidence(session)) continue;
+            const lastSeenAge = nowMs - this._lastSeenMs(session);
+            if (!Number.isFinite(lastSeenAge) || lastSeenAge < staleAfterMs) continue;
+            delete store.sessions[sessionId];
+            removed += 1;
+        }
+        return removed;
+    }
+
     _removeClientSessionsFromOtherLives(store, keepSessionId, { owner, videoId, tokenScope, publicIp, userAgent, fingerprint } = {}, nowMs = Date.now()) {
         if (!this._isReopenEligibleUserAgent(userAgent)) return 0;
         let removed = 0;
@@ -342,6 +435,10 @@ class PlaybackSessionStore {
             reusable.session.lastReopenAt = nowIso;
             if (reopenEvidence?.value) reusable.session.lastReopenEvidenceAt = reopenEvidence.value;
         }
+        if (code === 'reused_master_reopen') {
+            reusable.session.masterTouchedAt = nowIso;
+            reusable.session.lastReopenAt = nowIso;
+        }
         const duplicatesRemoved = this._removeDuplicateClientSessions(store, reusable.sessionId, {
             owner,
             videoId,
@@ -350,12 +447,21 @@ class PlaybackSessionStore {
             userAgent,
             fingerprint
         });
+        const abandonedRemoved = this._removeAbandonedReopenClientSessions(store, reusable.sessionId, {
+            owner,
+            videoId,
+            tokenScope,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
         this._writeStore(store);
         return {
             ok: true,
             code: code || (reusable.expired ? 'reused_expired' : 'reused_stale'),
             session: reusable.session,
-            active: Math.max(1, activeCount + (reusable.expired ? 1 : 0) - duplicatesRemoved),
+            active: Math.max(1, activeCount + (reusable.expired ? 1 : 0) - duplicatesRemoved - abandonedRemoved),
+            abandonedRemoved,
             limit
         };
     }
@@ -367,7 +473,7 @@ class PlaybackSessionStore {
         if (!normalizedOwner || !normalizedVideoId) return { ok: false, code: 'invalid_scope' };
         const store = this._readStore();
         const changed = this._pruneExpiredInStore(store, nowMs);
-        const active = this._activeSessionsInStore(store, {
+        let active = this._activeSessionsInStore(store, {
             owner: normalizedOwner,
             videoId: normalizedVideoId
         }, nowMs);
@@ -444,8 +550,43 @@ class PlaybackSessionStore {
             }, nowMs, active.length, numericLimit, 'reused_reopen');
         }
 
+        const masterOnlyReopenReusable = this._findMasterOnlyReopenSession(store, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
+        if (masterOnlyReopenReusable) {
+            return this._reuseSession(store, masterOnlyReopenReusable, {
+                owner: normalizedOwner,
+                videoId: normalizedVideoId,
+                tokenScope: normalizedTokenScope,
+                publicIp,
+                userAgent,
+                source,
+                fingerprint
+            }, nowMs, active.length, numericLimit, 'reused_master_reopen');
+        }
+
+        const abandonedRemovedBeforeLimit = this._removeAbandonedReopenClientSessions(store, null, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
+        if (abandonedRemovedBeforeLimit) {
+            active = this._activeSessionsInStore(store, {
+                owner: normalizedOwner,
+                videoId: normalizedVideoId
+            }, nowMs);
+        }
+
         if (active.length >= numericLimit) {
-            if (changed) this._writeStore(store);
+            if (changed || abandonedRemovedBeforeLimit) this._writeStore(store);
             return {
                 ok: false,
                 code: 'limit_exceeded',
@@ -494,6 +635,14 @@ class PlaybackSessionStore {
             userAgent,
             fingerprint
         }, nowMs);
+        const abandonedRemoved = this._removeAbandonedReopenClientSessions(store, sessionId, {
+            owner: normalizedOwner,
+            videoId: normalizedVideoId,
+            tokenScope: normalizedTokenScope,
+            publicIp,
+            userAgent,
+            fingerprint
+        }, nowMs);
         this._writeStore(store);
         return {
             ok: true,
@@ -501,6 +650,7 @@ class PlaybackSessionStore {
             session,
             active: active.length + 1,
             handoffRemoved,
+            abandonedRemoved: abandonedRemovedBeforeLimit + abandonedRemoved,
             limit: numericLimit
         };
     }

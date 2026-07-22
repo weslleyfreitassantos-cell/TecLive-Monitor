@@ -1,4 +1,4 @@
-﻿// monitor/liveMonitor.js - Versão com ABR (master artificial) e suporte a maxHeight por requisição
+// monitor/liveMonitor.js - Versão com ABR (master artificial) e suporte a maxHeight por requisição
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -48,6 +48,60 @@ const httpsAgent = new https.Agent({
 });
 
 // ============================================================
+// ✅ COMPARTILHADO ENTRE INSTÂNCIAS (single-flight + backoff)
+// ============================================================
+const _metadataFlights = new Map();
+const _metadataBackoffs = new Map();
+const _BACKOFF_DELAYS = [60000, 120000, 300000, 600000, 900000];
+const PUBLIC_TRANSIENT = 'public_transient_rate_limit';
+
+function _isRateLimitedMsg(msg) {
+    const m = (msg || '').toLowerCase();
+    return m.includes("we're experiencing technical difficulties") || m.includes('technical difficulties');
+}
+
+function _calcBackoffMs(failCount) {
+    const idx = Math.min(Math.max(0, failCount - 1), _BACKOFF_DELAYS.length - 1);
+    const base = _BACKOFF_DELAYS[idx];
+    const jitter = 1 + (Math.random() * 0.2 - 0.1);
+    return Math.round(base * jitter);
+}
+
+function _openBackoff(videoId, reason, failCount) {
+    const ms = _calcBackoffMs(failCount);
+    _metadataBackoffs.set(videoId, {
+        failureCount: failCount,
+        reason,
+        backoffUntil: Date.now() + ms,
+        delayMs: ms,
+        openedAt: Date.now(),
+        _lastLogAt: 0
+    });
+}
+
+function _closeBackoff(videoId) {
+    _metadataBackoffs.delete(videoId);
+}
+
+function _backoffRemainingMs(videoId) {
+    const s = _metadataBackoffs.get(videoId);
+    if (!s) return 0;
+    const r = s.backoffUntil - Date.now();
+    return r > 0 ? r : 0;
+}
+
+function _logBackoffOnce(videoId) {
+    const s = _metadataBackoffs.get(videoId);
+    if (!s) return false;
+    const now = Date.now();
+    if (now - s._lastLogAt >= 30000) {
+        s._lastLogAt = now;
+        return true;
+    }
+    return false;
+}
+
+// ============================================================
 
 let systemState = null;
 try { systemState = require('../systemState'); } catch(e) {}
@@ -75,11 +129,17 @@ const ComponentStatus = {
     CRITICAL: 'critical'
 };
 
+const TERMINAL_LIVE_CLASSIFICATIONS = new Set([
+    CLASSIFICATION.LIVE_ENDED,
+    CLASSIFICATION.VIDEO_UNAVAILABLE,
+    CLASSIFICATION.VIDEO_REMOVED
+]);
+
 class LiveMonitor {
     constructor(youtubeUrl, emailAlerts, activeMonitorsMap = null, scheduler = null, cookieRotator = null, onEnd = null, onGlobalExtractionOutage = null) {
         this.youtubeUrl = youtubeUrl;
         this.emailAlerts = emailAlerts;
-        this.videoId = this.extractVideoId(youtubeUrl); // ✅ agora o método existe
+        this.videoId = this.extractVideoId(youtubeUrl);
         this.m3u8Url = null;
         this.isLive = false;
         this.intervalMs = 8000;
@@ -144,9 +204,7 @@ class LiveMonitor {
         this._liveEndedFirstDetection = null;
         this.lastRefreshFailedAt = 0;
         
-        // ✅ Armazenar URLs das playlists de qualidade (altura -> URL)
         this._playlistUrls = {};
-        // Armazenar master artificial (se gerado)
         this._masterContent = null;
         this.lastExtractionFailureClassification = null;
         this.lastExtractionDiagnostics = null;
@@ -161,9 +219,10 @@ class LiveMonitor {
         this._lastMetadataExtractionSource = null;
         this.lastExtractionSuccessAt = null;
         this.lastPublicCookieRecheckAt = 0;
+
+        this._lastBackoffJoinLogAt = 0;
     }
 
-    // ✅ MÉTODO CORRIGIDO (estava faltando)
     extractVideoId(url) {
         const match = url.match(/(?:v=|\/)([0-9A-Za-z_-]{11})(?:[?&]|$)/);
         return match ? match[1] : 'url_invalida';
@@ -197,6 +256,10 @@ class LiveMonitor {
     }
 
     _recordExtractionFailure(classification) {
+        if (TERMINAL_LIVE_CLASSIFICATIONS.has(classification)) {
+            this._syncExtractionBackoffFields();
+            return;
+        }
         if (!shouldApplyExtractionBackoff(classification)) {
             this._syncExtractionBackoffFields();
             return;
@@ -440,68 +503,143 @@ class LiveMonitor {
 
     async getLiveMetadata(force = false) {
         const agora = Date.now();
+        const videoId = this.videoId;
+
+        // 1) Check transient backoff
+        const backoffMs = _backoffRemainingMs(videoId);
+        if (backoffMs > 0) {
+            if (_logBackoffOnce(videoId)) {
+                console.log(`[${videoId}] metadata-backoff skip videoId=${videoId} reason=${_metadataBackoffs.get(videoId).reason} retryInMs=${backoffMs}`);
+            }
+            return {
+                success: false,
+                error: `metadata_backoff: ${_metadataBackoffs.get(videoId).reason}`,
+                errorType: 'metadata_backoff',
+                classification: PUBLIC_TRANSIENT,
+                skipped: true,
+                retryAt: _metadataBackoffs.get(videoId).backoffUntil
+            };
+        }
+
+        // 2) Check metadata cache
         if (!force && this._cachedMetadata && (agora - this._metadataCacheTime) < this._metadataTTL) {
             console.log(`[${this.videoId}] 📦 Usando cache de metadados (${((agora - this._metadataCacheTime)/1000).toFixed(1)}s)`);
             return { success: true, metadata: this._cachedMetadata };
         }
-        this._lastMetadataExtractionSource = null;
-        let cookiePath = null;
-        try {
-            cookiePath = this.getCookiePath();
-            const args = buildYtdlpDumpJsonArgs({
-                url: this.youtubeUrl,
-                source: cookiePath ? 'cookie' : 'public',
-                cookiePath
-            });
-            const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
-            const metadata = JSON.parse(stdout);
-            const diagnostics = getYtdlpDiagnostics(metadata);
-            this.lastExtractionDiagnostics = diagnostics;
-            console.log(`[${this.videoId}] 📊 yt-dlp JSON: formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
-            this._cachedMetadata = metadata;
-            this._metadataCacheTime = agora;
-            this.updateHealthComponent('metadata', ComponentStatus.OK, 'Metadados obtidos com sucesso');
-            this.metadataFails = 0;
-            if (this.lastSuccessfulCookie) this.updateHealthComponent('cookies', ComponentStatus.OK, 'Cookie funcionando');
-            
-            return { success: true, metadata };
-        } catch (error) {
-            const safeErrorMessage = sanitizeYtdlpMessage(error.message);
-            console.error(`[${this.videoId}] ❌ Erro spawn: ${safeErrorMessage}`);
-            const errorMsg = error.message.toLowerCase();
-            const classification = error.classification || classifyYtdlpError(error.message);
-            this._recordExtractionFailure(classification);
-            if (error.globalExtractionOutage && typeof this._onGlobalExtractionOutage === 'function') {
-                try {
-                    this._onGlobalExtractionOutage(this.videoId, classification);
-                } catch (callbackError) {
-                    console.warn(`[${this.videoId}] falha ao registrar pane global de extracao: ${callbackError.message}`);
-                }
+
+        // 3) Single-flight: join existing extraction for same videoId
+        const existingFlight = _metadataFlights.get(videoId);
+        if (existingFlight) {
+            const now = Date.now();
+            if (now - this._lastBackoffJoinLogAt >= 30000) {
+                this._lastBackoffJoinLogAt = now;
+                console.log(`[${videoId}] metadata-singleflight join videoId=${videoId}`);
             }
-            const isLiveEnded = errorMsg.includes('video unavailable') || 
-                               errorMsg.includes('not available') || 
-                               errorMsg.includes('recording is not available') ||
-                               errorMsg.includes('this live event has ended');
-            
-            if (isCookieAuthClassification(classification) || this._isCookieAuthError(error.message)) {
-                if (this._cookieRotator && cookiePath) {
-                    const cookieName = path.basename(cookiePath);
-                    if (!error.cookieFailureAlreadyHandled) {
-                        this._cookieRotator.markFailure(cookieName, error.message, this.videoId);
+            try {
+                const result = await existingFlight;
+                return result;
+            } catch (err) {
+                throw err;
+            }
+        }
+
+        // 4) Create new single-flight extraction
+        const flightPromise = (async () => {
+            this._lastMetadataExtractionSource = null;
+            let cookiePath = null;
+            try {
+                cookiePath = this.getCookiePath();
+                const args = buildYtdlpDumpJsonArgs({
+                    url: this.youtubeUrl,
+                    source: cookiePath ? 'cookie' : 'public',
+                    cookiePath
+                });
+                const stdout = await this._runYtdlp(args, YTDLP_TIMEOUT);
+                const metadata = JSON.parse(stdout);
+                const diagnostics = getYtdlpDiagnostics(metadata);
+                this.lastExtractionDiagnostics = diagnostics;
+                console.log(`[${this.videoId}] 📊 yt-dlp JSON: formats=${diagnostics.formatCount}, protocols=${diagnostics.protocols.join('|') || 'nenhum'}, requested=${diagnostics.requestedFormatsCount}, live=${diagnostics.liveStatus || 'n/a'}`);
+                this._cachedMetadata = metadata;
+                this._metadataCacheTime = agora;
+                this.updateHealthComponent('metadata', ComponentStatus.OK, 'Metadados obtidos com sucesso');
+                this.metadataFails = 0;
+                if (this.lastSuccessfulCookie) this.updateHealthComponent('cookies', ComponentStatus.OK, 'Cookie funcionando');
+
+                // Reset transient backoff on success
+                if (_backoffRemainingMs(videoId) > 0) {
+                    _closeBackoff(videoId);
+                    console.log(`[${videoId}] metadata-backoff reset videoId=${videoId}`);
+                }
+
+                return { success: true, metadata };
+            } catch (error) {
+                const safeErrorMessage = sanitizeYtdlpMessage(error.message);
+                console.error(`[${this.videoId}] ❌ Erro spawn: ${safeErrorMessage}`);
+                const errorMsg = error.message.toLowerCase();
+                const classification = error.classification || classifyYtdlpError(error.message);
+                const isLiveEnded = errorMsg.includes('video unavailable') ||
+                                   errorMsg.includes('not available') ||
+                                   errorMsg.includes('recording is not available') ||
+                                   errorMsg.includes('this live event has ended') ||
+                                   TERMINAL_LIVE_CLASSIFICATIONS.has(classification);
+
+                // Handle transient rate limit — open circuit breaker instead of counting failure
+                if (_isRateLimitedMsg(errorMsg) || classification === CLASSIFICATION.RATE_LIMIT) {
+                    const currentState = _metadataBackoffs.get(videoId);
+                    const failCount = (currentState ? currentState.failureCount : 0) + 1;
+                    _openBackoff(videoId, PUBLIC_TRANSIENT, failCount);
+                    console.log(`[${videoId}] metadata-backoff open videoId=${videoId} reason=${PUBLIC_TRANSIENT} delayMs=${_metadataBackoffs.get(videoId).delayMs}`);
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Rate limit: ${safeErrorMessage}`);
+                    return {
+                        success: false,
+                        error: safeErrorMessage,
+                        errorType: PUBLIC_TRANSIENT,
+                        classification: PUBLIC_TRANSIENT,
+                        skipped: true,
+                        retryAt: _metadataBackoffs.get(videoId).backoffUntil
+                    };
+                }
+
+                if (isLiveEnded) {
+                    this._recordExtractionFailure(classification);
+                    this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada');
+                    return { success: false, error: safeErrorMessage, errorType: 'live_ended', isLiveEnded, classification };
+                }
+
+                this._recordExtractionFailure(classification);
+                if (error.globalExtractionOutage && typeof this._onGlobalExtractionOutage === 'function') {
+                    try {
+                        this._onGlobalExtractionOutage(this.videoId, classification);
+                    } catch (callbackError) {
+                        console.warn(`[${this.videoId}] falha ao registrar pane global de extracao: ${callbackError.message}`);
                     }
                 }
-                this.updateHealthComponent('cookies', ComponentStatus.ERROR, 'Cookie inválido');
-                this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Erro de autenticação');
-            } else if (isLiveEnded) {
-                this.updateHealthComponent('metadata', ComponentStatus.CRITICAL, 'Live encerrada');
-            } else if (classification === CLASSIFICATION.TIMEOUT) {
-                this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Timeout');
-            } else {
-                this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Erro ${classification}: ${safeErrorMessage}`);
+
+                if (isCookieAuthClassification(classification) || this._isCookieAuthError(error.message)) {
+                    if (this._cookieRotator && cookiePath) {
+                        const cookieName = path.basename(cookiePath);
+                        if (!error.cookieFailureAlreadyHandled) {
+                            this._cookieRotator.markFailure(cookieName, error.message, this.videoId);
+                        }
+                    }
+                    this.updateHealthComponent('cookies', ComponentStatus.ERROR, 'Cookie inválido');
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Erro de autenticação');
+                } else if (classification === CLASSIFICATION.TIMEOUT) {
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, 'Timeout');
+                } else {
+                    this.updateHealthComponent('metadata', ComponentStatus.WARNING, `Erro ${classification}: ${safeErrorMessage}`);
+                }
+
+                this.metadataFails++;
+                return { success: false, error: safeErrorMessage, errorType: classification, classification, isLiveEnded };
             }
-            
-            this.metadataFails++;
-            return { success: false, error: safeErrorMessage, errorType: classification, classification, isLiveEnded };
+        })();
+
+        _metadataFlights.set(videoId, flightPromise);
+        try {
+            return await flightPromise;
+        } finally {
+            _metadataFlights.delete(videoId);
         }
     }
 
@@ -530,9 +668,6 @@ class LiveMonitor {
         return null;
     }
 
-    // ============================================================
-    // extractHlsUrl – recebe maxHeight por parâmetro (não armazena)
-    // ============================================================
     extractHlsUrl(metadata, maxHeight = null) {
         const effectiveMax = maxHeight !== null ? maxHeight : parseInt(process.env.VIDEO_MAX_HEIGHT, 10) || 1080;
         const selection = selectHlsStream(metadata, {
@@ -578,9 +713,6 @@ class LiveMonitor {
         this._playlistUrls = playlistUrls;
     }
 
-    // ============================================================
-    // extractMediaSequence (com agentes)
-    // ============================================================
     async extractMediaSequence(m3u8Url) {
         if (!m3u8Url) return null;
         return new Promise((resolve) => {
@@ -726,8 +858,8 @@ class LiveMonitor {
         return this.refreshPromise;
     }
 
-    async _forceRenew() {
-        if (this.isExtractionBackoffActive()) {
+    async _forceRenew(bypassBackoff = false) {
+        if (!bypassBackoff && this.isExtractionBackoffActive()) {
             this.logExtractionBackoffSuppressed();
             return false;
         }
@@ -735,6 +867,10 @@ class LiveMonitor {
         try {
             const metadataResult = await this.getLiveMetadata(true);
             if (!metadataResult.success) {
+                if (metadataResult.skipped) {
+                    console.log(`[${this.videoId}] ⏳ Renovação adiada: ${metadataResult.error}`);
+                    return false;
+                }
                 const metadataError = new Error(metadataResult.error);
                 metadataError.classification = metadataResult.classification || metadataResult.errorType;
                 metadataError.extractionFailureAlreadyRecorded = true;
@@ -775,11 +911,21 @@ class LiveMonitor {
     async checkAndRenew() {
         if (this._monitorStopped || this._liveEnded) return;
 
+        // Check existing instance-level extraction backoff
         if (this.isExtractionBackoffActive()) {
             this.logExtractionBackoffSuppressed();
             return;
         }
-        
+
+        // Check shared transient backoff (circuit breaker for rate limit)
+        const backoffMs = _backoffRemainingMs(this.videoId);
+        if (backoffMs > 0) {
+            if (_logBackoffOnce(this.videoId)) {
+                console.log(`[${this.videoId}] metadata-backoff skip videoId=${this.videoId} reason=${_metadataBackoffs.get(this.videoId).reason} retryInMs=${backoffMs}`);
+            }
+            return;
+        }
+
         if (this.m3u8Url && this._isUrlNearExpiry(this.m3u8Url)) {
             console.log(`[${this.videoId}] ⏰ URL próxima do vencimento, invalidando cache e renovando...`);
             this._cachedMetadata = null;
@@ -787,7 +933,7 @@ class LiveMonitor {
             await this._forceRenew();
             return;
         }
-        
+
         if (this.needsRefresh) {
             this.needsRefresh = false;
             this._cachedMetadata = null;
@@ -798,6 +944,14 @@ class LiveMonitor {
 
         console.log(`[${this.videoId}] 🔍 Ciclo de verificação (spawn)...`);
         const metadataResult = await this.getLiveMetadata();
+
+        // Handle skipped (transient backoff) — return early, no failure counting
+        if (!metadataResult.success && metadataResult.skipped) {
+            console.log(`[${this.videoId}] ⏳ Verificação adiada: ${metadataResult.error}`);
+            this.applyDerivedState();
+            return;
+        }
+
         if (!metadataResult.success) {
             if (metadataResult.isLiveEnded) {
                 if (!this._liveEndedFirstDetection) {
@@ -830,10 +984,10 @@ class LiveMonitor {
             this.applyDerivedState();
             return;
         }
-        
+
         this._liveEndedFirstDetection = null;
         this.updateNetworkHealth(true);
-        
+
         const metadata = metadataResult.metadata;
         const isValid = this.validateMetadata(metadata);
         if (isValid === false) {
@@ -879,7 +1033,7 @@ class LiveMonitor {
         this.segmentFails = 0;
         this.consecutiveUnknownFails = 0;
         this.applyDerivedState();
-        
+
         if (this.stalledCount >= this.maxSegmentRepeats) {
             console.log(`[${this.videoId}] 🔄 Playlist parada por ${this.stalledCount} ciclos, forçando renovação da URL...`);
             await this._forceRenew();
@@ -965,11 +1119,11 @@ class LiveMonitor {
         this.maxSegmentRepeats = this.calculateMaxRepeats();
         this._monitorStopped = false;
         this._liveEnded = false;
-        
+
         if (this._scheduler && this.videoId) {
             this._scheduler.register(this);
         }
-        
+
         console.log(`🔄 Monitor iniciado para ${this.videoId}${this.owner ? ':' + this.owner : ''} (scheduler global)`);
     }
 
@@ -979,6 +1133,19 @@ class LiveMonitor {
             this._scheduler.unregister(this.videoId, this.owner);
         }
         console.log(`⏹️ Monitor parado para ${this.videoId}${this.owner ? ':' + this.owner : ''}`);
+    }
+
+    static getFlightStats() {
+        return {
+            activeFlights: _metadataFlights.size,
+            videoIds: Array.from(_metadataFlights.keys()),
+            activeBackoffs: Array.from(_metadataBackoffs.entries()).map(([id, s]) => ({
+                videoId: id,
+                failureCount: s.failureCount,
+                reason: s.reason,
+                remainingMs: _backoffRemainingMs(id)
+            }))
+        };
     }
 }
 
