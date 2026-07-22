@@ -20,6 +20,9 @@ cookies/rejected/*
 # Backups
 backup_*/
 *.bkp
+TecLive-Agent-*.7z
+cookie-agent-disaster-validation-*.txt
+teclive-cookie-agent-dr-*/
 
 # Arquivos temporarios do sistema
 Thumbs.db
