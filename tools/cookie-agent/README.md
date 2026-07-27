@@ -101,6 +101,44 @@ Remover:
 
 O watchdog roda no logon e a cada 5 minutos. Ele usa `RunLevel Limited` por padrao, nao armazena senha, nao mata `powershell.exe` genericamente e nao recria a tarefa quando existe processo real saudavel. As recuperacoes tem cooldown para evitar loop de recriacao.
 
+## Recuperacao de desastre
+
+Use o utilitario unico de contingencia quando precisar fazer backup criptografado dos perfis/config local ou restaurar o Agent em outro Windows:
+
+```powershell
+.\tools\cookie-agent\cookie-agent-disaster-recovery.ps1 -Mode ShowPlan
+```
+
+Criar backup criptografado:
+
+```powershell
+.\tools\cookie-agent\cookie-agent-disaster-recovery.ps1 `
+  -Mode Backup `
+  -BackupPath "D:\TecLive-Backups" `
+  -IncludeFirefoxProfiles
+```
+
+Validar um backup:
+
+```powershell
+.\tools\cookie-agent\cookie-agent-disaster-recovery.ps1 `
+  -Mode Validate `
+  -ArchivePath "D:\TecLive-Backups\TecLive-Agent-AAAA-MM-DD.7z"
+```
+
+Restaurar em maquina nova:
+
+```powershell
+.\tools\cookie-agent\cookie-agent-disaster-recovery.ps1 `
+  -Mode FullRestore `
+  -ArchivePath "E:\Backup\TecLive-Agent-AAAA-MM-DD.7z" `
+  -ProjectPath "$PWD" `
+  -StartAfterInstall `
+  -ValidateAfterInstall
+```
+
+Manual completo: `docs/cookie-agent-disaster-recovery.md`.
+
 ## Logs
 
 ```powershell

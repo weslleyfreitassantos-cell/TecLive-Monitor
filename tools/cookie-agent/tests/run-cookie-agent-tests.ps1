@@ -13,6 +13,7 @@ $install = Join-Path $root 'tools\cookie-agent\install-agent-task.ps1'
 $uninstall = Join-Path $root 'tools\cookie-agent\uninstall-agent-task.ps1'
 $installWatchdog = Join-Path $root 'tools\cookie-agent\install-watchdog-task.ps1'
 $uninstallWatchdog = Join-Path $root 'tools\cookie-agent\uninstall-watchdog-task.ps1'
+$disasterRecovery = Join-Path $root 'tools\cookie-agent\cookie-agent-disaster-recovery.ps1'
 $agentLauncher = Join-Path $root 'tools\cookie-agent\run-cookie-agent-hidden.vbs'
 $watchdogLauncher = Join-Path $root 'tools\cookie-agent\run-cookie-watchdog-hidden.vbs'
 $hiddenLauncherSource = Join-Path $root 'tools\cookie-agent\hidden-process-launcher.cs'
@@ -27,7 +28,7 @@ function Assert-OutputMatch {
     Assert-True ($Output -match $Pattern) $Message
 }
 
-foreach ($file in @($common, $agent, $watchdog, $healthScript, $install, $uninstall, $installWatchdog, $uninstallWatchdog)) {
+foreach ($file in @($common, $agent, $watchdog, $healthScript, $install, $uninstall, $installWatchdog, $uninstallWatchdog, $disasterRecovery)) {
     $tokens = $null
     $errors = $null
     [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errors) > $null

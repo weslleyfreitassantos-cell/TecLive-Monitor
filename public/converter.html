@@ -59,11 +59,12 @@
         .live-item .status-badge { font-weight: 600; font-size: 12px; padding: 2px 10px; border-radius: 12px; background: rgba(0,0,0,0.25); }
         .status-online { color: #2ecc71; }
         .status-offline, .status-ended { color: #e74c3c; }
-        .status-degraded { color: #f1c40f; }
+        .status-degraded, .status-ending { color: #f1c40f; }
         .live-item .btn-stop, .live-item .btn-stop-modal { background: rgba(231,76,60,0.15); color: #e74c3c; border: 1px solid rgba(231,76,60,0.3); padding: 3px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
         .live-item .btn-stop:hover, .live-item .btn-stop-modal:hover { background: rgba(231,76,60,0.25); }
-        .live-item .btn-copy-link, .live-item .btn-copy-modal { background: rgba(46,204,113,0.15); color: #2ecc71; border: 1px solid rgba(46,204,113,0.3); padding: 3px 12px; border-radius: 6px; font-weight: 600; font-size: 12px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+        .live-item .btn-copy-link, .live-item .btn-copy-modal { background: rgba(46,204,113,0.15); color: #2ecc71; border: 1px solid rgba(46,204,113,0.3); padding: 9px 22px; border-radius: 8px; font-weight: 800; font-size: 14px; cursor: pointer; transition: all 0.2s; white-space: nowrap; min-width: 112px; min-height: 42px; }
         .live-item .btn-copy-link:hover, .live-item .btn-copy-modal:hover { background: rgba(46,204,113,0.25); }
+        .live-item .btn-copy-link.copied, .live-item .btn-copy-modal.copied { background: #2ecc71; color: #0a0e1a; border-color: #2ecc71; }
         .live-item .live-link-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
         .live-item .live-link-row input { flex: 1; min-width: 150px; padding: 4px 8px; background: rgba(0,0,0,0.3); border: 1px solid rgba(46,204,113,0.15); border-radius: 4px; color: #e0e0e0; font-size: 11px; font-family: monospace; }
         .live-item .dica-link { font-size: 14px; color: #a0b0c0; margin-top: 6px; padding: 4px 12px; border-radius: 6px; background: rgba(46,204,113,0.03); border: 1px solid rgba(46,204,113,0.05); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
@@ -86,8 +87,8 @@
         .devices-section .ver-mais-devices-btn:hover { background: rgba(46,204,113,0.2); }
         .device-item { background: rgba(0,0,0,0.2); border-radius: 6px; padding: 8px 14px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid #5dade2; }
         .device-item .ip { font-family: monospace; font-size: 13px; color: #5dade2; }
-        .device-item .btn-remove-ip { background: rgba(231,76,60,0.12); color: #e74c3c; border: 1px solid rgba(231,76,60,0.25); padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        .device-item .btn-remove-ip:hover { background: rgba(231,76,60,0.2); }
+        .device-item .btn-remove-ip, .device-item .btn-remove-ip-modal { background: rgba(231,76,60,0.12); color: #e74c3c; border: 1px solid rgba(231,76,60,0.25); padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+        .device-item .btn-remove-ip:hover, .device-item .btn-remove-ip-modal:hover { background: rgba(231,76,60,0.2); }
         .devices-empty { color: #7a8aa0; text-align: center; padding: 8px; font-size: 13px; }
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 999; justify-content: center; align-items: center; }
         .modal-overlay.active { display: flex; }
@@ -110,7 +111,7 @@
         .modal-list .live-item .id { font-size: 14px; }
         .modal-list .live-item .status-badge { font-size: 14px; padding: 3px 14px; }
         .modal-list .live-item .btn-stop, .modal-list .live-item .btn-stop-modal { font-size: 14px; padding: 4px 16px; }
-        .modal-list .live-item .btn-copy-link, .modal-list .live-item .btn-copy-modal { font-size: 14px; padding: 4px 16px; }
+        .modal-list .live-item .btn-copy-link, .modal-list .live-item .btn-copy-modal { font-size: 14px; padding: 9px 22px; }
         .modal-list .live-item .live-link-row input { font-size: 14px; padding: 6px 12px; min-width: 200px; }
         .modal-list .live-item .dica-link { font-size: 15px; padding: 6px 14px; }
         .modal-list .live-item .dica-link .click-here { font-size: 15px; }
@@ -120,7 +121,7 @@
         .modal-dispositivos .device-item .btn-remove-ip-modal, .modal-dispositivos .device-item .btn-remove-ip { font-size: 14px; padding: 4px 14px; }
         .modal-dispositivos .empty { font-size: 16px; padding: 20px; }
         .modal-dispositivos .modal-search input { font-size: 16px; }
-        @media (max-width: 600px) { .container { padding: 20px; max-width: 100%; } .container.expanded { padding: 20px; } .user-card { flex-direction: column; align-items: stretch; text-align: center; } .user-card .stats { justify-content: center; gap: 16px; } .user-card .actions { justify-content: center; } .live-item .live-link-row input { min-width: 100px; width: 100%; } .modal-box { padding: 16px; max-width: 98%; max-height: 92vh; } .modal-list .live-item { padding: 12px 14px; } .modal-list .live-item .title { font-size: 16px; } .modal-header h3 { font-size: 20px; } .modal-search input { font-size: 15px; } .devices-section .devices-header { flex-wrap: wrap; gap: 8px; } .live-item .dica-link { font-size: 13px; } .modal-link-box .modal-box { max-width: 98%; padding: 12px 14px; } .modal-link-box .modal-body .link-row input { font-size: 12px; min-width: 120px; } }
+        @media (max-width: 600px) { .container { padding: 20px; max-width: 100%; } .container.expanded { padding: 20px; } .user-card { flex-direction: column; align-items: stretch; text-align: center; } .user-card .stats { justify-content: center; gap: 16px; } .user-card .actions { justify-content: center; } .live-item .live-link-row input { min-width: 100px; width: 100%; } .live-item .btn-copy-link, .live-item .btn-copy-modal { width: 100%; min-height: 48px; font-size: 16px; } .modal-box { padding: 16px; max-width: 98%; max-height: 92vh; } .modal-list .live-item { padding: 12px 14px; } .modal-list .live-item .title { font-size: 16px; } .modal-header h3 { font-size: 20px; } .modal-search input { font-size: 15px; } .devices-section .devices-header { flex-wrap: wrap; gap: 8px; } .live-item .dica-link { font-size: 13px; } .modal-link-box .modal-box { max-width: 98%; padding: 12px 14px; } .modal-link-box .modal-body .link-row input { font-size: 12px; min-width: 120px; } }
     </style>
 </head>
 <body>
@@ -867,6 +868,35 @@
         }, 1200);
     });
 
+    async function copiarLinkComFeedback(input, button) {
+        if (!input || !button) return;
+        const link = input.value;
+        if (!link) return;
+
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(link);
+            } else {
+                input.select();
+                document.execCommand('copy');
+            }
+        } catch (_) {
+            input.select();
+            document.execCommand('copy');
+        }
+
+        if (button._copyFeedbackTimer) clearTimeout(button._copyFeedbackTimer);
+        button.dataset.originalText = button.dataset.originalText || button.textContent;
+        button.textContent = 'Copiado';
+        button.classList.add('copied');
+        mostrarFeedback('success', 'Link copiado!');
+        button._copyFeedbackTimer = setTimeout(() => {
+            button.textContent = button.dataset.originalText || 'Copiar';
+            button.classList.remove('copied');
+            esconderFeedback();
+        }, 1800);
+    }
+
     // ============================================================
     // RENDERIZAR LIVES (compacto, com token)
     // ============================================================
@@ -893,6 +923,7 @@
         switch (status) {
             case 'online':   statusLabel = 'ONLINE';   statusClass = 'status-online'; break;
             case 'degraded': statusLabel = 'INSTÁVEL'; statusClass = 'status-degraded'; break;
+            case 'ending':   statusLabel = 'LIVE ENCERRANDO'; statusClass = 'status-ending'; break;
             case 'ended':
             case 'offline':  statusLabel = 'ENCERRADA'; statusClass = 'status-offline'; break;
             default:         statusLabel = 'DESCONHECIDO'; statusClass = 'status-offline';
@@ -923,7 +954,7 @@
             copyBtn.addEventListener('click', function() {
                 const targetId = this.getAttribute('data-target');
                 const input = document.getElementById(targetId);
-                if (input) { input.select(); document.execCommand('copy'); mostrarFeedback('success', 'Link copiado!'); setTimeout(() => esconderFeedback(), 1500); }
+                copiarLinkComFeedback(input, this);
             });
         }
 
@@ -978,6 +1009,7 @@
             switch (status) {
                 case 'online':   statusLabel = 'ONLINE';   statusClass = 'status-online'; break;
                 case 'degraded': statusLabel = 'INSTÁVEL'; statusClass = 'status-degraded'; break;
+                case 'ending':   statusLabel = 'LIVE ENCERRANDO'; statusClass = 'status-ending'; break;
                 case 'ended':
                 case 'offline':  statusLabel = 'ENCERRADA'; statusClass = 'status-offline'; break;
                 default:         statusLabel = 'DESCONHECIDO'; statusClass = 'status-offline';
@@ -1010,7 +1042,7 @@
             btn.addEventListener('click', function() {
                 const targetId = this.getAttribute('data-target');
                 const input = document.getElementById(targetId);
-                if (input) { input.select(); document.execCommand('copy'); mostrarFeedback('success', 'Link copiado!'); setTimeout(() => esconderFeedback(), 1500); }
+                copiarLinkComFeedback(input, this);
             });
         });
 

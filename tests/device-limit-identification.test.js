@@ -16,6 +16,7 @@ const VIDEO_ID = 'j6Df-EzdfbQ';
 const TOKEN_SCOPE = 'token-a';
 const IP = '187.40.208.118';
 const USER_AGENT = 'ExoMedia 4.3.0 / Android 14 / Stick HD';
+const LEGACY_VLC_USER_AGENT = 'VLC/3.0.11 LibVLC/3.0.11';
 const NOW = Date.parse('2026-07-12T20:30:00.000Z');
 
 function tempFile() {
@@ -31,7 +32,9 @@ function createStore(options = {}) {
         reuseStaleAfterMs: options.reuseStaleAfterMs,
         reuseExpiredGraceMs: options.reuseExpiredGraceMs,
         reopenReuseMs: options.reopenReuseMs === undefined ? 0 : options.reopenReuseMs,
-        reopenReuseMinAgeMs: options.reopenReuseMinAgeMs
+        reopenReuseMinAgeMs: options.reopenReuseMinAgeMs,
+        masterReopenReuseMs: options.masterReopenReuseMs === undefined ? 0 : options.masterReopenReuseMs,
+        masterReopenReuseMinAgeMs: options.masterReopenReuseMinAgeMs
     });
 }
 
@@ -57,6 +60,18 @@ function touchVariant(store, session, nowMs = NOW + 2000) {
         publicIp: session.publicIp || IP,
         userAgent: session.userAgent || USER_AGENT,
         hlsActivity: 'variant'
+    }, nowMs);
+}
+
+function touchMaster(store, session, nowMs = NOW + 2000) {
+    return store.touchSession({
+        sessionId: session.sessionId,
+        owner: session.owner || OWNER,
+        videoId: session.videoId || VIDEO_ID,
+        tokenScope: session.tokenScope || TOKEN_SCOPE,
+        publicIp: session.publicIp || IP,
+        userAgent: session.userAgent || USER_AGENT,
+        hlsActivity: 'master'
     }, nowMs);
 }
 
@@ -170,6 +185,20 @@ function testLimitOneFastNeoNewsReopenReusesSession() {
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 1);
 }
 
+function testLimitOneImmediateNeoNewsReopenAfterHlsActivityReusesSession() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const reopened = create(store, { limit: 1 }, NOW + 2200);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_reopen');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 2200), 1);
+}
+
 function testLimitOneFastNeoNewsReopenWithoutVariantEvidenceIsBlocked() {
     const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
     const first = create(store, { limit: 1 }, NOW);
@@ -191,6 +220,57 @@ function testFastNeoNewsOpeningWithoutVariantEvidenceCreatesWhenLimitAllows() {
     assert.equal(second.code, 'created');
     assert.notEqual(second.session.sessionId, first.session.sessionId);
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 2);
+}
+
+function testMasterOnlyNeoNewsReopenAfterPrepareTimeoutReusesSession() {
+    const store = createStore({
+        reopenReuseMs: 20000,
+        reopenReuseMinAgeMs: 1000,
+        masterReopenReuseMs: 45000,
+        masterReopenReuseMinAgeMs: 25000
+    });
+    const first = create(store, { limit: 6 }, NOW);
+    const reopened = create(store, { limit: 6 }, NOW + 33000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_master_reopen');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 33000), 1);
+}
+
+function testMasterOnlyNeoNewsReopenTooSoonDoesNotReuseSession() {
+    const store = createStore({
+        reopenReuseMs: 20000,
+        reopenReuseMinAgeMs: 1000,
+        masterReopenReuseMs: 45000,
+        masterReopenReuseMinAgeMs: 25000
+    });
+    const first = create(store, { limit: 2 }, NOW);
+    const second = create(store, { limit: 2 }, NOW + 5000);
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.code, 'created');
+    assert.notEqual(second.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 2);
+}
+
+function testLimitOneMasterOnlyNeoNewsReopenAfterTimeoutReusesSession() {
+    const store = createStore({
+        reopenReuseMs: 20000,
+        reopenReuseMinAgeMs: 1000,
+        masterReopenReuseMs: 45000,
+        masterReopenReuseMinAgeMs: 25000
+    });
+    const first = create(store, { limit: 1 }, NOW);
+    const reopened = create(store, { limit: 1 }, NOW + 33000);
+
+    assert.equal(first.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'reused_master_reopen');
+    assert.equal(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 33000), 1);
 }
 
 function testLimitOneSimultaneousIdenticalNeoNewsOpeningIsBlocked() {
@@ -216,7 +296,37 @@ function testGenericUserAgentDoesNotUseReopenReuse() {
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 5000), 2);
 }
 
+function testLegacyVlcAbandonedReopenFreesSingleDeviceSlot() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1, userAgent: LEGACY_VLC_USER_AGENT }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const reopened = create(store, { limit: 1, userAgent: LEGACY_VLC_USER_AGENT }, NOW + 36000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'created');
+    assert.notEqual(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(reopened.abandonedRemoved, 1);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 36000), 1);
+}
+
 function testReopenAfterWindowIsSubjectToLimit() {
+    const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
+    const first = create(store, { limit: 1 }, NOW);
+    const variant = touchVariant(store, first.session, NOW + 2000);
+    const heartbeat = touchMaster(store, first.session, NOW + 25000);
+    const reopened = create(store, { limit: 1 }, NOW + 30000);
+
+    assert.equal(first.ok, true);
+    assert.equal(variant.ok, true);
+    assert.equal(heartbeat.ok, true);
+    assert.equal(reopened.ok, false);
+    assert.equal(reopened.code, 'limit_exceeded');
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 30000), 1);
+}
+
+function testReopenAfterWindowWithAbandonedSessionFreesSlot() {
     const store = createStore({ reopenReuseMs: 20000, reopenReuseMinAgeMs: 1000 });
     const first = create(store, { limit: 1 }, NOW);
     const variant = touchVariant(store, first.session, NOW + 2000);
@@ -224,8 +334,10 @@ function testReopenAfterWindowIsSubjectToLimit() {
 
     assert.equal(first.ok, true);
     assert.equal(variant.ok, true);
-    assert.equal(reopened.ok, false);
-    assert.equal(reopened.code, 'limit_exceeded');
+    assert.equal(reopened.ok, true);
+    assert.equal(reopened.code, 'created');
+    assert.notEqual(reopened.session.sessionId, first.session.sessionId);
+    assert.equal(reopened.abandonedRemoved, 1);
     assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 30000), 1);
 }
 
@@ -240,7 +352,8 @@ function testReopenAfterWindowCreatesWhenLimitAllows() {
     assert.equal(reopened.ok, true);
     assert.equal(reopened.code, 'created');
     assert.notEqual(reopened.session.sessionId, first.session.sessionId);
-    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 30000), 2);
+    assert.equal(reopened.abandonedRemoved, 1);
+    assert.equal(store.countActive({ owner: OWNER, videoId: VIDEO_ID }, NOW + 30000), 1);
 }
 
 function testReopenReuseIsScopedByTokenOwnerAndVideo() {
@@ -776,12 +889,31 @@ function loadHlsContinuityHooks() {
         const HLS_SESSION_DISCONTINUITY_RESET_MS = 12000;
         const HLS_EXOMEDIA_SINGLE_VARIANT_MASTER = true;
         const HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT = 720;
+        const HLS_EXOMEDIA_ANDROID_MAX_FPS = 30;
+        const HLS_EXOMEDIA_ANDROID_FALLBACK_HEIGHT = 480;
+        const HLS_EXOMEDIA_START_TIME_OFFSET_SECONDS = -40;
+        const HLS_EXOMEDIA_STEADY_LIVE_EDGE_OFFSET_SEGMENTS = 2;
+        const HLS_EXOMEDIA_STABLE_WINDOW_SEGMENTS = 12;
+        const HLS_EXOMEDIA_STARTUP_WINDOW_MS = 180000;
+        const HLS_EXOMEDIA_STARTUP_WINDOW_SEGMENTS = 12;
+        const HLS_EXOMEDIA_MIN_SEGMENTS_WITH_LIVE_EDGE_OFFSET = 5;
+        const HLS_VLC_SINGLE_VARIANT_MASTER = true;
+        const HLS_VLC_MEDIA_PLAYLIST_STABILIZATION = true;
         const HLS_EXTENDED_WINDOW_SEGMENTS = 7;
         const HLS_COMPAT_TARGET_DURATION = 8;
+        const HLS_VLC_START_TIME_OFFSET_SECONDS = 0;
         const HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS = 2;
         const HLS_VLC_STARTUP_WINDOW_MS = 180000;
         const HLS_VLC_STARTUP_MIN_SEGMENTS = 5;
+        const HLS_VLC_STEADY_LIVE_EDGE_OFFSET_SEGMENTS = 2;
+        const VLC_HLS_PERMANENT_LIVE_EDGE_OFFSET_SEGMENTS = 0;
+        const HLS_LEGACY_VLC_DEFAULT_HEIGHT = 480;
+        const HLS_VLC_STABLE_WINDOW_SEGMENTS = 12;
+        const HLS_DISABLE_WINDOW_ADJUSTMENT = false;
+        const HLS_DIAGNOSTIC_MODE = false;
         const HLS_SEGMENT_PROXY_MODE = 'auto';
+        const HLS_EXOMEDIA_SEGMENT_PROXY = true;
+        const HLS_LEGACY_VLC_SEGMENT_PROXY = true;
         const STALE_SERVE_MAX_AGE_MS = 60000;
         const playbackVariantUrlPins = new Map();
         const hlsSessionVariantState = new Map();
@@ -791,6 +923,7 @@ function loadHlsContinuityHooks() {
         const lastServedSequence = new Map();
         const lastGoodM3u8 = new Map();
         const hlsMediaPlaylistHistory = new Map();
+        const hlsShortUpstreamWindowHistory = new Map();
         const playbackSessions = {
             listActive(filters) {
                 return activeSessions.filter(session => (
@@ -813,8 +946,17 @@ function loadHlsContinuityHooks() {
                 segments: info.segments
             });
         }
-        function getStaleM3u8IfFresh() {
-            return null;
+        function getStaleM3u8IfFresh(videoId, monitorLastSeq) {
+            const entry = lastGoodM3u8.get(videoId);
+            if (!entry) return null;
+            const age = Date.now() - entry.fetchedAt;
+            if (age > STALE_SERVE_MAX_AGE_MS) return null;
+            const comparableSequence = entry.lastSequence ?? entry.sequence;
+            if (monitorLastSeq !== null && monitorLastSeq !== undefined && comparableSequence !== null) {
+                const lag = monitorLastSeq - comparableSequence;
+                if (lag > 5) return null;
+            }
+            return { content: entry.content, age, sequence: entry.sequence };
         }
         ${helperCore}
         ${parserCore}
@@ -833,15 +975,29 @@ function loadHlsContinuityHooks() {
             updateSessionVariantState,
             getPlaylistSnapshot,
             playlistsHaveOverlap,
+            isSafePlaylistWindowExpansion,
             shouldRefreshStuckSessionVariant,
             buildPlaybackSessionMaster,
             isExoCompatibleUserAgent,
+            isExoAndroidUserAgent,
             isVlcCompatibleUserAgent,
+            getEffectiveVariantHeightForRequest,
             shouldUseSingleVariantMaster,
             shouldProxyHlsSegments,
             getHlsStartupLiveEdgeOffsetSegments,
+            getHlsSteadyLiveEdgeOffsetSegments,
+            getHlsTargetWindowSegments,
+            getHlsStabilityKeySuffix,
+            getHlsMinSegmentsWithLiveEdgeOffset,
+            getHlsSteadyLiveEdgeOffsetReason,
+            getHlsStartTimeOffsetSeconds,
+            shouldRelaxLiveMediaPlaylistTiming,
+            shouldExtendLiveMediaPlaylistWindow,
+            applyHlsStartTimeOffset,
+            relaxLiveMediaPlaylistTiming,
             extendLiveMediaPlaylistWindow,
             stabilizeMediaPlaylist,
+            logProxyAccess,
             logVariantSessionSnapshot,
             hlsSessionVariantState,
             hlsSessionVariantPins
@@ -996,32 +1152,162 @@ function testHlsContinuityExecutableChecks() {
         }
     };
     const neoNewsReq = { headers: { 'user-agent': 'NeoNews ExoMedia 4.3.0 / Android 14' } };
+    const neoNewsWindowsReq = { headers: { 'user-agent': 'NeoNews ExoMedia 4.3.0 / Windows 10' } };
     const lowercaseReq = { headers: { 'user-agent': 'exomedia stick hd' } };
     const vlcReq = { headers: { 'user-agent': 'VLC/3.0.21 LibVLC/3.0.21' } };
+    const legacyVlcReq = { headers: { 'user-agent': 'VLC/3.0.11 LibVLC/3.0.11' }, query: {} };
     const browserReq = { headers: { 'user-agent': 'Mozilla/5.0 Chrome/126.0 Safari/537.36' } };
     const ffmpegReq = { headers: { 'user-agent': 'Lavf/60.16.100' } };
     const ffprobeReq = { headers: { 'user-agent': 'ffprobe/6.1' } };
     const kodiReq = { headers: { 'user-agent': 'Kodi/21.0' } };
     assert.equal(hls.shouldUseSingleVariantMaster(neoNewsReq), true);
     assert.equal(hls.shouldUseSingleVariantMaster(lowercaseReq), true);
-    assert.equal(hls.shouldUseSingleVariantMaster(vlcReq), false);
+    assert.equal(hls.shouldUseSingleVariantMaster(vlcReq), true);
+    assert.equal(hls.shouldUseSingleVariantMaster(browserReq), false);
+    assert.equal(hls.shouldUseSingleVariantMaster(ffmpegReq), false);
     assert.equal(hls.isVlcCompatibleUserAgent(vlcReq), true);
     assert.equal(hls.isVlcCompatibleUserAgent({ headers: { 'user-agent': 'LibVLC/3.0.11' } }), true);
     assert.equal(hls.isVlcCompatibleUserAgent(neoNewsReq), false);
     assert.equal(hls.isVlcCompatibleUserAgent(browserReq), false);
     assert.equal(hls.isVlcCompatibleUserAgent(ffmpegReq), false);
+    assert.equal(hls.isExoAndroidUserAgent(neoNewsReq), true);
+    assert.equal(hls.isExoAndroidUserAgent(neoNewsWindowsReq), false);
+    assert.equal(hls.isExoAndroidUserAgent(lowercaseReq), false);
     assert.equal(hls.shouldProxyHlsSegments(vlcReq), false);
-    assert.equal(hls.shouldProxyHlsSegments({ headers: { 'user-agent': 'LibVLC/3.0.11' }, query: {} }), false);
+    assert.equal(hls.shouldProxyHlsSegments(neoNewsReq), false);
+    assert.equal(hls.shouldProxyHlsSegments(lowercaseReq), false);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: { 'user-agent': 'VLC/3.0.11 LibVLC/3.0.11' }, query: {} }), false);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: { 'user-agent': 'LibVLC/3.0.12' }, query: {} }), false);
     assert.equal(hls.shouldProxyHlsSegments(ffprobeReq), true);
     assert.equal(hls.shouldProxyHlsSegments(kodiReq), true);
-    assert.equal(hls.shouldProxyHlsSegments({ headers: vlcReq.headers, query: { segmentProxy: '1' } }), true);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: vlcReq.headers, query: { segmentProxy: '1' } }), false);
     assert.equal(hls.shouldProxyHlsSegments({ headers: ffprobeReq.headers, query: { segmentProxy: '0' } }), false);
+
+    const highFpsMonitor = {
+        _playlistUrls: {
+            720: 'https://video.example.test/720.m3u8',
+            480: 'https://video.example.test/480.m3u8',
+            360: 'https://video.example.test/360.m3u8'
+        },
+        _masterContent: {
+            content: [
+                '#EXTM3U',
+                '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,FRAME-RATE=60',
+                'https://video.example.test/720.m3u8',
+                '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480,FRAME-RATE=30',
+                'https://video.example.test/480.m3u8',
+                '#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=640x360,FRAME-RATE=30',
+                'https://video.example.test/360.m3u8'
+            ].join('\n')
+        }
+    };
+    const androidHighFpsMaster = hls.buildPlaybackSessionMaster(highFpsMonitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: 720,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.vps-kinghost.net',
+        singleVariant: true,
+        req: neoNewsReq
+    });
+    assert.ok(androidHighFpsMaster.includes('max=480'));
+    assert.ok(!androidHighFpsMaster.includes('max=720'));
+    const highFpsUrlOnlyMonitor = {
+        _playlistUrls: {
+            720: 'https://manifest.googlevideo.com/api/manifest/hls_playlist/itag/300/source/yt_live_broadcast/index.m3u8',
+            480: 'https://manifest.googlevideo.com/api/manifest/hls_playlist/itag/94/source/yt_live_broadcast/index.m3u8'
+        }
+    };
+    const androidHighFpsUrlOnlyMaster = hls.buildPlaybackSessionMaster(highFpsUrlOnlyMonitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: 720,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.vps-kinghost.net',
+        singleVariant: true,
+        req: neoNewsReq
+    });
+    assert.ok(androidHighFpsUrlOnlyMaster.includes('max=480'));
+    assert.ok(!androidHighFpsUrlOnlyMaster.includes('max=720'));
+    assert.equal(hls.getEffectiveVariantHeightForRequest(highFpsUrlOnlyMonitor, neoNewsReq, 720), 480);
+    assert.equal(hls.getEffectiveVariantHeightForRequest(highFpsUrlOnlyMonitor, vlcReq, 720), 720);
+    const vlcHighFpsMaster = hls.buildPlaybackSessionMaster(highFpsMonitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: 720,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.vps-kinghost.net',
+        singleVariant: true,
+        req: vlcReq
+    });
+    assert.ok(vlcHighFpsMaster.includes('max=720'));
+    const legacyVlcDefaultMaster = hls.buildPlaybackSessionMaster(highFpsMonitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-legacy-vlc',
+        requestedMaxHeight: null,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.vps-kinghost.net',
+        singleVariant: true,
+        req: legacyVlcReq
+    });
+    assert.ok(legacyVlcDefaultMaster.includes('max=480'));
+    assert.ok(!legacyVlcDefaultMaster.includes('max=720'));
+    const legacyVlcExplicit720Master = hls.buildPlaybackSessionMaster(highFpsMonitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-legacy-vlc-explicit',
+        requestedMaxHeight: 720,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.vps-kinghost.net',
+        singleVariant: true,
+        req: legacyVlcReq
+    });
+    assert.ok(legacyVlcExplicit720Master.includes('max=720'));
+
+    const normalFpsMonitor = {
+        ...highFpsMonitor,
+        _masterContent: {
+            content: highFpsMonitor._masterContent.content.replace('FRAME-RATE=60', 'FRAME-RATE=30')
+        }
+    };
+    const androidNormalFpsMaster = hls.buildPlaybackSessionMaster(normalFpsMonitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-a',
+        requestedMaxHeight: 720,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.vps-kinghost.net',
+        singleVariant: true,
+        req: neoNewsReq
+    });
+    assert.ok(androidNormalFpsMaster.includes('max=720'));
+
     const startupNow = Date.parse('2026-07-15T12:00:00.000Z');
     assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(vlcReq, {
         createdAt: new Date(startupNow - 30000).toISOString()
+    }, startupNow), 0);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(legacyVlcReq, {
+        createdAt: new Date(startupNow - 30000).toISOString()
     }, startupNow), 2);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(legacyVlcReq, {
+        createdAt: new Date(startupNow - 240000).toISOString()
+    }, startupNow), 0);
     assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(vlcReq, {
         createdAt: new Date(startupNow - 240000).toISOString()
+    }, startupNow), 0);
+    assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(vlcReq, {
+        createdAt: new Date(startupNow - 240000).toISOString(),
+        lastReopenAt: new Date(startupNow - 30000).toISOString()
     }, startupNow), 0);
     assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(neoNewsReq, {
         createdAt: new Date(startupNow - 30000).toISOString()
@@ -1032,6 +1318,51 @@ function testHlsContinuityExecutableChecks() {
     assert.equal(hls.getHlsStartupLiveEdgeOffsetSegments(ffmpegReq, {
         createdAt: new Date(startupNow - 30000).toISOString()
     }, startupNow), 0);
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(vlcReq), 0);
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(legacyVlcReq), 0);
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(neoNewsReq), 2);
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(browserReq), 0);
+    const exoFreshSession = { createdAt: new Date(startupNow - 30000).toISOString() };
+    const exoWarmSession = { createdAt: new Date(startupNow - 240000).toISOString() };
+    const exoReopenedSession = {
+        createdAt: new Date(startupNow - 240000).toISOString(),
+        lastReopenAt: new Date(startupNow - 30000).toISOString()
+    };
+    const vlcFreshSession = { createdAt: new Date(startupNow - 30000).toISOString() };
+    const vlcWarmSession = { createdAt: new Date(startupNow - 240000).toISOString() };
+    const vlcReopenedSession = {
+        createdAt: new Date(startupNow - 240000).toISOString(),
+        lastReopenAt: new Date(startupNow - 30000).toISOString()
+    };
+    assert.equal(hls.getHlsTargetWindowSegments(vlcReq), 7);
+    assert.equal(hls.getHlsTargetWindowSegments(legacyVlcReq), 12);
+    assert.equal(hls.getHlsTargetWindowSegments(neoNewsReq, exoFreshSession, startupNow), 12);
+    assert.equal(hls.getHlsTargetWindowSegments(neoNewsReq, exoWarmSession, startupNow), 12);
+    assert.equal(hls.getHlsTargetWindowSegments(neoNewsReq, exoReopenedSession, startupNow), 12);
+    assert.equal(hls.getHlsTargetWindowSegments(browserReq), 7);
+    assert.equal(hls.getHlsStabilityKeySuffix(vlcReq), '_vlcRaw');
+    assert.equal(hls.getHlsStabilityKeySuffix(legacyVlcReq), '_vlcWindow');
+    assert.equal(hls.getHlsStabilityKeySuffix(neoNewsReq), '_exoWindow');
+    assert.equal(hls.getHlsStabilityKeySuffix(browserReq), '');
+    assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(vlcReq), 3);
+    assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(legacyVlcReq), 5);
+    assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(neoNewsReq), 5);
+    assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(browserReq), 3);
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetReason(vlcReq, 1), 'vlc_live_edge_offset_1');
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetReason(neoNewsReq, 2), 'exo_edge_offset_2');
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(neoNewsReq, exoFreshSession, startupNow), -40);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(neoNewsReq, exoWarmSession, startupNow), 0);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(neoNewsReq, exoReopenedSession, startupNow), -40);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(neoNewsWindowsReq, exoFreshSession, startupNow), 0);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(vlcReq, vlcFreshSession, startupNow), 0);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(vlcReq, vlcWarmSession, startupNow), 0);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(vlcReq, vlcReopenedSession, startupNow), 0);
+    assert.equal(hls.getHlsStartTimeOffsetSeconds(vlcReq), 0);
+    assert.equal(hls.shouldRelaxLiveMediaPlaylistTiming(neoNewsReq), true);
+    assert.equal(hls.shouldRelaxLiveMediaPlaylistTiming(vlcReq), true);
+    assert.equal(hls.shouldExtendLiveMediaPlaylistWindow(neoNewsReq), true);
+    assert.equal(hls.shouldExtendLiveMediaPlaylistWindow(vlcReq), false);
+    assert.equal(hls.shouldExtendLiveMediaPlaylistWindow(legacyVlcReq), true);
 
     const startupKey = 'VID123_owner_session_720_startup';
     const startupFirst = mediaPlaylist(100, ['s100', 's101', 's102', 's103', 's104', 's105']);
@@ -1120,6 +1451,166 @@ function testHlsContinuityExecutableChecks() {
     });
     assert.equal(hls.getPlaylistSnapshot(normalSecond.content, 'https://upstream.example.test/720.m3u8').lastSequence, 108);
 
+    const vlcWindowKey = 'VID123_owner_session_720_vlcWindow';
+    hls.extendLiveMediaPlaylistWindow('VID123', vlcWindowKey, mediaPlaylist(500, [
+        'v500', 'v501', 'v502', 'v503', 'v504', 'v505'
+    ]), {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(vlcReq)
+    });
+    const vlcExtended = hls.extendLiveMediaPlaylistWindow('VID123', vlcWindowKey, mediaPlaylist(506, [
+        'v506', 'v507', 'v508', 'v509', 'v510', 'v511'
+    ]), {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(vlcReq),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(vlcReq),
+        minSegmentsWithLiveEdgeOffset: 5
+    });
+    const vlcExtendedSnapshot = hls.getPlaylistSnapshot(vlcExtended.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(vlcExtendedSnapshot.segmentCount, 7);
+    assert.equal(vlcExtendedSnapshot.mediaSequence, 505);
+    assert.equal(vlcExtendedSnapshot.lastSequence, 511);
+
+    const legacyVlcWindowKey = 'VID123_owner_session_720_legacyVlcWindow';
+    hls.extendLiveMediaPlaylistWindow('VID123', legacyVlcWindowKey, mediaPlaylist(600, [
+        's600', 's601', 's602', 's603', 's604', 's605'
+    ]), {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(legacyVlcReq),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(legacyVlcReq),
+        minSegmentsWithLiveEdgeOffset: hls.getHlsMinSegmentsWithLiveEdgeOffset(legacyVlcReq),
+        extendWindow: hls.shouldExtendLiveMediaPlaylistWindow(legacyVlcReq)
+    });
+    const legacyVlcExtended = hls.extendLiveMediaPlaylistWindow('VID123', legacyVlcWindowKey, mediaPlaylist(606, [
+        's606', 's607', 's608', 's609', 's610', 's611'
+    ]), {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(legacyVlcReq),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(legacyVlcReq),
+        minSegmentsWithLiveEdgeOffset: hls.getHlsMinSegmentsWithLiveEdgeOffset(legacyVlcReq),
+        extendWindow: hls.shouldExtendLiveMediaPlaylistWindow(legacyVlcReq)
+    });
+    const legacyVlcExtendedSnapshot = hls.getPlaylistSnapshot(legacyVlcExtended.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(legacyVlcExtendedSnapshot.segmentCount, 12);
+    assert.equal(legacyVlcExtendedSnapshot.mediaSequence, 600);
+    assert.equal(legacyVlcExtendedSnapshot.lastSequence, 611);
+
+    const exoWindowKey = 'VID123_owner_session_720_exoWindow';
+    hls.extendLiveMediaPlaylistWindow('VID123', exoWindowKey, mediaPlaylist(600, [
+        'e600', 'e601', 'e602', 'e603', 'e604', 'e605', 'e606', 'e607'
+    ]), {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(neoNewsReq, exoWarmSession, startupNow)
+    });
+    const exoExtended = hls.extendLiveMediaPlaylistWindow('VID123', exoWindowKey, mediaPlaylist(608, [
+        'e608', 'e609', 'e610', 'e611', 'e612', 'e613', 'e614', 'e615'
+    ]), {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(neoNewsReq, exoWarmSession, startupNow),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(neoNewsReq),
+        minSegmentsWithLiveEdgeOffset: hls.getHlsMinSegmentsWithLiveEdgeOffset(neoNewsReq)
+    });
+    const exoExtendedSnapshot = hls.getPlaylistSnapshot(exoExtended.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(exoExtendedSnapshot.segmentCount, 12);
+    assert.equal(exoExtendedSnapshot.mediaSequence, 602);
+    assert.equal(exoExtendedSnapshot.lastSequence, 613);
+    assert.ok(exoExtended.content.includes('e612.ts'));
+    assert.ok(exoExtended.content.includes('e613.ts'));
+    assert.ok(!exoExtended.content.includes('e614.ts'));
+    assert.ok(!exoExtended.content.includes('e615.ts'));
+    const exoStabilized = hls.stabilizeMediaPlaylist('VID123', `${exoWindowKey}_stable`, mediaPlaylist(700, [
+        'e700', 'e701', 'e702', 'e703', 'e704', 'e705', 'e706', 'e707'
+    ], { targetDuration: 6 }), null, {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(neoNewsReq, exoWarmSession, startupNow),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(neoNewsReq),
+        minSegmentsWithLiveEdgeOffset: hls.getHlsMinSegmentsWithLiveEdgeOffset(neoNewsReq),
+        relaxTargetDuration: hls.shouldRelaxLiveMediaPlaylistTiming(neoNewsReq),
+        startTimeOffsetSeconds: hls.getHlsStartTimeOffsetSeconds(neoNewsReq)
+    });
+    const exoStabilizedSnapshot = hls.getPlaylistSnapshot(exoStabilized.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(exoStabilizedSnapshot.targetDuration, 8);
+    assert.equal(exoStabilizedSnapshot.lastSequence, 705);
+    assert.ok(!exoStabilized.content.includes('#EXT-X-START:'));
+    assert.ok(exoStabilized.content.includes('e704.ts'));
+    assert.ok(exoStabilized.content.includes('e705.ts'));
+    assert.ok(!exoStabilized.content.includes('e706.ts'));
+    assert.ok(!exoStabilized.content.includes('e707.ts'));
+
+    const exoStartupStabilized = hls.stabilizeMediaPlaylist('VID123', `${exoWindowKey}_startup`, mediaPlaylist(720, [
+        'a720', 'a721', 'a722', 'a723', 'a724', 'a725', 'a726', 'a727'
+    ], { targetDuration: 6 }), null, {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(neoNewsReq, exoFreshSession, startupNow),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(neoNewsReq),
+        minSegmentsWithLiveEdgeOffset: hls.getHlsMinSegmentsWithLiveEdgeOffset(neoNewsReq),
+        relaxTargetDuration: hls.shouldRelaxLiveMediaPlaylistTiming(neoNewsReq),
+        startTimeOffsetSeconds: hls.getHlsStartTimeOffsetSeconds(neoNewsReq, exoFreshSession, startupNow)
+    });
+    assert.ok(exoStartupStabilized.content.includes('#EXT-X-START:TIME-OFFSET=-40.000,PRECISE=NO'));
+
+    const expansionSegments = Array.from({ length: 14 }, (_, index) => `x${1000 + index}`);
+    const expansionNextSegments = Array.from({ length: 7 }, (_, index) => `x${1008 + index}`);
+    const exoExpansionKey = 'VID123_owner_session_720_safe_expansion';
+    const exoStartupServed = hls.stabilizeMediaPlaylist('VID123', exoExpansionKey, mediaPlaylist(1000, expansionSegments), null, {
+        targetSegmentCount: 7,
+        liveEdgeOffsetSegments: 0
+    });
+    const exoStartupServedSnapshot = hls.getPlaylistSnapshot(exoStartupServed.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(exoStartupServedSnapshot.mediaSequence, 1007);
+    assert.equal(exoStartupServedSnapshot.lastSequence, 1013);
+    hls.logProxyAccess(exoExpansionKey, {
+        statusCode: 200,
+        fromCache: true,
+        elapsedMs: 1,
+        content: exoStartupServed.content,
+        stale: null,
+        monitorSeq: null
+    });
+    const exoExpandedServed = hls.stabilizeMediaPlaylist('VID123', exoExpansionKey, mediaPlaylist(1008, expansionNextSegments), null, {
+        targetSegmentCount: 14,
+        liveEdgeOffsetSegments: 0
+    });
+    const exoExpandedServedSnapshot = hls.getPlaylistSnapshot(exoExpandedServed.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(exoExpandedServed.stale, null);
+    assert.equal(exoExpandedServedSnapshot.mediaSequence, 1001);
+    assert.equal(exoExpandedServedSnapshot.lastSequence, 1014);
+    assert.equal(exoExpandedServedSnapshot.segmentCount, 14);
+    assert.equal(hls.isSafePlaylistWindowExpansion(exoStartupServedSnapshot, exoExpandedServedSnapshot), true);
+    assert.ok(exoExpandedServed.content.includes('x1014.ts'));
+
+    const unsafeRegressionKey = 'VID123_owner_session_720_unsafe_regression';
+    const unsafePrevious = hls.stabilizeMediaPlaylist('VID123', unsafeRegressionKey, mediaPlaylist(2000, Array.from({ length: 14 }, (_, index) => `r${2000 + index}`)), null, {
+        targetSegmentCount: 7,
+        liveEdgeOffsetSegments: 0
+    });
+    const unsafePreviousSnapshot = hls.getPlaylistSnapshot(unsafePrevious.content, 'https://upstream.example.test/720.m3u8');
+    hls.logProxyAccess(unsafeRegressionKey, {
+        statusCode: 200,
+        fromCache: true,
+        elapsedMs: 1,
+        content: unsafePrevious.content,
+        stale: null,
+        monitorSeq: null
+    });
+    const unsafeServed = hls.stabilizeMediaPlaylist('VID123', unsafeRegressionKey, mediaPlaylist(1990, Array.from({ length: 7 }, (_, index) => `r${1990 + index}`)), null, {
+        targetSegmentCount: 14,
+        liveEdgeOffsetSegments: 0
+    });
+    const unsafeServedSnapshot = hls.getPlaylistSnapshot(unsafeServed.content, 'https://upstream.example.test/720.m3u8');
+    assert.ok(unsafeServed.stale);
+    assert.equal(unsafeServedSnapshot.mediaSequence, unsafePreviousSnapshot.mediaSequence);
+    assert.equal(unsafeServedSnapshot.lastSequence, unsafePreviousSnapshot.lastSequence);
+    assert.equal(hls.isSafePlaylistWindowExpansion(unsafePreviousSnapshot, hls.getPlaylistSnapshot(mediaPlaylist(1990, Array.from({ length: 7 }, (_, index) => `r${1990 + index}`)), 'https://upstream.example.test/720.m3u8')), false);
+
+    const vlcStabilized = hls.stabilizeMediaPlaylist('VID123', `${vlcWindowKey}_stable`, mediaPlaylist(800, [
+        'v800', 'v801', 'v802', 'v803', 'v804', 'v805'
+    ], { targetDuration: 6 }), null, {
+        targetSegmentCount: hls.getHlsTargetWindowSegments(vlcReq),
+        liveEdgeOffsetSegments: hls.getHlsSteadyLiveEdgeOffsetSegments(vlcReq),
+        minSegmentsWithLiveEdgeOffset: hls.getHlsMinSegmentsWithLiveEdgeOffset(vlcReq),
+        relaxTargetDuration: hls.shouldRelaxLiveMediaPlaylistTiming(vlcReq),
+        startTimeOffsetSeconds: hls.getHlsStartTimeOffsetSeconds(vlcReq),
+        extendWindow: hls.shouldExtendLiveMediaPlaylistWindow(vlcReq)
+    });
+    const vlcStabilizedSnapshot = hls.getPlaylistSnapshot(vlcStabilized.content, 'https://upstream.example.test/720.m3u8');
+    assert.equal(vlcStabilizedSnapshot.targetDuration, 8);
+    assert.equal(vlcStabilizedSnapshot.segments.length, 6);
+    assert.equal(vlcStabilized.extended.extended, false);
+    assert.ok(!vlcStabilized.content.includes('#EXT-X-START:'));
+
     const single720 = hls.buildPlaybackSessionMaster(monitor, {
         token: 'token-a',
         videoId: 'VID123',
@@ -1144,6 +1635,18 @@ function testHlsContinuityExecutableChecks() {
     });
     assert.equal(countVariants(single480), 1);
     assert.ok(single480.includes('max=480'));
+    const vlcSingle720 = hls.buildPlaybackSessionMaster(monitor, {
+        token: 'token-a',
+        videoId: 'VID123',
+        owner: 'owner-a',
+        sessionId: 'session-vlc',
+        requestedMaxHeight: null,
+        fallbackMaxHeight: 720,
+        baseUrl: 'https://livemonitor.example.test',
+        singleVariant: hls.shouldUseSingleVariantMaster(vlcReq)
+    });
+    assert.equal(countVariants(vlcSingle720), 1);
+    assert.ok(vlcSingle720.includes('max=720'));
     const adaptive = hls.buildPlaybackSessionMaster(monitor, {
         token: 'token-a',
         videoId: 'VID123',
@@ -1187,6 +1690,7 @@ function testAppIntegrationStaticChecks() {
     assert.ok(storeSource.includes("code: code || (reusable.expired ? 'reused_expired' : 'reused_stale')"));
     assert.ok(app.includes('function getPlaybackSessionTokenScope(token)'));
     assert.ok(app.includes('tokenScope: playbackSessionTokenScope'));
+    assert.ok(!/\bqueryOwne\b/.test(app));
     assert.ok(app.includes("'Cache-Control': 'private, no-store'"));
     assert.ok(app.includes("'Vary': 'User-Agent'"));
     assert.ok(app.includes('playbackSessions.countActive({ owner, videoId })'));
@@ -1213,18 +1717,48 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('baseUrl: playbackManifestBaseUrl'));
     assert.ok(app.includes('PLAYBACK_VARIANT_PIN_TTL_MS'));
     assert.ok(app.includes('HLS_EXTENDED_WINDOW_SEGMENTS'));
+    assert.ok(app.includes('HLS_VLC_START_TIME_OFFSET_SECONDS'));
     assert.ok(app.includes("Math.min(2, parseNonNegativeIntegerEnv('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS', 2))"));
     assert.ok(app.includes('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS'));
     assert.ok(app.includes('HLS_VLC_STARTUP_WINDOW_MS'));
     assert.ok(app.includes('HLS_VLC_STARTUP_MIN_SEGMENTS'));
-    assert.ok(app.includes('minSegmentsWithLiveEdgeOffset: liveEdgeOffsetSegments ? HLS_VLC_STARTUP_MIN_SEGMENTS : 3'));
+    assert.ok(app.includes('VLC_HLS_PERMANENT_LIVE_EDGE_OFFSET_SEGMENTS'));
+    assert.ok(app.includes('HLS_VLC_STABLE_WINDOW_SEGMENTS'));
+    assert.ok(app.includes('HLS_VLC_MEDIA_PLAYLIST_STABILIZATION'));
+    assert.ok(app.includes('HLS_EXOMEDIA_STEADY_LIVE_EDGE_OFFSET_SEGMENTS'));
+    assert.ok(app.includes('HLS_EXOMEDIA_STABLE_WINDOW_SEGMENTS'));
+    assert.ok(app.includes('HLS_EXOMEDIA_STARTUP_WINDOW_MS'));
+    assert.ok(app.includes('HLS_EXOMEDIA_STARTUP_WINDOW_SEGMENTS'));
+    assert.ok(app.includes('HLS_EXOMEDIA_MIN_SEGMENTS_WITH_LIVE_EDGE_OFFSET'));
+    assert.ok(app.includes('HLS_EXOMEDIA_START_TIME_OFFSET_SECONDS'));
+    assert.ok(app.includes('function getHlsSteadyLiveEdgeOffsetSegments(req)'));
+    assert.ok(app.includes('function getHlsTargetWindowSegments(req, session = null'));
+    assert.ok(app.includes('function getHlsStabilityKeySuffix(req)'));
+    assert.ok(app.includes('function shouldStabilizeVlcMediaPlaylist(req)'));
+    assert.ok(app.includes("if (!shouldStabilizeVlcMediaPlaylist(req)) return '_vlcRaw';"));
+    assert.ok(app.includes("return permanentOffset ? `_vlcWindow_o${permanentOffset}` : '_vlcWindow';"));
+    assert.ok(app.includes("if (isExoCompatibleUserAgent(req)) return '_exoWindow';"));
+    assert.ok(app.includes('function getHlsMinSegmentsWithLiveEdgeOffset(req)'));
+    assert.ok(app.includes('function getHlsSteadyLiveEdgeOffsetReason(req, segments)'));
+    assert.ok(app.includes('function getHlsStartTimeOffsetSeconds(req, session = null'));
+    assert.ok(app.includes('function shouldRelaxLiveMediaPlaylistTiming(req)'));
+    assert.ok(app.includes('function shouldExtendLiveMediaPlaylistWindow(req)'));
+    assert.ok(app.includes('function applyHlsStartTimeOffset(content, offsetSeconds)'));
+    assert.ok(app.includes('targetSegmentCount: shortWindow.extended ? shortWindow.segmentCount : targetWindowSegments'));
+    assert.ok(app.includes('minSegmentsWithLiveEdgeOffset: effectiveLiveEdgeOffsetSegments ? getHlsMinSegmentsWithLiveEdgeOffset(req) : 3'));
+    assert.ok(app.includes('relaxTargetDuration: shouldRelaxLiveMediaPlaylistTiming(req)'));
+    assert.ok(app.includes('startTimeOffsetSeconds: getHlsStartTimeOffsetSeconds(req, activePlaybackSession)'));
+    assert.ok(app.includes('extendWindow: shouldExtendLiveMediaPlaylistWindow(req)'));
     assert.ok(app.includes('HLS_SESSION_UPSTREAM_STUCK_MS'));
     assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_MASTER'));
     assert.ok(app.includes('HLS_EXOMEDIA_SINGLE_VARIANT_HEIGHT'));
+    assert.ok(app.includes('HLS_VLC_SINGLE_VARIANT_MASTER'));
+    assert.ok(app.includes('HLS_VLC_SINGLE_VARIANT_MASTER && isVlcCompatibleUserAgent(req)'));
     assert.ok(app.includes('hlsMediaPlaylistHistory'));
     assert.ok(app.includes('hlsSessionVariantState'));
     assert.ok(app.includes('function getPlaylistSnapshot(content, sourceUrl)'));
     assert.ok(app.includes('function playlistsHaveOverlap(previousSnapshot, nextSnapshot)'));
+    assert.ok(app.includes('function isSafePlaylistWindowExpansion(previousSnapshot, nextSnapshot)'));
     assert.ok(app.includes('function updateSessionVariantState(stateKey'));
     assert.ok(app.includes('function isExoCompatibleUserAgent(req)'));
     assert.ok(app.includes('function isVlcCompatibleUserAgent(req)'));
@@ -1234,6 +1768,12 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe, options)'));
     assert.ok(app.includes('Sem stale seguro; servindo playlist real sem forçar MEDIA-SEQUENCE.'));
     assert.ok(app.includes('const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 2000;'));
+    assert.ok(app.includes('async function fetchM3u8WithCache(videoId, url)'));
+    assert.ok(app.includes('resolveEffectivePlaylistTtl(cacheKey, M3U8_CACHE_TTL, body)'));
+    assert.ok(app.includes('effectiveTtl'));
+    assert.ok(app.includes('[HLS-CACHE] dynamic-ttl-auto'));
+    assert.ok(app.includes('fetchM3u8WithCache(variantCacheKey, sourceUrl)'));
+    assert.ok(app.includes('fetchM3u8WithCache(videoId, monitor.m3u8Url)'));
     assert.ok(app.includes('const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 0;'));
     assert.ok(app.includes('if (!PLAYBACK_VARIANT_PIN_TTL_MS) return currentUrl;'));
     assert.ok(app.includes('getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId, trackingOwner, routeContext.token || null)'));
@@ -1241,10 +1781,13 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('markSessionVariantRefreshRejected(pinKey)'));
     assert.ok(app.includes('clearHlsSessionVariantStateFor({ owner, videoId })'));
     assert.ok(app.includes('getPinnedVariantUrl(pinKey, playlistUrl)'));
-    assert.ok(app.includes('const liveEdgeOffsetSegments = getHlsStartupLiveEdgeOffsetSegments(req, activePlaybackSession);'));
-    assert.ok(app.includes('const startupOffsetKeySuffix = liveEdgeOffsetSegments ? `_startupOffset${liveEdgeOffsetSegments}` : \'\';'));
-    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence, {'));
+    assert.ok(app.includes('const liveEdgeOffsetSegments = getHlsEffectiveLiveEdgeOffsetSegments(req, activePlaybackSession);'));
+    assert.ok(app.includes('const liveEdgeOffsetReason = getHlsLiveEdgeOffsetReason(req, activePlaybackSession, liveEdgeOffsetSegments);'));
+    assert.ok(app.includes('const stabilityKey = `${pinKey || cacheKey}${getHlsStabilityKeySuffix(req)}`;'));
+    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, shortWindow.content, monitor.lastMediaSequence, {'));
     assert.ok(app.includes('startup_offset_'));
+    assert.ok(app.includes('vlc_live_edge_offset_'));
+    assert.ok(app.includes('exo_edge_offset_'));
     assert.ok(app.includes('logProxyAccess(stabilityKey, {'));
     assert.ok(app.includes("source: 'refresh-rejected'"));
     assert.ok(app.includes("reason: 'no_overlap'"));
@@ -1259,13 +1802,22 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(!variantBlock.includes('fs.writeFileSync'));
     assert.ok(app.includes("return sendHlsError(res, 503, 'stream_temporarily_unavailable'"));
     assert.ok(app.includes("return sendHlsError(res, 410, 'token_gone')"));
+    assert.ok(app.includes('function getMonitorPlaybackTerminalReason(monitor)'));
+    assert.ok(app.includes('function cleanupTerminalLivePlayback(videoId, owner, token = null, reason = \'live_ended\')'));
+    assert.ok(app.includes('const terminalPlaybackReason = getMonitorPlaybackTerminalReason(monitor);'));
+    assert.ok(app.includes("return sendHlsError(res, 410, terminalPlaybackReason);"));
+    assert.ok(app.includes('isMonitorAcceptingPlayback(converter.activeMonitors.get(`${session.videoId}:${owner}`))'));
+    assert.ok(app.includes('playbackSessions.removeForLive(owner, videoId)'));
     assert.ok(app.includes('isRevokedTokenInfo(info)'));
     assert.ok(app.includes('function shouldProxyHlsSegments(req)'));
     assert.ok(app.includes('HLS_SEGMENT_PROXY_MODE'));
+    assert.ok(app.includes('HLS_EXOMEDIA_SEGMENT_PROXY'));
+    assert.ok(app.includes('HLS_EXOMEDIA_SEGMENT_PROXY && isExoCompatibleUserAgent(req)'));
     assert.ok(app.includes("params.set('segmentProxy', '1')"));
     assert.ok(app.includes('rewriteHlsSegmentUrls(content'));
     assert.ok(app.includes("app.get('/neonews/seg/:segmentId.ts', handleHlsSegmentProxy)"));
     assert.ok(app.includes('createHmac'));
+    assert.ok(app.includes('[301, 302, 303, 307, 308].includes(statusCode)'));
     assert.ok(app.includes('segment_unavailable'));
     assert.ok(app.includes('function sendHlsError(res, statusCode, message'));
     assert.ok(app.includes("'Cache-Control': 'private, no-store, no-cache'"));
@@ -1290,11 +1842,17 @@ async function main() {
     testRecentIdenticalClientReusesSession();
     testRecentIdenticalClientWithoutFingerprintDoesNotReuseSession();
     testLimitOneFastNeoNewsReopenReusesSession();
+    testLimitOneImmediateNeoNewsReopenAfterHlsActivityReusesSession();
     testLimitOneFastNeoNewsReopenWithoutVariantEvidenceIsBlocked();
     testFastNeoNewsOpeningWithoutVariantEvidenceCreatesWhenLimitAllows();
+    testMasterOnlyNeoNewsReopenAfterPrepareTimeoutReusesSession();
+    testMasterOnlyNeoNewsReopenTooSoonDoesNotReuseSession();
+    testLimitOneMasterOnlyNeoNewsReopenAfterTimeoutReusesSession();
     testLimitOneSimultaneousIdenticalNeoNewsOpeningIsBlocked();
     testGenericUserAgentDoesNotUseReopenReuse();
+    testLegacyVlcAbandonedReopenFreesSingleDeviceSlot();
     testReopenAfterWindowIsSubjectToLimit();
+    testReopenAfterWindowWithAbandonedSessionFreesSlot();
     testReopenAfterWindowCreatesWhenLimitAllows();
     testReopenReuseIsScopedByTokenOwnerAndVideo();
     testExpiredSessionIsNotReusedByReopenWindow();
