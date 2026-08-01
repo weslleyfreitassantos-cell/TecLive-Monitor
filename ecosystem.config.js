@@ -9,7 +9,12 @@
       NODE_ENV: 'production',
       PORT: 3002,
       BIND_HOST: '127.0.0.1',
-      TRUST_PROXY: 'loopback'
+      TRUST_PROXY: 'loopback',
+      PLAYBACK_DYNAMIC_LIVE_PLAYLIST_TTL: 'true',
+      PLAYBACK_LIVE_TTL_FACTOR: '0.5',
+      PLAYBACK_LIVE_TTL_MIN_MS: '500',
+      PLAYBACK_LIVE_TTL_MAX_MS: '3000',
+      PLAYBACK_STUCK_SESSION_FIX: 'false'
     },
     error_file: './logs/pm2-error.log',
     out_file: './logs/pm2-out.log',

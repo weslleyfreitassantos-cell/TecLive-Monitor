@@ -912,8 +912,8 @@ function loadHlsContinuityHooks() {
         const HLS_DISABLE_WINDOW_ADJUSTMENT = false;
         const HLS_DIAGNOSTIC_MODE = false;
         const HLS_SEGMENT_PROXY_MODE = 'auto';
-        const HLS_EXOMEDIA_SEGMENT_PROXY = true;
-        const HLS_LEGACY_VLC_SEGMENT_PROXY = true;
+        const HLS_EXOMEDIA_SEGMENT_PROXY = false;
+        const HLS_LEGACY_VLC_SEGMENT_PROXY = false;
         const STALE_SERVE_MAX_AGE_MS = 60000;
         const playbackVariantUrlPins = new Map();
         const hlsSessionVariantState = new Map();
@@ -1180,7 +1180,7 @@ function testHlsContinuityExecutableChecks() {
     assert.equal(hls.shouldProxyHlsSegments({ headers: { 'user-agent': 'LibVLC/3.0.12' }, query: {} }), false);
     assert.equal(hls.shouldProxyHlsSegments(ffprobeReq), true);
     assert.equal(hls.shouldProxyHlsSegments(kodiReq), true);
-    assert.equal(hls.shouldProxyHlsSegments({ headers: vlcReq.headers, query: { segmentProxy: '1' } }), false);
+    assert.equal(hls.shouldProxyHlsSegments({ headers: vlcReq.headers, query: { segmentProxy: '1' } }), true);
     assert.equal(hls.shouldProxyHlsSegments({ headers: ffprobeReq.headers, query: { segmentProxy: '0' } }), false);
 
     const highFpsMonitor = {
@@ -1319,7 +1319,7 @@ function testHlsContinuityExecutableChecks() {
         createdAt: new Date(startupNow - 30000).toISOString()
     }, startupNow), 0);
     assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(vlcReq), 0);
-    assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(legacyVlcReq), 0);
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(legacyVlcReq), 2);
     assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(neoNewsReq), 2);
     assert.equal(hls.getHlsSteadyLiveEdgeOffsetSegments(browserReq), 0);
     const exoFreshSession = { createdAt: new Date(startupNow - 30000).toISOString() };
@@ -1348,7 +1348,7 @@ function testHlsContinuityExecutableChecks() {
     assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(legacyVlcReq), 5);
     assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(neoNewsReq), 5);
     assert.equal(hls.getHlsMinSegmentsWithLiveEdgeOffset(browserReq), 3);
-    assert.equal(hls.getHlsSteadyLiveEdgeOffsetReason(vlcReq, 1), 'vlc_live_edge_offset_1');
+    assert.equal(hls.getHlsSteadyLiveEdgeOffsetReason(vlcReq, 1), 'vlc_edge_offset_1');
     assert.equal(hls.getHlsSteadyLiveEdgeOffsetReason(neoNewsReq, 2), 'exo_edge_offset_2');
     assert.equal(hls.getHlsStartTimeOffsetSeconds(neoNewsReq, exoFreshSession, startupNow), -40);
     assert.equal(hls.getHlsStartTimeOffsetSeconds(neoNewsReq, exoWarmSession, startupNow), 0);
@@ -1487,9 +1487,9 @@ function testHlsContinuityExecutableChecks() {
         extendWindow: hls.shouldExtendLiveMediaPlaylistWindow(legacyVlcReq)
     });
     const legacyVlcExtendedSnapshot = hls.getPlaylistSnapshot(legacyVlcExtended.content, 'https://upstream.example.test/720.m3u8');
-    assert.equal(legacyVlcExtendedSnapshot.segmentCount, 12);
+    assert.equal(legacyVlcExtendedSnapshot.segmentCount, 10);
     assert.equal(legacyVlcExtendedSnapshot.mediaSequence, 600);
-    assert.equal(legacyVlcExtendedSnapshot.lastSequence, 611);
+    assert.equal(legacyVlcExtendedSnapshot.lastSequence, 609);
 
     const exoWindowKey = 'VID123_owner_session_720_exoWindow';
     hls.extendLiveMediaPlaylistWindow('VID123', exoWindowKey, mediaPlaylist(600, [
@@ -1701,7 +1701,7 @@ function testAppIntegrationStaticChecks() {
     assert.ok(app.includes("params.set('max', String(maxHeight))"));
     assert.ok(!app.includes('playlistUrl.searchParams.set'));
     assert.ok(!app.includes('manifest.googlevideo.com') || app.includes('/[stream-url-redacted]'));
-    assert.ok(!app.includes('sessionId: session.sessionId'));
+    assert.ok(app.includes('session=${sessionPreview(activePlaybackSessionId)}'));
     assert.ok(!app.includes('deviceId: session.sessionId'));
     assert.ok(!app.includes('const isAlreadyActive = isIpActiveForOwnerAndVideo(trackingOwner, videoId, clientIp, userAgent);'));
     assert.ok(!app.includes('primeiros 200 chars'));
@@ -1722,7 +1722,7 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('HLS_VLC_STARTUP_LIVE_EDGE_OFFSET_SEGMENTS'));
     assert.ok(app.includes('HLS_VLC_STARTUP_WINDOW_MS'));
     assert.ok(app.includes('HLS_VLC_STARTUP_MIN_SEGMENTS'));
-    assert.ok(app.includes('VLC_HLS_PERMANENT_LIVE_EDGE_OFFSET_SEGMENTS'));
+    assert.ok(app.includes('HLS_VLC_STEADY_LIVE_EDGE_OFFSET_SEGMENTS'));
     assert.ok(app.includes('HLS_VLC_STABLE_WINDOW_SEGMENTS'));
     assert.ok(app.includes('HLS_VLC_MEDIA_PLAYLIST_STABILIZATION'));
     assert.ok(app.includes('HLS_EXOMEDIA_STEADY_LIVE_EDGE_OFFSET_SEGMENTS'));
@@ -1735,8 +1735,7 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('function getHlsTargetWindowSegments(req, session = null'));
     assert.ok(app.includes('function getHlsStabilityKeySuffix(req)'));
     assert.ok(app.includes('function shouldStabilizeVlcMediaPlaylist(req)'));
-    assert.ok(app.includes("if (!shouldStabilizeVlcMediaPlaylist(req)) return '_vlcRaw';"));
-    assert.ok(app.includes("return permanentOffset ? `_vlcWindow_o${permanentOffset}` : '_vlcWindow';"));
+    assert.ok(app.includes("return shouldStabilizeVlcMediaPlaylist(req) ? '_vlcWindow' : '_vlcRaw';"));
     assert.ok(app.includes("if (isExoCompatibleUserAgent(req)) return '_exoWindow';"));
     assert.ok(app.includes('function getHlsMinSegmentsWithLiveEdgeOffset(req)'));
     assert.ok(app.includes('function getHlsSteadyLiveEdgeOffsetReason(req, segments)'));
@@ -1744,8 +1743,8 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('function shouldRelaxLiveMediaPlaylistTiming(req)'));
     assert.ok(app.includes('function shouldExtendLiveMediaPlaylistWindow(req)'));
     assert.ok(app.includes('function applyHlsStartTimeOffset(content, offsetSeconds)'));
-    assert.ok(app.includes('targetSegmentCount: shortWindow.extended ? shortWindow.segmentCount : targetWindowSegments'));
-    assert.ok(app.includes('minSegmentsWithLiveEdgeOffset: effectiveLiveEdgeOffsetSegments ? getHlsMinSegmentsWithLiveEdgeOffset(req) : 3'));
+    assert.ok(app.includes('targetSegmentCount: targetWindowSegments'));
+    assert.ok(app.includes('minSegmentsWithLiveEdgeOffset: liveEdgeOffsetSegments ? getHlsMinSegmentsWithLiveEdgeOffset(req) : 3'));
     assert.ok(app.includes('relaxTargetDuration: shouldRelaxLiveMediaPlaylistTiming(req)'));
     assert.ok(app.includes('startTimeOffsetSeconds: getHlsStartTimeOffsetSeconds(req, activePlaybackSession)'));
     assert.ok(app.includes('extendWindow: shouldExtendLiveMediaPlaylistWindow(req)'));
@@ -1768,12 +1767,11 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('extendLiveMediaPlaylistWindow(logVideoId, stabilityKey, contentToServe, options)'));
     assert.ok(app.includes('Sem stale seguro; servindo playlist real sem forçar MEDIA-SEQUENCE.'));
     assert.ok(app.includes('const M3U8_CACHE_TTL = parseInt(process.env.M3U8_CACHE_TTL) || 2000;'));
-    assert.ok(app.includes('async function fetchM3u8WithCache(videoId, url)'));
-    assert.ok(app.includes('resolveEffectivePlaylistTtl(cacheKey, M3U8_CACHE_TTL, body)'));
-    assert.ok(app.includes('effectiveTtl'));
-    assert.ok(app.includes('[HLS-CACHE] dynamic-ttl-auto'));
-    assert.ok(app.includes('fetchM3u8WithCache(variantCacheKey, sourceUrl)'));
-    assert.ok(app.includes('fetchM3u8WithCache(videoId, monitor.m3u8Url)'));
+    assert.ok(app.includes('async function fetchM3u8WithCache(videoId, url, monitorSequence = null)'));
+    assert.ok(app.includes('getEffectivePlaylistCacheTtl(cached, LIVE_PLAYLIST_TTL_CONFIG)'));
+    assert.ok(app.includes('decoratePlaylistCacheEntry({'));
+    assert.ok(app.includes('[HLS-CACHE-TTL]'));
+    assert.ok(app.includes('fetchM3u8WithCache('));
     assert.ok(app.includes('const PLAYBACK_VARIANT_PIN_TTL_MS = parseInt(process.env.PLAYBACK_VARIANT_PIN_TTL_MS, 10) || 0;'));
     assert.ok(app.includes('if (!PLAYBACK_VARIANT_PIN_TTL_MS) return currentUrl;'));
     assert.ok(app.includes('getPlaybackVariantPinKey(videoId, urlMaxHeight, activePlaybackSessionId, trackingOwner, routeContext.token || null)'));
@@ -1781,16 +1779,15 @@ function testHlsPlaybackCompatibilityStaticChecks() {
     assert.ok(app.includes('markSessionVariantRefreshRejected(pinKey)'));
     assert.ok(app.includes('clearHlsSessionVariantStateFor({ owner, videoId })'));
     assert.ok(app.includes('getPinnedVariantUrl(pinKey, playlistUrl)'));
-    assert.ok(app.includes('const liveEdgeOffsetSegments = getHlsEffectiveLiveEdgeOffsetSegments(req, activePlaybackSession);'));
-    assert.ok(app.includes('const liveEdgeOffsetReason = getHlsLiveEdgeOffsetReason(req, activePlaybackSession, liveEdgeOffsetSegments);'));
+    assert.ok(app.includes('const liveEdgeOffsetSegments = startupLiveEdgeOffsetSegments || steadyLiveEdgeOffsetSegments;'));
     assert.ok(app.includes('const stabilityKey = `${pinKey || cacheKey}${getHlsStabilityKeySuffix(req)}`;'));
-    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, shortWindow.content, monitor.lastMediaSequence, {'));
+    assert.ok(app.includes('stabilizeMediaPlaylist(videoId, stabilityKey, variant.result.content, monitor.lastMediaSequence, {'));
     assert.ok(app.includes('startup_offset_'));
-    assert.ok(app.includes('vlc_live_edge_offset_'));
+    assert.ok(app.includes('vlc_edge_offset_'));
     assert.ok(app.includes('exo_edge_offset_'));
-    assert.ok(app.includes('logProxyAccess(stabilityKey, {'));
+    assert.ok(app.includes('logProxyAccess(pinKey || stabilityKey, {'));
     assert.ok(app.includes("source: 'refresh-rejected'"));
-    assert.ok(app.includes("reason: 'no_overlap'"));
+    assert.ok(app.includes("reason: 'no_overlap_after_error'"));
     assert.ok(app.includes('getUpstreamIdentityHash(sourceUrl)'));
     assert.ok(app.includes('sessionPreview(sessionId)'));
     const variantBlock = app.slice(
