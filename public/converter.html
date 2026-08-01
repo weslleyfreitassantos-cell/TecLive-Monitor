@@ -422,7 +422,8 @@
             const data = await resp.json();
             if (data.remaining !== undefined) {
                 deviceRemaining = data.remaining;
-                userDevices.textContent = deviceRemaining;
+                const deviceLimit = Number.isFinite(Number(data.limit)) ? Number(data.limit) : 0;
+                userDevices.textContent = `${deviceRemaining}/${deviceLimit}`;
                 activeIPs = data.ips || [];
                 console.log('Dispositivos restantes:', deviceRemaining, 'IPs:', activeIPs);
                 renderizarDispositivos(activeIPs);
@@ -573,7 +574,9 @@
     // ============================================================
     function atualizarLivesRestantes() {
         const restantes = calcularLivesRestantes();
-        userLives.textContent = restantes;
+        const cliente = getClientes().find(c => c.login === currentUser);
+        const limite = Number.isFinite(Number(cliente?.lives)) ? Number(cliente.lives) : 0;
+        userLives.textContent = `${restantes}/${limite}`;
         generateBtn.disabled = restantes <= 0;
     }
 
